@@ -1,0 +1,176 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on https://github.com/intel-analytics/BigDL/blob/v2.4.0/python/nano/dev/release.sh
+# and the "Run Nano-init test" step of
+# https://github.com/intel-analytics/BigDL/blob/v2.4.0/.github/workflows/nano_unit_tests_basic.yml
+name: Build bigdl-nano wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bigdl-nano.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bigdl-nano.yml'
+      - 'docs/packages/bigdl-nano.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bigdl-nano.yml'
+      - 'docs/packages/bigdl-nano.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # python/nano/setup.py bundles prebuilt x86_64 builds of these releases (lib_urls);
+  # they are built from source here instead.
+  JEMALLOC_VERSION: '5.3.0'
+  GPERFTOOLS_VERSION: '2.10'
+  LIBJPEG_TURBO_VERSION: '3.0.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bigdl-nano
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build bigdl-nano ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      BIGDL_NANO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout BigDL v${{ env.BIGDL_NANO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: intel-analytics/BigDL
+          ref: v${{ env.BIGDL_NANO_VERSION }}
+          sparse-checkout: python/nano
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build jemalloc, tcmalloc and libturbojpeg, then the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e JEMALLOC_VERSION -e GPERFTOOLS_VERSION -e LIBJPEG_TURBO_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf install -y -q bzip2
+            mkdir -p /tmp/src
+            curl -fsSL "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" | tar xj -C /tmp/src
+            curl -fsSL "https://github.com/gperftools/gperftools/releases/download/gperftools-${GPERFTOOLS_VERSION}/gperftools-${GPERFTOOLS_VERSION}.tar.gz" | tar xz -C /tmp/src
+            curl -fsSL "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEG_TURBO_VERSION}/libjpeg-turbo-${LIBJPEG_TURBO_VERSION}.tar.gz" | tar xz -C /tmp/src
+            jemalloc=/tmp/src/jemalloc-${JEMALLOC_VERSION}
+            gperftools=/tmp/src/gperftools-${GPERFTOOLS_VERSION}
+            libjpeg_turbo=/tmp/src/libjpeg-turbo-${LIBJPEG_TURBO_VERSION}
+            (cd "$jemalloc" && ./configure && make -j"$(nproc)" build_lib_shared)
+            (cd "$gperftools" && ./configure && make -j"$(nproc)" libtcmalloc.la)
+            cmake -S "$libjpeg_turbo" -B /tmp/src/libjpeg-turbo-build -DCMAKE_BUILD_TYPE=Release -DENABLE_STATIC=OFF -DWITH_JAVA=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            cmake --build /tmp/src/libjpeg-turbo-build -j"$(nproc)" --target turbojpeg
+            libs=python/nano/src/bigdl/nano/libs
+            mkdir -p "$libs"
+            install -m755 -T "$jemalloc/lib/libjemalloc.so.2" "$libs/libjemalloc.so"
+            install -m755 -T "$(readlink -f "$gperftools/.libs/libtcmalloc.so")" "$libs/libtcmalloc.so"
+            install -m755 -T "$(readlink -f /tmp/src/libjpeg-turbo-build/libturbojpeg.so)" "$libs/libturbojpeg.so.0.2.0"
+            cp LICENSE python/nano/LICENSE
+            cp "$jemalloc/COPYING" python/nano/LICENSE.jemalloc
+            cp "$gperftools/COPYING" python/nano/LICENSE.gperftools
+            cp "$libjpeg_turbo/LICENSE.md" python/nano/LICENSE.libjpeg-turbo.md
+            cp "$libjpeg_turbo/README.ijg" python/nano/LICENSE.libjpeg-turbo-ijg
+            cd python/nano
+            pybin=/opt/python/cp311-cp311/bin
+            "$pybin/pip" install -q -U setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --plat-name manylinux_2_39_riscv64 --python-tag py3
+          '
+
+      # bigdl-nano 2.4.0 cannot be imported on Python 3.12+ on any arch: it pins
+      # setuptools<66, whose pkg_resources needs the removed pkgutil.ImpImporter.
+      - name: Test the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /tmp "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -exo pipefail
+            dnf install -y -q util-linux
+            /opt/python/cp311-cp311/bin/python3 -m venv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install -q --extra-index-url https://pypi.riseproject.dev/simple/ --only-binary numpy /work/python/nano/dist/*.whl numpy
+            python - <<PYEOF
+          import ctypes, os, bigdl
+          lib = ctypes.CDLL(os.path.join(os.path.dirname(bigdl.__file__), "nano", "libs", "libturbojpeg.so.0.2.0"))
+          lib.tjInitCompress.restype = lib.tjInitDecompress.restype = ctypes.c_void_p
+          w, h = 32, 16
+          src = bytes(range(256)) * (w * h * 3 // 256)
+          buf, size = ctypes.c_void_p(), ctypes.c_ulong()
+          c = lib.tjInitCompress()
+          assert lib.tjCompress2(ctypes.c_void_p(c), src, w, 0, h, 0, ctypes.byref(buf), ctypes.byref(size), 0, 90, 0) == 0
+          d = lib.tjInitDecompress()
+          dw, dh, ss, cs = (ctypes.c_int() for _ in range(4))
+          assert lib.tjDecompressHeader3(ctypes.c_void_p(d), buf, size, *(ctypes.byref(x) for x in (dw, dh, ss, cs))) == 0
+          assert (dw.value, dh.value) == (w, h), (dw.value, dh.value)
+          print("turbojpeg round-trip OK:", size.value, "bytes")
+          PYEOF
+            source bigdl-nano-init || exit 1
+            [ -n "$LD_PRELOAD" ]
+            python -c "import bigdl.nano; assert \"/bigdl/nano/libs/libjemalloc.so\" in open(\"/proc/self/maps\").read()"
+            source bigdl-nano-unset-env || exit 1
+            [ -z "$LD_PRELOAD" ]
+            source bigdl-nano-init -t || exit 1
+            python -c "import bigdl.nano; assert \"/bigdl/nano/libs/libtcmalloc.so\" in open(\"/proc/self/maps\").read()"
+          '
+
+      - name: Check the bundled libraries and licences made it into the wheel
+        run: |
+          python3 - python/nano/dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for lib in ("libjemalloc.so", "libtcmalloc.so", "libturbojpeg.so.0.2.0"):
+              assert f"bigdl/nano/libs/{lib}" in names, lib
+          lic = sorted(n.split(".dist-info/licenses/", 1)[1] for n in names
+                       if ".dist-info/licenses/" in n and not n.endswith("/"))
+          assert lic == ["LICENSE", "LICENSE.gperftools", "LICENSE.jemalloc",
+                         "LICENSE.libjpeg-turbo-ijg", "LICENSE.libjpeg-turbo.md"], lic
+          print("OK:", sys.argv[1], lic)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bigdl-nano-${{ env.BIGDL_NANO_VERSION }}-py3-none-manylinux_riscv64
+          path: python/nano/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish bigdl-nano ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: bigdl-nano-${{ matrix.version }}-*-manylinux_riscv64
