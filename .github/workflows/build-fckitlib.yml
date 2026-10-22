@@ -196,16 +196,18 @@ jobs:
               # end-user system; point it at a sibling eckitlib package instead.
               patchelf --set-rpath "\$ORIGIN:\$ORIGIN/../../eckitlib/lib64" /tmp/install/fckitlib/lib64/libfckit.so
 
-              GFORTRAN_PKG=$(rpm -qf "$GFORTRAN_LIB" --qf "%{NAME}\n")
               QUADMATH_PKG=""
               if [ -n "$QUADMATH_LIB" ]; then
                 QUADMATH_PKG=$(rpm -qf "$QUADMATH_LIB" --qf "%{NAME}\n")
               fi
-              for pkg in $GFORTRAN_PKG $QUADMATH_PKG; do
-                licence_file=$(rpm -ql "$pkg" | grep "^/usr/share/licenses/" | head -1)
-                if [ -n "$licence_file" ]; then
-                  cp "$(dirname "$licence_file")"/* /tmp/licenses/
-                fi
+              # gotcha 491: libgfortran ships no %license file; its GCC runtime licence
+              # texts live in the sibling libgcc subpackage of the same gcc source RPM.
+              for pkg in libgcc $QUADMATH_PKG; do
+                for licence_file in $(rpm -qL "$pkg"); do
+                  if [ -f "$licence_file" ]; then
+                    cp "$licence_file" /tmp/licenses/
+                  fi
+                done
               done
 
               cp LICENSE /tmp/licenses/fckit.txt
@@ -228,6 +230,7 @@ jobs:
               assert any(n.endswith(f"lib64/{lib}") for n in names), (lib, names)
           assert any(n.endswith("bin/fckit") for n in names), names
           assert any(n.endswith(".dist-info/licenses/fckit.txt") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/COPYING.RUNTIME") for n in names), names
           EOF
 
       - name: Smoke-test the built library
