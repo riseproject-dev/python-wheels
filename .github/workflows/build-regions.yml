@@ -48,7 +48,10 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build regions ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+        # 0.13 raised requires-python to >=3.12 and dropped py-limited-api, so every
+        # interpreter gets its own wheel; pyproject.toml skips the free-threaded builds.
+        python: ["cp312", "cp313", "cp314"]
+    name: Build regions ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
 
@@ -67,13 +70,9 @@ jobs:
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # pyproject.toml pins py-limited-api = cp311: one abi3 wheel built on cp311
-          # and re-tested on the newer interpreters via find_compatible_wheel.
-          CIBW_BUILD: >-
-            cp311-manylinux_riscv64 cp312-manylinux_riscv64
-            cp313-manylinux_riscv64 cp314-manylinux_riscv64
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy
@@ -87,14 +86,13 @@ jobs:
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
+          import pathlib
           path = sys.argv[1]
-          assert "-cp311-abi3-" in path, path
           names = zipfile.ZipFile(path).namelist()
-          exts = {n.rsplit("/", 1)[1] for n in names if n.endswith(".so")}
-          assert exts == {"compiler_version.abi3.so", "core.abi3.so",
-                          "circle_overlap.abi3.so", "ellipse_overlap.abi3.so",
-                          "polygon_contains.abi3.so", "polygon_overlap.abi3.so",
-                          "rectangle_overlap.abi3.so"}, exts
+          # Every Cython source in the checkout must have been compiled into the wheel.
+          exts = {n.rsplit("/", 1)[1].split(".")[0] for n in names if n.endswith(".so")}
+          pyx = {p.stem for p in pathlib.Path("regions").rglob("*.pyx")}
+          assert pyx and pyx <= exts, sorted(pyx - exts)
           licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
                       if ".dist-info/licenses/" in n and not n.endswith("/")}
           assert licences == {"LICENSE.rst"}, licences
@@ -103,7 +101,7 @@ jobs:
       - name: Store wheels
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: regions-${{ env.REGIONS_VERSION }}-cp311-abi3-manylinux_riscv64
+          name: regions-${{ env.REGIONS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
