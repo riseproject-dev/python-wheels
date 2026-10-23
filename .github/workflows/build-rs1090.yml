@@ -46,7 +46,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build rs1090 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    name: Build rs1090 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
@@ -54,14 +54,19 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314"]
-        libc: ["manylinux", "musllinux"]
+        # No musllinux: rustup.rs ships no riscv64 musl toolchain, and
+        # maturin-action has no musllinux riscv64 container to build in (it
+        # falls back to the host, where its `pip install` hits PEP 668).
         include:
           - python: cp312
             interpreter: python3.12
+            python-version: '3.12'
           - python: cp313
             interpreter: python3.13
+            python-version: '3.13'
           - python: cp314
             interpreter: python3.14
+            python-version: '3.14'
 
     env:
       RS1090_VERSION: ${{ matrix.version }}
@@ -92,25 +97,32 @@ jobs:
           working-directory: python
           target: riscv64gc-unknown-linux-gnu
           args: --release -i ${{ matrix.interpreter }} --out dist
-          manylinux: ${{ matrix.libc == 'musllinux' && 'musllinux_1_2' || '2_39' }}
+          manylinux: '2_39'
 
       - name: Install Python
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
           activate-environment: true
           enable-cache: false
 
       - name: Test wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
         run: |
           set -euo pipefail
-          uv pip install pytest typing_extensions python/dist/*.whl
+          # tests/test_flarm.py and tests/test_full.py import pandas (upstream's
+          # dev dependency group). --only-binary keeps uv off pandas/numpy
+          # releases newer than their last riscv64 wheel, whose sdists it
+          # would otherwise try to build.
+          uv pip install --only-binary :all: pytest typing_extensions pandas python/dist/*.whl
           python -c "import rs1090._rust as m; assert m.__file__.endswith('.so'), m.__file__"
           pytest python/tests
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: rs1090-${{ env.RS1090_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          name: rs1090-${{ env.RS1090_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: python/dist/*.whl
           if-no-files-found: error
 
