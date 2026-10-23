@@ -19,6 +19,9 @@ other state, including queued/running workflows, failures, and no workflows.
 With ``--merge``, passing PRs are marked ready and squash-merged.  GitHub still
 enforces branch protection, required reviews, and mergeability.
 
+With ``--author``, PRs from any other author are left untouched (never marked
+ready, converted to draft, or merged).
+
 The token needs pull-request write and actions read access; merging also needs
 contents write access.  Example:
 
@@ -143,6 +146,20 @@ def sync_pull_request(
     return action
 
 
+def is_author(pr: PullRequest, author: str) -> bool:
+    """Whether the PR was opened by ``author``.
+
+    Accepts ``gh``-style app names (``app/riseproject-dev``), which the REST API
+    reports as the bot login ``riseproject-dev[bot]``, as well as plain user
+    logins.  Logins are case-insensitive.
+    """
+    wanted = author.lower()
+    login = pr.user.login.lower()
+    if wanted.startswith("app/"):
+        return login == f"{wanted.removeprefix('app/')}[bot]"
+    return login == wanted
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -157,6 +174,11 @@ def parse_args():
         dest="prs",
         metavar="NUMBER",
         help="process only this PR (repeatable; default: every open PR)",
+    )
+    parser.add_argument(
+        "--author",
+        help="only modify and merge PRs opened by this author, e.g. "
+        "app/riseproject-dev or a user login (default: any author)",
     )
     parser.add_argument(
         "--merge",
@@ -189,6 +211,9 @@ def main() -> int:
         for pr in pull_requests:
             if pr.state != "open":
                 print(f"PR #{pr.number}: closed; unchanged")
+                continue
+            if args.author and not is_author(pr, args.author):
+                print(f"PR #{pr.number}: author {pr.user.login}; skipped")
                 continue
             sync_pull_request(repo, pr, args.dry_run, args.merge, args.token)
     finally:
