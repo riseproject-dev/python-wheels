@@ -50,11 +50,15 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # `tag` must be a real matrix axis (gotcha 402): two include-only
+        # entries introducing the same new keys collapse into one job, and
+        # the abi3 leg silently never runs.
+        tag: [cp37-abi3, cp314t]
         include:
           # pyo3's abi3-py37 feature is on unconditionally (root Cargo.toml),
           # so one abi3 wheel serves every GIL-ful interpreter; pyo3 disables
           # abi3 under Py_GIL_DISABLED, giving the free-threaded build its own
-          # wheel (same shape as build-rbloom.yml).
+          # wheel.
           - tag: cp37-abi3
             # cp37/cp38 aren't in manylinux_2_39_riscv64 (cp39-cp315 only), and
             # our registry floor is cp312 anyway (build-rbloom.yml precedent),
@@ -87,6 +91,16 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # The repo root holds a conda-based dev helper named build.py, which
+          # shadows the `build` module under cibuildwheel's default
+          # `python -m build` frontend (cwd=/project; gotcha 102): it runs
+          # `conda activate ...` via os.system, exits 0, and no wheel is
+          # produced. pip is unaffected. pyproject.toml also pins
+          # maturin==1.8.7, which has no riscv64 wheel on PyPI or our index,
+          # so install a current maturin (riscv64 wheel available) and skip
+          # build isolation to bypass the pin (build-base2048.yml precedent).
+          CIBW_BEFORE_BUILD: pip install maturin
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_SOURCES: py_tests
           # test_bench.py is excluded: it imports the optional pybloom_live
