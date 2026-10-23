@@ -285,7 +285,7 @@ and the site deploy succeeds.
 
 ## 4. Nightly upgrades and maintenance
 
-`nightly.yml` runs on a schedule, by manual dispatch, and for PRs that modify
+`nightly.yml` runs on a schedule (Mondays and Thursdays at 02:00 UTC), by manual dispatch, and for PRs that modify
 its version-checking logic. Its `check_versions` job reads the tracked package
 set from `ci_scripts/packages.txt` and compares package YAML/release state with
 PyPI.
