@@ -1,0 +1,282 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-linux-wheels`/`test-wheels` jobs of
+# https://github.com/serapeum-org/pyramids/blob/0.59.0/.github/workflows/bundle-pypi-wheels.yml
+name: Build pyramids-gis wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyramids-gis.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyramids-gis.yml'
+      - 'docs/packages/pyramids-gis.yaml'
+      - 'patches/pyramids-gis/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyramids-gis.yml'
+      - 'docs/packages/pyramids-gis.yaml'
+      - 'patches/pyramids-gis/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  BASEIMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GDAL_IMAGE: manylinux_2_39_riscv64_gdal_pyramids_gis
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyramids-gis
+      version: ${{ inputs.version }}
+
+  build_image:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build the GDAL build image
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      PYRAMIDS_GIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyramids ${{ env.PYRAMIDS_GIS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: serapeum-org/pyramids
+          ref: ${{ env.PYRAMIDS_GIS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyramids source
+        run: git apply python-wheels/patches/pyramids-gis/${{ env.PYRAMIDS_GIS_VERSION }}/*.patch
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Write the GDAL image Dockerfile
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # upstream's before-all (ci/source-build/build-gdal-stack.sh) compiles ~26
+          # libraries from source; run it once into an image rather than once per
+          # interpreter, with upstream's [tool.cibuildwheel.linux.environment].
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ENV BUILD_PREFIX=/usr/local \
+              GDAL_DATA=/usr/local/share/gdal \
+              PROJ_DATA=/usr/local/share/proj \
+              PROJ_LIB=/usr/local/share/proj \
+              LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
+
+          COPY . /opt/pyramids/ci/source-build/
+          RUN bash /opt/pyramids/ci/source-build/build-gdal-stack.sh \
+              && rm -rf /opt/pyramids /tmp/gdal-src-build /tmp/probe.*
+          DOCKER_EOF
+
+      - name: Build Docker image with GDAL
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ci/source-build
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
+          platforms: linux/riscv64
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+          push: false
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.PYRAMIDS_GIS_VERSION }}
+          cache-to: type=gha,mode=max,scope=${{ env.GDAL_IMAGE }}-${{ env.PYRAMIDS_GIS_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+  build_wheels:
+    name: Build pyramids-gis ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    needs: [setup, build_image]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYRAMIDS_GIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyramids ${{ env.PYRAMIDS_GIS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: serapeum-org/pyramids
+          ref: ${{ env.PYRAMIDS_GIS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyramids source
+        run: git apply python-wheels/patches/pyramids-gis/${{ env.PYRAMIDS_GIS_VERSION }}/*.patch
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Write the GDAL image Dockerfile
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # upstream's before-all (ci/source-build/build-gdal-stack.sh) compiles ~26
+          # libraries from source; run it once into an image rather than once per
+          # interpreter, with upstream's [tool.cibuildwheel.linux.environment].
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ENV BUILD_PREFIX=/usr/local \
+              GDAL_DATA=/usr/local/share/gdal \
+              PROJ_DATA=/usr/local/share/proj \
+              PROJ_LIB=/usr/local/share/proj \
+              LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
+
+          COPY . /opt/pyramids/ci/source-build/
+          RUN bash /opt/pyramids/ci/source-build/build-gdal-stack.sh \
+              && rm -rf /opt/pyramids /tmp/gdal-src-build /tmp/probe.*
+          DOCKER_EOF
+
+      - name: Load the GDAL build image from the cache
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ci/source-build
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.GDAL_IMAGE }}:${{ env.PYRAMIDS_GIS_VERSION }}
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.PYRAMIDS_GIS_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.GDAL_IMAGE }}:${{ env.PYRAMIDS_GIS_VERSION }}
+          # the GDAL stack upstream's before-all builds is already in the image
+          CIBW_BEFORE_ALL: ''
+          CIBW_ENVIRONMENT: >-
+            BUILD_PREFIX=/usr/local
+            GDAL_DATA=/usr/local/share/gdal
+            PROJ_DATA=/usr/local/share/proj
+            PROJ_LIB=/usr/local/share/proj
+            PACKAGE_DATA=1
+            LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # upstream pins --plat manylinux_2_28, below the riscv64 image's glibc floor
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel}
+          # upstream skips cibuildwheel's test step and runs the same commands in its
+          # separate test-wheels job, which needs riscv64 hardware here anyway
+          CIBW_TEST_SKIP: ''
+          CIBW_TEST_SOURCES: tests ci pyproject.toml pixi.lock
+          CIBW_TEST_REQUIRES: pytest pytest-env pytest-mock pytest-timeout
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
+          CIBW_TEST_COMMAND: >-
+            python ci/verify-wheel.py &&
+            pytest -vvv -o "pythonpath=" --timeout=60 --timeout-method=thread -m "core and not vfs and not slow" tests/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyramids-gis-${{ env.PYRAMIDS_GIS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYRAMIDS_GIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libgdal links OpenMP, so auditwheel vendors the image's libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.BASEIMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyramids-gis-${{ env.PYRAMIDS_GIS_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyramids-gis ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyramids-gis-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyramids-gis-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
