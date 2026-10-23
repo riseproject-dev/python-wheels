@@ -78,16 +78,27 @@ jobs:
           # Re-declare each package on the same package-specific branch used by
           # wheel publication. This preserves publication metadata already
           # waiting for review while keeping unrelated packages isolated.
+          #
+          # While a PR is open for the branch, build on top of it without
+          # rebasing: a force push re-triggers every workflow on the PR, even
+          # when they were passing and nothing conflicted. Only a branch with
+          # no open PR is rebased onto the current main.
           open_pr() {
             local package="$1" slug="$2" title="$3"
             local branch="package/$slug" pr pr_title="$slug: update packages" remote_sha=""
+            local push_args=()
+
+            pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url') || return 1
 
             if git fetch --quiet origin "$branch" 2>/dev/null; then
               remote_sha=$(git rev-parse FETCH_HEAD) || return 1
               git switch --force-create "$branch" "$remote_sha" || return 1
-              if ! git rebase "$base"; then
-                git rebase --abort || true
-                return 1
+              if [ -z "$pr" ]; then
+                if ! git rebase "$base"; then
+                  git rebase --abort || true
+                  return 1
+                fi
+                push_args=(--force-with-lease="$branch:$remote_sha")
               fi
             else
               git switch --force-create "$branch" "$base" || return 1
@@ -98,7 +109,7 @@ jobs:
 
             if git diff --quiet -- docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt; then
               if [ -n "$remote_sha" ] && [ "$(git rev-parse HEAD)" != "$remote_sha" ]; then
-                git push --force-with-lease="$branch:$remote_sha" origin "$branch" || return 1
+                git push "${push_args[@]}" origin "$branch" || return 1
               fi
               echo "$package: nothing to declare"
               return 0
@@ -107,13 +118,8 @@ jobs:
             git add docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt || return 1
             git commit -s -m "$title" || return 1
 
-            if [ -n "$remote_sha" ]; then
-              git push --force-with-lease="$branch:$remote_sha" origin "$branch" || return 1
-            else
-              git push origin "$branch" || return 1
-            fi
+            git push "${push_args[@]}" origin "$branch" || return 1
 
-            pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url') || return 1
             if [ -n "$pr" ]; then
               gh pr edit "$pr" --title "$pr_title" --body-file "$REPORTS/$slug.md" || return 1
               echo "Updated $pr"
