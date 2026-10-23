@@ -67,6 +67,19 @@ jobs:
           ref: v${{ env.OPENSLIDE_BIN_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/openslide-bin
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/openslide-bin/${{ env.OPENSLIDE_BIN_VERSION }}/*.patch
+
+      # python_platform_tag must be exactly what `auditwheel show` reports (write-wheel.py
+      # checks it): the newest glibc symbols the bundle uses on riscv64 are GLIBC_2.38
+      # (strlcpy, __isoc23_strtol & co.), so it is manylinux_2_38, not the image's 2_39.
       - name: Write machines/native-linux-riscv64.ini
         run: |
           cat > machines/native-linux-riscv64.ini <<'EOF'
@@ -81,7 +94,7 @@ jobs:
           [properties]
           pkg_config_libdir = '/native/lib/pkgconfig'
           openslide_bin_platform = 'linux-riscv64'
-          python_platform_tag = 'manylinux_2_39_riscv64'
+          python_platform_tag = 'manylinux_2_38_riscv64'
           EOF
 
       - name: Build and smoke-test wheel
@@ -95,7 +108,10 @@ jobs:
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash -ec '
               export PATH=/opt/python/cp312-cp312/bin:$PATH
-              dnf -y install gcc-c++ git-core ninja-build patchelf zstd
+              # patchelf is not packaged in Rocky 10 riscv64 (upstream gets it
+              # from EPEL); the manylinux image already ships it in /usr/local/bin.
+              dnf -y install gcc-c++ git-core ninja-build zstd
+              patchelf --version
               pip install --disable-pip-version-check auditwheel license-expression meson
               touch /etc/openslide-linux-builder-v8
               git config --global --add safe.directory "*"
