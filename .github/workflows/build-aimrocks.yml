@@ -99,6 +99,13 @@ jobs:
           # newer than 6.29.fb's code anticipated: manylinux_2_39_riscv64's GCC 14.3.1
           # flags `return std::move(io_s);` in db/db_impl/db_impl.cc as
           # -Werror=redundant-move, which upstream's own (older) build image never hit.
+          # `-include cstdint` is for the same GCC 14: libstdc++ (since 13) no longer pulls
+          # <cstdint> in transitively, which table/block_based/data_block_hash_index.h
+          # relies on for uint8_t/uint16_t/uint32_t.
+          # PPC_LIBC_IS_GNU=0 is rocksdb's own Makefile switch for leaving out the optional
+          # range-lock manager (RANGE_TREE_SOURCES): its toku_time.h has no riscv64 timer and
+          # hits `#error No timer implementation for this platform`. aimrocks never binds
+          # TransactionDB or NewRangeLockManager.
           CIBW_BEFORE_ALL_LINUX: >-
             mkdir -p /opt/deps/lib /opt/deps/include &&
             curl -sSLf "https://www.zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz" | tar -xz -C /tmp &&
@@ -117,8 +124,8 @@ jobs:
             rm -f /opt/deps/lib/lib*.so* &&
             curl -sSLf "https://github.com/facebook/rocksdb/archive/${ROCKSDB_VERSION}.tar.gz" | tar -xz -C /tmp &&
             LIBRARY_PATH=/opt/deps/lib PORTABLE=1 make -C /tmp/rocksdb-${ROCKSDB_VERSION}
-            shared_lib PLATFORM_SHARED_VERSIONED=false EXTRA_CXXFLAGS="-fPIC -I/opt/deps/include"
-            EXTRA_CFLAGS=-fPIC USE_RTTI=0 DEBUG_LEVEL=0 DISABLE_WARNING_AS_ERROR=1 -j4 &&
+            shared_lib PLATFORM_SHARED_VERSIONED=false EXTRA_CXXFLAGS="-fPIC -I/opt/deps/include -include cstdint"
+            EXTRA_CFLAGS=-fPIC USE_RTTI=0 DEBUG_LEVEL=0 DISABLE_WARNING_AS_ERROR=1 PPC_LIBC_IS_GNU=0 -j4 &&
             strip --strip-debug /tmp/rocksdb-${ROCKSDB_VERSION}/librocksdb.so &&
             cp /tmp/rocksdb-${ROCKSDB_VERSION}/librocksdb.so /opt/deps/lib/ &&
             PORTABLE=1 make -C /tmp/rocksdb-${ROCKSDB_VERSION} PREFIX=/opt/deps DEBUG_LEVEL=0 install-headers &&
