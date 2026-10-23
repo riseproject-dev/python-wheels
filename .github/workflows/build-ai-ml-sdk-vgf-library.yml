@@ -65,7 +65,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        python: ["cp312", "cp313", "cp314"]
 
     env:
       VGF_VERSION: ${{ matrix.version }}
@@ -93,7 +93,7 @@ jobs:
         env:
           PYTHON_TAG: ${{ matrix.python }}
         run: |
-          mkdir -p vgf-library/wheelhouse_repaired
+          mkdir -p vgf-library/wheelhouse
           set -o pipefail
           docker run --rm -i --network=host \
             -v "${GITHUB_WORKSPACE}:/work" \
@@ -104,17 +104,14 @@ jobs:
             -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
             -e PIP_ONLY_BINARY=numpy \
             "${MANYLINUX_RISCV64_IMAGE}" \
-            bash <<'SCRIPT' 2>&1 | tee build.log
+            bash <<'SCRIPT' 2>&1 | tee vgf-library/build.log
           set -eux
 
-          case "${PYTHON_TAG}" in
-            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
-            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
-          esac
+          python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin"
           export PATH="${python_dir}:${PATH}"
           python_exe="${python_dir}/python"
 
-          "${python_exe}" -m pip install -q -U pip setuptools wheel build pybind11 ninja auditwheel \
+          "${python_exe}" -m pip install -q -U pip setuptools wheel build pybind11 ninja \
             numpy pytest pytest-xdist
 
           mkdir -p /tmp/deps
@@ -137,8 +134,8 @@ jobs:
             --flatbuffers-path /tmp/deps/flatbuffers \
             --pybind11-path /tmp/deps/pybind11
 
-          "${python_exe}" -m auditwheel repair --plat manylinux_2_39_riscv64 \
-            -w wheelhouse_repaired pip_package/dist/*.whl
+          # No auditwheel: like upstream's wheels, vgf_dump/vgf_updater sit in .data/purelib, which it rejects.
+          cp pip_package/dist/*.whl wheelhouse/
           SCRIPT
 
       - name: Upload build log
@@ -159,24 +156,21 @@ jobs:
             bash <<'SCRIPT'
           set -eux
 
-          case "${PYTHON_TAG}" in
-            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
-            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
-          esac
+          python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin"
           export PATH="${python_dir}:${PATH}"
           python_exe="${python_dir}/python"
 
-          "${python_exe}" -m pip install -q /work/vgf-library/wheelhouse_repaired/*.whl
+          "${python_exe}" -m pip install -q /work/vgf-library/wheelhouse/*.whl
 
           cd /tmp
-          "${python_exe}" -c "import vgfpy; import vgf_lib; print(vgfpy.__file__)"
+          "${python_exe}" -c "import vgf_lib; print(vgf_lib.__file__)"
           vgf_dump --help
           SCRIPT
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ai-ml-sdk-vgf-library-${{ env.VGF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: vgf-library/wheelhouse_repaired/*.whl
+          path: vgf-library/wheelhouse/*.whl
           if-no-files-found: error
 
   publish:
