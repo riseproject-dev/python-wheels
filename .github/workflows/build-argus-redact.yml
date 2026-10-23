@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+name: Build argus-redact wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/argus-redact.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-argus-redact.yml'
+      - 'docs/packages/argus-redact.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-argus-redact.yml'
+      - 'docs/packages/argus-redact.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: argus-redact
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build argus-redact ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel
+        # per interpreter (matches PyPI's cp3xx-cp3xx tags).
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ARGUS_REDACT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout argus-redact ${{ env.ARGUS_REDACT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wan9yu/argus-redact
+          ref: v${{ env.ARGUS_REDACT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # argus-redact's pyproject.toml ships no [tool.cibuildwheel], so the
+          # Rust toolchain its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio hypothesis
+          # tests/test_readme_examples.py (and its _meta sibling) exec the
+          # <!-- pin --> code blocks in README.md/README.zh.md/docs/*.md to
+          # keep the docs honest; they resolve those paths relative to the
+          # test file via Path(__file__).parents[1], which is test_cwd once
+          # cibuildwheel stages CIBW_TEST_SOURCES there. Without the README
+          # and docs files alongside tests/, collection dies with
+          # FileNotFoundError on every interpreter (gotcha 129's maxminddb
+          # pattern, not riscv64- or free-threading-specific).
+          CIBW_TEST_SOURCES: tests README.md README.zh.md docs
+          # Deselected: source-lint tests that read src/, crates/, pyproject.toml or demo/
+          # from the checkout (upstream runs them editable), and x86-tuned wall-clock ceilings.
+          CIBW_TEST_COMMAND: >-
+            python -c "from argus_redact import redact; redacted, key = redact('张三的电话是13812345678', names=['张三'], lang='zh', salt=42); assert '张三' not in redacted; assert '13812345678' not in redacted" &&
+            python -m pytest -v -m "not ner and not semantic and not slow"
+            --deselect tests/architecture/test_carry_window_parity.py::test_carry_window_python_rust_parity
+            --deselect tests/architecture/test_confusables_parity.py::test_ron_entry_count_frozen
+            --deselect tests/architecture/test_confusables_parity.py::test_ron_sha256_frozen
+            --deselect tests/architecture/test_confusables_parity.py::test_ron_matches_live_generator
+            --deselect tests/architecture/test_core_loader.py::test_no_module_level_core_import_in_consumers
+            --deselect tests/architecture/test_declared_dependencies.py::test_every_runtime_import_is_declared_or_allowlisted
+            --deselect tests/architecture/test_default_max_buffer_parity.py::test_default_max_buffer_python_rust_parity
+            --deselect tests/architecture/test_lang_claims_parity.py::test_documented_pack_count_matches_registry
+            --deselect tests/architecture/test_layer_purity.py::test_pure_dir_actually_has_python_files
+            --deselect tests/architecture/test_layering.py::test_pure_hints_has_no_os_environ
+            --deselect tests/architecture/test_layers_ssot.py::test_glue_redact_uses_layer_constants_not_literals
+            --deselect tests/architecture/test_max_input_size_parity.py::test_max_input_size_python_rust_parity
+            --deselect tests/architecture/test_no_orphan_core_bindings.py::test_every_registered_core_binding_has_a_consumer
+            --deselect tests/architecture/test_pem_ceiling_parity.py::test_pem_opener_ceiling_extra_python_rust_parity
+            --deselect tests/architecture/test_post_merge_coverage_invariant.py::test_every_post_merge_pipeline_restores_lost_coverage
+            --deselect tests/architecture/test_post_merge_coverage_invariant.py::test_rust_faces_route_through_the_finalize_chokepoint
+            --deselect tests/architecture/test_post_merge_coverage_invariant.py::test_pseudonym_llm_delegates_instead_of_copying_the_pipeline
+            --deselect tests/architecture/test_risk_data_parity.py::test_ron_type_count_frozen
+            --deselect tests/architecture/test_risk_data_parity.py::test_ron_sha256_frozen
+            --deselect tests/architecture/test_risk_data_parity.py::test_ron_matches_live_registry
+            --deselect tests/architecture/test_shared_ron_registry_coverage.py::test_every_shared_ron_type_has_a_registry_row
+            --deselect tests/architecture/test_strategy_kind_leaf.py::test_leaf_module_exists
+            --deselect tests/architecture/test_strategy_kind_leaf.py::test_leaf_imports_neither_registry_nor_replacer
+            --deselect tests/architecture/test_strategy_kind_leaf.py::test_leaf_has_no_argus_imports
+            --deselect tests/architecture/test_strategy_kind_leaf.py::test_registry_has_no_lazy_strategy_reversible_import
+            --deselect tests/architecture/test_strategy_kind_leaf.py::test_replacer_classification_comes_from_leaf_top_level
+            --deselect tests/architecture/test_version_parity.py::test_pyproject_cargo_and_package_version_agree
+            --deselect tests/architecture/test_version_parity.py::test_py_crate_pins_the_current_core_version
+            --deselect tests/core/test_restore.py::TestRestoreKeyFileLoadIsGlueOnly::test_pure_restore_module_is_filesystem_free
+            --deselect tests/integration/test_session_isolation.py::test_langchain_no_dead_contextvar_code
+            --deselect tests/safety/test_hardening.py::test_server_bearer_uses_compare_digest
+            --deselect tests/benchmark/test_performance.py::TestRegexPerformance::test_should_redact_short_text_under_1ms
+            --deselect tests/benchmark/test_performance.py::TestRegexPerformance::test_should_redact_medium_text_under_5ms
+            --deselect tests/benchmark/test_performance.py::TestThroughput::test_should_process_1000_short_docs_under_1s
+            --deselect tests/core/test_reserved_range_scanner.py::TestScanPerformance::test_should_scan_1kb_under_5ms
+            tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: argus-redact-${{ env.ARGUS_REDACT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish argus-redact ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: argus-redact-${{ matrix.version }}-*-manylinux_riscv64
