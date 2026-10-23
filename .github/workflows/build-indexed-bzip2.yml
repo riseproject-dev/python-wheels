@@ -47,12 +47,13 @@ jobs:
     if: needs.setup.outputs.versions != '[]'
     name: Build indexed-bzip2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        # No cp314t: the pinned Cython < 3.1 cannot compile for free-threaded CPython.
+        python: ["cp312", "cp313", "cp314"]
 
     env:
       INDEXED_BZIP2_VERSION: ${{ matrix.version }}
@@ -88,18 +89,20 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,cython
-          CIBW_TEST_REQUIRES: pytest numpy
-          CIBW_TEST_COMMAND: >-
-            python3 -X dev -u -m pytest {project}/src/tests/testGIL.py &&
-            python3 -X dev -u {project}/src/tests/testPythonWrappers.py
+          CIBW_TEST_REQUIRES: numpy
+          CIBW_TEST_ENVIRONMENT: CI=true
+          # testGIL.py only tests rapidgzip, which has no riscv64 wheel.
+          CIBW_TEST_COMMAND: python3 -X dev -u {project}/src/tests/testPythonWrappers.py
 
       - name: Check the wheel carries the cxxopts license
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
-          names = zipfile.ZipFile(sys.argv[1]).namelist()
-          if not any("cxxopts" in n.lower() for n in names):
-              raise SystemExit(f"error: cxxopts license missing from {sys.argv[1]}: {names}")
+          z = zipfile.ZipFile(sys.argv[1])
+          meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+          licenses = [n for n in z.namelist() if ".dist-info/" in n and "LICEN" in n.upper()]
+          if "License-File: external/cxxopts/LICENSE" not in z.read(meta).decode() or not any(b"Jarryd Beck" in z.read(n) for n in licenses):
+              raise SystemExit(f"error: cxxopts license missing from {sys.argv[1]}: {licenses}")
           EOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

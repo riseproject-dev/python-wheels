@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 23 Oct 2026 00:00:00 +0200
+Subject: [PATCH] tests: run testPythonWrappers.py without rapidgzip installed
+
+Upstream's `test-python.yml` installs both packages of this monorepo,
+indexed_bzip2 and rapidgzip, before running `src/tests/testGIL.py` and
+`src/tests/testPythonWrappers.py`. testGIL.py only exercises
+rapidgzip, but testPythonWrappers.py is also upstream's Python test of
+indexed_bzip2 (`IndexedBzip2File` and `indexed_bzip2.open` across
+parallelizations, encoders, buffer sizes and seeks). It imports
+rapidgzip unconditionally at module level, though, and rapidgzip has no
+riscv64 wheel on PyPI or pypi.riseproject.dev. Without it, `import
+rapidgzip` even resolves to the `src/tests/rapidgzip/` C++ test
+directory as an empty namespace package, so the script dies with
+`ImportError: cannot import name 'RapidgzipFile'`.
+
+Make the rapidgzip import optional and skip only the rapidgzip-specific
+checks when it is missing; every indexed_bzip2 check still runs.
+
+Upstream-Status: Inappropriate [rapidgzip, which these tests also exercise, has no riscv64 wheel to install in the test environment]
+---
+ src/tests/testPythonWrappers.py | 25 +++++++++++++++----------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/src/tests/testPythonWrappers.py b/src/tests/testPythonWrappers.py
+index 7bb72ec..c652b18 100644
+--- a/src/tests/testPythonWrappers.py
++++ b/src/tests/testPythonWrappers.py
+@@ -314,8 +314,12 @@ def openThroughGlobalFile(name, module):
+ import indexed_bzip2
+ from indexed_bzip2 import IndexedBzip2File
+
+-import rapidgzip
+-from rapidgzip import RapidgzipFile
++try:
++    import rapidgzip
++    from rapidgzip import RapidgzipFile
++except ImportError:
++    rapidgzip = None
++    RapidgzipFile = None
+
+
+ class FileWrapper:
+@@ -422,12 +426,13 @@ def testFileTypeAPI():
+
+ if __name__ == '__main__':
+     print("indexed_bzip2 version:", indexed_bzip2.__version__)
+-    print("rapidgzip version:", rapidgzip.__version__)
++    print("rapidgzip version:", rapidgzip.__version__ if rapidgzip is not None else None)
+     print("Cores:", os.cpu_count())
+
+-    testFileTypeAPI()
+-    testDeadlock('pygzip')
+-    testRpmallocThreadSafety('pygzip')
++    if rapidgzip is not None:
++        testFileTypeAPI()
++        testDeadlock('pygzip')
++        testRpmallocThreadSafety('pygzip')
+
+     def test(openIndexedFileFromName, closeUnderlyingFile=None):
+         testPythonInterface(
+@@ -454,7 +459,7 @@ if __name__ == '__main__':
+             openIndexedFileFromName, compressionLevel=9, encoder="pygzip", closeUnderlyingFile=closeUnderlyingFile
+         )
+
+-    for encoder in ['pygzip', 'pybz2']:
++    for encoder in ['pygzip', 'pybz2'] if rapidgzip is not None else []:
+         for parallelization in [1, 2, 3, 8]:
+             print("Test Python Interface of RapidgzipFile for parallelization = ", parallelization)
+
+@@ -473,7 +478,7 @@ if __name__ == '__main__':
+             test(lambda name: rapidgzip.open(openFileAsBytesIO(name), parallelization=parallelization), encoder)
+
+     # Regression test for rapidgzip/issues/55
+-    for size in [512 * 1024 + 2, 1, 2, 4, 128, 1000, 1024, 128 * 1024, 100_000, 200_000, 400_000, 1024 * 1024]:
++    for size in [512 * 1024 + 2, 1, 2, 4, 128, 1000, 1024, 128 * 1024, 100_000, 200_000, 400_000, 1024 * 1024] if rapidgzip is not None else []:
+         original_data = b'A' * size
+         compressed_data = bz2.compress(original_data, compresslevel=1)
+         compressed_file = io.BytesIO(compressed_data)
+@@ -508,7 +513,7 @@ if __name__ == '__main__':
+     bufferSizes = [-1, 128, 333, 500, 1024, 1024 * 1024, 64 * 1024 * 1024]
+     parameters = [
+         TestParameters(size, encoder, compressionLevel, pattern, patternSize, bufferSizes, 1, 'bz2', FileOpener)
+-        for FileOpener in [RapidgzipFile, IndexedBzip2File]
++        for FileOpener in [RapidgzipFile, IndexedBzip2File] if FileOpener is not None
+         for size in [1, 2, 3, 4, 5, 10, 20, 30, 100, 1000, 10000, 100000, 200000, 0]
+         for encoder in encoders
+         for compressionLevel in range(1, 9 + 1)
+@@ -516,7 +521,7 @@ if __name__ == '__main__':
+         for patternSize in ([None] if pattern == 'random' else [1, 2, 8, 123, 257, 2048, 100000])
+     ]
+
+-    encoders = ['pygzip']
++    encoders = ['pygzip'] if rapidgzip is not None else []
+     parameters += [
+         TestParameters(size, encoder, compressionLevel, pattern, patternSize, bufferSizes, 1, 'gz', RapidgzipFile)
+         for size in [1, 2, 3, 4, 5, 10, 20, 30, 100, 1000, 10000, 100000, 200000, 0]
+--
+2.43.0
