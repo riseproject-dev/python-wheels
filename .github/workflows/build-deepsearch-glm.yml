@@ -67,11 +67,23 @@ jobs:
           ref: v${{ env.DEEPSEARCH_GLM_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch deepsearch-glm source
+        run: git apply python-wheels/patches/deepsearch-glm/${{ env.DEEPSEARCH_GLM_VERSION }}/00*.patch
+
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The repo-root build.py (poetry's build script) shadows the `build` module under
+          # `python -m build`; upstream's cibuildwheel 2.x defaulted to pip.
+          CIBW_BUILD_FRONTEND: pip
           # The C++ dependencies (fmt, json, loguru, cxxopts, pcre2, fasttext, utfcpp,
           # sentencepiece) are fetched by CMake's ExternalProject_Add and statically
           # linked by the build; upstream ships none of their licences.
@@ -84,8 +96,11 @@ jobs:
             curl -fsSL -o {project}/LICENSE.fasttext https://raw.githubusercontent.com/PeterStaar-IBM/fastText/9d5b2a2b364f49ed2707ff3be48a0f1ba6d86022/LICENSE
             curl -fsSL -o {project}/LICENSE.utfcpp https://raw.githubusercontent.com/nemtrif/utfcpp/v4.0.5/LICENSE
             curl -fsSL -o {project}/LICENSE.sentencepiece https://raw.githubusercontent.com/google/sentencepiece/v0.2.0/LICENSE
+          # fastText and sentencepiece, fetched by ExternalProject_Add, declare
+          # cmake_minimum_required below CMake 4's 3.5 floor.
           CIBW_ENVIRONMENT: >-
             BUILD_THREADS=4
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Upstream's own CI never runs its data-driven test suite (tests/test_*.py) on
           # Linux wheels at all - those tests download pretrained NLP models and reference
