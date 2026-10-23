@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH] identify_os: recognise native riscv64 hosts
+
+lnxriscv64 is a supported PLAT, but dev/make/identify_os.sh only maps
+uname -m x86_64 and aarch64, so on a native riscv64 host it prints
+"Unknown architecture: riscv64". Upstream only builds riscv64 by
+cross-compiling from an x86_64 host, so this is never hit there.
+
+On a native riscv64 build with PLAT=lnxriscv64, every make release
+target (daal, onedal_c) depends on _release_common -> _release_nuspec,
+which runs deploy/nuget/prepare_dal_nuget.sh. That script feeds the
+multi-word identify_os.sh output unquoted to [ ], then falls through to
+"Unknown platform Unknown architecture: riscv64" and exits 1, failing
+the build before anything is compiled.
+
+Print lnxriscv64 for riscv64 and give prepare_dal_nuget.sh a matching
+branch (platform linux, libs under lib/riscv64, the release layout the
+makefile produces for this PLAT). As a side effect the makefile now sees
+PLAT == IDENTIFIED_PLAT and stops treating the native build as a cross
+build, so clang no longer gets --target=riscv64-linux-gnu, matching how
+a native lnxarm build is handled.
+
+Upstream-Status: To upstream [native riscv64 build support; upstream CI only cross-compiles riscv64 from x86_64]
+---
+ deploy/nuget/prepare_dal_nuget.sh | 7 +++++++
+ dev/make/identify_os.sh           | 2 ++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/deploy/nuget/prepare_dal_nuget.sh b/deploy/nuget/prepare_dal_nuget.sh
+index 5d115c7..adf007c 100755
+--- a/deploy/nuget/prepare_dal_nuget.sh
++++ b/deploy/nuget/prepare_dal_nuget.sh
+@@ -67,6 +67,13 @@ create_package() {
+         dynamic_lib_path=lib/arm
+         static_lib_path=lib/arm
+         lib_prefix=libonedal
++    elif [ ${platform} = "lnxriscv64" ]; then
++        platform=linux
++        tbb_platform=linux
++        rls_prefix=${rls_dir}/daal/latest
++        dynamic_lib_path=lib/riscv64
++        static_lib_path=lib/riscv64
++        lib_prefix=libonedal
+
+     elif [ ${platform} = "mac32e" ]; then
+         platform=osx-x64
+diff --git a/dev/make/identify_os.sh b/dev/make/identify_os.sh
+index 2a45ecc..d26ac8c 100755
+--- a/dev/make/identify_os.sh
++++ b/dev/make/identify_os.sh
+@@ -22,6 +22,8 @@ if [ "${os}" = "Linux" ]; then
+     echo lnx32e
+   elif [ "${ARCH}" = "aarch64" ]; then
+     echo lnxarm
++  elif [ "${ARCH}" = "riscv64" ]; then
++    echo lnxriscv64
+   else
+     echo "Unknown architecture: ${ARCH}"
+     exit 1
+--
+2.43.0
+
