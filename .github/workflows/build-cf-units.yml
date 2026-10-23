@@ -89,22 +89,27 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # udunits2-devel is EPEL-only (gotcha 51: no EPEL on riscv64), so
           # UDUNITS-2 is built from source instead, the same workaround
-          # build-pygame.yml uses for portmidi.
+          # build-pygame.yml uses for portmidi. The tag archive has no generated
+          # scanner.c/parser.c/.info, hence flex, bison and texinfo (CRB).
           CIBW_BEFORE_ALL_LINUX: |
-            dnf install -y expat-devel
-            curl -fsSL https://github.com/Unidata/UDUNITS-2/archive/refs/tags/v${UDUNITS2_VERSION}.tar.gz -o udunits2.tar.gz
+            set -eux
+            dnf install -y expat-devel flex bison texinfo
+            curl -fsSL --retry 5 https://github.com/Unidata/UDUNITS-2/archive/refs/tags/v${{ env.UDUNITS2_VERSION }}.tar.gz -o udunits2.tar.gz
             tar xzf udunits2.tar.gz
-            cmake -S UDUNITS-2-${UDUNITS2_VERSION} -B udunits2-build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
+            cmake -S UDUNITS-2-${{ env.UDUNITS2_VERSION }} -B udunits2-build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
             cmake --build udunits2-build -j"$(nproc)"
             cmake --install udunits2-build
             echo /usr/local/lib > /etc/ld.so.conf.d/udunits2.conf
             ldconfig
-            cp UDUNITS-2-${UDUNITS2_VERSION}/COPYRIGHT LICENSE.udunits2
+            cp UDUNITS-2-${{ env.UDUNITS2_VERSION }}/COPYRIGHT LICENSE.udunits2
           CIBW_ENVIRONMENT_LINUX: >-
             CF_UNITS_LIMITED_API=1
             UDUNITS2_INCDIR=/usr/local/include
             UDUNITS2_LIBDIR=/usr/local/lib
             UDUNITS2_XML_PATH=/usr/local/share/udunits/udunits2.xml
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CF_UNITS=${{ env.CF_UNITS_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
           CIBW_TEST_REQUIRES: pytest tomli
           CIBW_TEST_COMMAND: >-
             python -c "import cf_units; print(f'cf-units v{cf_units.__version__}')" &&
@@ -117,7 +122,7 @@ jobs:
           for whl in sys.argv[1:]:
               names = zipfile.ZipFile(whl).namelist()
               assert any(n.startswith("cf_units/_udunits2") and n.endswith(".so") for n in names), (whl, names)
-              licences = {n.rsplit("/", 1)[-1] for n in names if n.startswith("cf_units-") and "/licenses/" in n}
+              licences = {n.rsplit("/", 1)[-1] for n in names if n.startswith("cf_units-") and "/licenses/" in n} - {""}
               assert licences == {"LICENSE", "LICENSE.udunits2"}, (whl, licences)
               print(whl, "ok")
           EOF
