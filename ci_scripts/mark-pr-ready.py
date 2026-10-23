@@ -52,8 +52,10 @@ def convert_to_draft(token: str, pr: PullRequest) -> None:
 
     PyGithub's PullRequest.convert_to_draft() calls GitHub's GraphQL API,
     which Claude Code sessions cannot reach (the REST API has no classic
-    endpoint for this direction either). Use the CCR REST route the
-    platform provides instead; it works the same everywhere else too.
+    endpoint for this direction either), so try the CCR REST route the
+    platform provides first.  That route only exists inside those sessions;
+    anywhere else (e.g. GitHub Actions) it answers 404 and the GraphQL call
+    is used instead.
     """
     response = requests.post(
         f"https://api.github.com/repos/{REPOSITORY}/pulls/{pr.number}/ccr/convert_to_draft",
@@ -63,6 +65,9 @@ def convert_to_draft(token: str, pr: PullRequest) -> None:
         },
         timeout=30,
     )
+    if response.status_code == 404:
+        pr.convert_to_draft()
+        return
     response.raise_for_status()
 
 
