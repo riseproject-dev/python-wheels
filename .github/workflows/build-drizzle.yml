@@ -45,12 +45,20 @@ jobs:
   # so cibuildwheel builds once there and reuses the wheel on cp311-cp314
   # (find_compatible_wheel). astropy (test-only) has no cp310 riscv64 wheel,
   # so cp310 is built but not tested.
+  # MANIFEST.in prunes drizzle/tests/data, so the wheel ships the tests without
+  # the FITS/header files test_resample.py and test_utils.py read through
+  # DATA_DIR (next to the installed helpers.py); copy them from the checkout
+  # into each test venv's installed package before running the suite.
+  # scipy (via gwcs) has no cp311 riscv64 wheel past 1.15.2, so pin it to
+  # binaries or pip builds the 1.17+ sdist and fails on missing OpenBLAS.
+  # The full suite takes ~3 min on x86_64 per interpreter; xdist and the
+  # longer timeout keep four riscv64 test runs inside the job.
   build_abi3:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build drizzle ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -84,8 +92,12 @@ jobs:
             PIP_ONLY_BINARY=numpy
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DRIZZLE=${{ env.DRIZZLE_VERSION }}
           CIBW_TEST_EXTRAS: test
-          CIBW_TEST_COMMAND: 'python -c "from drizzle import cdrizzle" && pytest -q --pyargs drizzle'
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,astropy,pyerfa,pyyaml
+          CIBW_TEST_REQUIRES: pytest-xdist
+          CIBW_TEST_COMMAND: >-
+            python -c "import os, shutil, drizzle.tests as t; shutil.copytree('{project}/drizzle/tests/data', os.path.join(os.path.dirname(t.__file__), 'data'))"
+            && python -c "from drizzle import cdrizzle"
+            && pytest -q -n auto --pyargs drizzle
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,astropy,pyerfa,pyyaml,coverage
         run: |
           set -euo pipefail
           uv pip install --upgrade cibuildwheel
@@ -99,7 +111,9 @@ jobs:
 
   # Free-threaded wheel: per-interpreter, no abi3 (Py_LIMITED_API is skipped
   # under Py_GIL_DISABLED in setup.py). Only cp314t - the riscv64 image has
-  # no cp313t interpreter.
+  # no cp313t interpreter. astropy publishes only cp311-abi3 riscv64 wheels,
+  # which a free-threaded interpreter cannot load, so the [test] extra (astropy,
+  # gwcs) is uninstallable here; run the two modules that need only numpy.
   build_freethreaded:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
@@ -137,9 +151,11 @@ jobs:
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DRIZZLE=${{ env.DRIZZLE_VERSION }}
-          CIBW_TEST_EXTRAS: test
-          CIBW_TEST_COMMAND: 'python -c "from drizzle import cdrizzle" && pytest -q --pyargs drizzle'
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,astropy,pyerfa,pyyaml
+          CIBW_TEST_REQUIRES: pytest>=9.0
+          CIBW_TEST_COMMAND: >-
+            python -c "from drizzle import cdrizzle"
+            && pytest -q --pyargs drizzle.tests.test_cdrizzle drizzle.tests.test_overlap_calc
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
         run: |
           set -euo pipefail
           uv pip install --upgrade cibuildwheel
