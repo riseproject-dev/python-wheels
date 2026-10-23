@@ -304,11 +304,11 @@ A release already supplied upstream as riscv64 or pure Python is not added as a
 new RISE build. Deprecation waits until all already-declared versions have been
 published, so a pending build is not silently abandoned.
 
-When `--declare` adds a version of a package that already has `patches/<pkg>/`
-directories, it copies the directory of the latest earlier version that has one
-to `patches/<pkg>/<new-version>/` (keeping a local suffix such as `+cpu`), so
-the upgrade PR starts from the previous patches. The build shows whether they
-still apply.
+When `--declare` adds a version of a package, it copies the patch directory of
+the version declared immediately before it to `patches/<pkg>/<new-version>/`
+(keeping a local suffix such as `+cpu`); several new versions chain in order.
+If that preceding version has no patches, none are copied, since they may have
+been upstreamed. The build shows whether the copied patches still apply.
 
 ### One branch and PR per package
 
