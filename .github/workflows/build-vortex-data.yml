@@ -36,7 +36,6 @@ env:
   RUSTUP_MAX_RETRIES: 10
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_ONLY_BINARY: ':all:'
 
 jobs:
   setup:
@@ -85,6 +84,13 @@ jobs:
       - name: Cargo Set Version
         run: cargo set-version --workspace ${{ env.VORTEX_DATA_VERSION }}
 
+      # Same as upstream's "Set Python extension version pins": cargo set-version leaves the
+      # `cuda` extra pinned to vortex-data-cuda==0.1.0.
+      - name: Set Python extension version pins
+        run: |
+          sed -i -E "s/vortex-data-cuda==[^\"]+/vortex-data-cuda==${VORTEX_DATA_VERSION}/" vortex-python/pyproject.toml
+          grep -q "\"vortex-data-cuda==${VORTEX_DATA_VERSION}\"" vortex-python/pyproject.toml
+
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
@@ -95,7 +101,10 @@ jobs:
             --manifest-path vortex-python/Cargo.toml
             --out dist
           manylinux: '2_39'
-          before-script-linux: git config --global --add safe.directory "*"
+          # custom-labels (via vortex-io) runs bindgen in its build.rs, which dlopens libclang.so.
+          before-script-linux: |
+            dnf -y install clang-devel
+            git config --global --add safe.directory "*"
         env:
           MATURIN_PEP517_USE_BASE_PYTHON: 'true'
           PYO3_ENVIRONMENT_SIGNATURE: cpython3
@@ -109,10 +118,13 @@ jobs:
           activate-environment: true
           enable-cache: false
 
+      # uv has no UV_ONLY_BINARY variable; --only-binary keeps numpy etc. on the riscv64 wheels
+      # instead of newer PyPI sdists. test_compress/test_pyarray need numpy/pcodec;
+      # test_dataset imports polars (no riscv64 wheel) and test_datasource needs ray.
       - name: Test wheel
         run: |
-          uv pip install --force-reinstall dist/*.whl
-          uv pip install pytest
+          uv pip install --only-binary :all: --force-reinstall dist/*.whl
+          uv pip install --only-binary :all: pytest numpy pcodec
           python -c 'import vortex; print(vortex.__version__)'
           cd vortex-python
           python -m pytest -v test/ \
@@ -120,7 +132,9 @@ jobs:
             --ignore=test/test_duckdb.py \
             --ignore=test/test_hf_datasets.py \
             --ignore=test/test_polars_.py \
-            --ignore=test/test_fork.py
+            --ignore=test/test_fork.py \
+            --ignore=test/test_dataset.py \
+            --ignore=test/test_datasource.py
 
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
