@@ -118,7 +118,10 @@ setup:
 `_setup.yml` runs `ci_scripts/pending_versions.py` and returns a JSON version
 list:
 
-- without a dispatch glob, every pending version is returned;
+- without a dispatch glob, every pending version is returned, except that on a
+  pull request from a `package/<pkg>` branch only the versions the PR adds to
+  `docs/packages/<pkg>.yaml` on top of the base branch are returned, so linking
+  a release does not rebuild versions already merged but not yet released;
 - with a dispatch glob, every matching declared version is returned, including
   versions already released;
 - if nothing is pending, it returns `[]`.
