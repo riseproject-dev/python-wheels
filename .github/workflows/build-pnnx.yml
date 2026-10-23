@@ -98,10 +98,14 @@ jobs:
           # REQUIRED), probed via `import torch` when no Torch_INSTALL_DIR is set);
           # torch has no riscv64 wheel on public PyPI, only on our own registry.
           CIBW_BEFORE_BUILD: "pip install --only-binary=:all: torch"
+          # The pnnx executable is non-PIE; keep its base above vm.mmap_min_addr once auditwheel's
+          # patchelf prepends a segment, or it dies silently at exec (gotcha 595).
           CIBW_ENVIRONMENT: >-
             CMAKE_BUILD_PARALLEL_LEVEL=8
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=torch
+            PNNX_VERSION=${{ env.PNNX_VERSION }}
+            LDFLAGS="-Wl,-Ttext-segment=0x200000"
           # setup.py's CMakeBuild shells out to cmake, which re-probes `import
           # torch` itself; an isolated build env would not see the torch
           # CIBW_BEFORE_BUILD already installed.
@@ -112,10 +116,11 @@ jobs:
           # this wheel converts plain TorchScript graphs but skips ONNX
           # import/export and torchvision-op fusion.
           CIBW_TEST_SOURCES: tools/pnnx/python/tests
-          CIBW_TEST_REQUIRES: pytest packaging
+          # The *_pnnx.py modules pnnx generates import numpy unconditionally.
+          CIBW_TEST_REQUIRES: pytest packaging numpy
           CIBW_TEST_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=torch
+            PIP_ONLY_BINARY=torch,numpy
           CIBW_TEST_COMMAND: python -m pytest tools/pnnx/python/tests -v
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
