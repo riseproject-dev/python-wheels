@@ -74,14 +74,19 @@ jobs:
           sparse-checkout: patches/lancedb
           persist-credentials: false
 
+      # v0.40.0 pins lance 13.0.0, which ships its own non-SIMD fallback for
+      # riscv64, so it needs neither the lance checkout nor these patches.
       - name: Apply lancedb patches
-        run: git apply -v python-wheels/patches/lancedb/${{ env.LANCEDB_VERSION }}/0001*.patch
+        run: |
+          patches="$PWD/python-wheels/patches/lancedb/${LANCEDB_VERSION}"
+          if [ -d "$patches" ]; then git apply -v "$patches"/0001*.patch; fi
 
       # lancedb pins lance-core/lance-linalg to a different exact version per
       # release (10.0.0 for v0.37.1, 11.0.0 for v0.38.0, 12.0.0 for v0.39.0),
       # so the sibling checkout below must track whatever this lancedb tag's
       # own Cargo.toml pins rather than a fixed tag.
       - name: Determine the lance-core/lance-linalg version lancedb pins
+        if: hashFiles(format('python-wheels/patches/lancedb/{0}/0002*.patch', env.LANCEDB_VERSION)) != ''
         run: echo "LANCE_VERSION=$(grep -m1 '^lance-core = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" >> "$GITHUB_ENV"
 
       # lance-core's SIMD_SUPPORT static and lance-linalg's f32x8/f32x16/
@@ -90,6 +95,7 @@ jobs:
       # to this checkout, and Cargo.toml's `[patch.crates-io]` (0001) redirects
       # both crates here.
       - name: Checkout lance v${{ env.LANCE_VERSION }} and add a riscv64 SIMD fallback
+        if: hashFiles(format('python-wheels/patches/lancedb/{0}/0002*.patch', env.LANCEDB_VERSION)) != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: lancedb/lance
@@ -98,6 +104,7 @@ jobs:
           persist-credentials: false
 
       - name: Apply lance patches
+        if: hashFiles(format('python-wheels/patches/lancedb/{0}/0002*.patch', env.LANCEDB_VERSION)) != ''
         run: cd lance && git apply -v ../python-wheels/patches/lancedb/${{ env.LANCEDB_VERSION }}/0002*.patch
 
       - name: Free disk space
