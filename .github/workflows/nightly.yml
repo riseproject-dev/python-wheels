@@ -79,27 +79,16 @@ jobs:
           # wheel publication. This preserves publication metadata already
           # waiting for review while keeping unrelated packages isolated.
           #
-          # While a PR is open for the branch, build on top of it without
-          # rebasing: a force push re-triggers every workflow on the PR, even
-          # when they were passing and nothing conflicted. Only a branch with
-          # no open PR is rebased onto the current main.
+          # An existing branch is built on as it is, never rebased: a force push
+          # re-triggers every workflow on its PR, even when they were passing
+          # and nothing conflicted. Conflicts with main are left to be fixed
+          # manually.
           open_pr() {
             local package="$1" slug="$2" title="$3"
-            local branch="package/$slug" pr pr_title="$slug: update packages" remote_sha=""
-            local push_args=()
-
-            pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url') || return 1
+            X
 
             if git fetch --quiet origin "$branch" 2>/dev/null; then
-              remote_sha=$(git rev-parse FETCH_HEAD) || return 1
-              git switch --force-create "$branch" "$remote_sha" || return 1
-              if [ -z "$pr" ]; then
-                if ! git rebase "$base"; then
-                  git rebase --abort || true
-                  return 1
-                fi
-                push_args=(--force-with-lease="$branch:$remote_sha")
-              fi
+              git switch --force-create "$branch" FETCH_HEAD || return 1
             else
               git switch --force-create "$branch" "$base" || return 1
             fi
@@ -108,9 +97,6 @@ jobs:
               ci_scripts/check_versions.py --declare "$package" || return 1
 
             if git diff --quiet -- docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt; then
-              if [ -n "$remote_sha" ] && [ "$(git rev-parse HEAD)" != "$remote_sha" ]; then
-                git push "${push_args[@]}" origin "$branch" || return 1
-              fi
               echo "$package: nothing to declare"
               return 0
             fi
@@ -118,8 +104,9 @@ jobs:
             git add docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt || return 1
             git commit -s -m "$title" || return 1
 
-            git push "${push_args[@]}" origin "$branch" || return 1
+            git push origin "$branch" || return 1
 
+            pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url') || return 1
             if [ -n "$pr" ]; then
               gh pr edit "$pr" --title "$pr_title" --body-file "$REPORTS/$slug.md" || return 1
               echo "Updated $pr"
