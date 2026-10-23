@@ -50,7 +50,7 @@ jobs:
     if: needs.setup.outputs.versions != '[]'
     name: Build scipp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +66,6 @@ jobs:
         with:
           repository: scipp/scipp
           ref: ${{ env.SCIPP_VERSION }}
-          fetch-depth: 0  # setuptools_scm needs history to determine the version
           persist-credentials: false
 
       - name: Checkout python-wheels
@@ -97,17 +96,20 @@ jobs:
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # pip resolves cmake>=3.28 (our registry's newest is 4.0.3); CPM-fetched
-          # dependencies' own cmake_minimum_required predates CMake 4's floor.
+          # dependencies' own cmake_minimum_required predates CMake 4's floor. The
+          # patched (dirty) checkout would otherwise read as 26.8.1.dev0+g<sha>.
           CIBW_ENVIRONMENT: >-
             CMAKE_POLICY_VERSION_MINIMUM=3.5
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SCIPP=${{ env.SCIPP_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           CIBW_TEST_EXTRAS: test
           CIBW_TEST_REQUIRES: scipy graphviz pooch hypothesis
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m; f = {p.name for p in m.files('scipp') if '.dist-info/licenses/' in str(p)}; assert f == {'LICENSE', 'LICENSE.units', 'LICENSE.boost', 'LICENSE.eigen', 'LICENSE.tbb'}, f"
             && pytest --ignore {project}/tests/plotting --ignore {project}/tests/hypothesis/ --ignore {project}/tests/experimental/ {project}/tests
-          # numpy/scipy have no riscv64 wheel on public PyPI; keep pip on our registry's copies.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy
+          # These have no (or lagging) riscv64 wheels on public PyPI; keep pip on our
+          # registry's copies instead of building a newer sdist in the test venv.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,psutil,hypothesis
 
       - name: Check wheel contents
         run: |
