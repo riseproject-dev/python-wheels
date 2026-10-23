@@ -62,7 +62,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: SheffieldML/GPy
-          ref: v${{ env.GPY_VERSION }}
+          # Upstream also has a v1.14.2 *branch* (still at 1.14.1), which a bare ref resolves to first.
+          ref: refs/tags/v${{ env.GPY_VERSION }}
           persist-credentials: false
 
       - name: Build wheels
@@ -73,16 +74,18 @@ jobs:
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BUILD_FRONTEND: build
-          # numpy, scipy and Cython are build requirements; only our registry has them
-          # for riscv64, so PIP_ONLY_BINARY keeps a newer PyPI sdist from winning the
+          # numpy, scipy and Cython (build) and matplotlib's compiled deps (test) need a
+          # riscv64 wheel; PIP_ONLY_BINARY keeps a newer PyPI sdist from winning the
           # resolution and compiling from source instead.
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,Cython
+            PIP_ONLY_BINARY=numpy,scipy,Cython,matplotlib,pillow,contourpy,kiwisolver
           CIBW_TEST_REQUIRES: pytest matplotlib
+          # The suite lives inside the package: --pyargs runs the wheel's copy, while
+          # {project}/GPy/testing would import GPy from the uncompiled checkout.
           CIBW_TEST_COMMAND: >-
-            python -c "from GPy.kern.src import stationary_cython, choleskies_cython, linalg_cython, coregionalize_cython, state_space_cython"
-            && pytest {project}/GPy/testing
+            python -c "from GPy.kern.src import stationary_cython, coregionalize_cython; from GPy.util import choleskies_cython, linalg_cython; from GPy.models import state_space_cython"
+            && pytest --pyargs GPy.testing
 
       - name: Check wheel contents
         run: |
@@ -92,7 +95,7 @@ jobs:
           exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
           assert exts == {"stationary_cython", "choleskies_cython", "linalg_cython", "coregionalize_cython", "state_space_cython"}, exts
           licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
-          assert licences == {"LICENSE.txt"}, licences
+          assert licences == {"AUTHORS.txt", "LICENSE.txt"}, licences
           EOF
 
       - name: Store wheels
