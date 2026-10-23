@@ -61,6 +61,13 @@ jobs:
           ref: v${{ env.PYSCTP_VERSION }}
           persist-credentials: false
 
+      # SCTP sockets are served by the host kernel, not the build container. The
+      # riscv64 runner kernel does not autoload SCTP (socket(..., IPPROTO_SCTP)
+      # fails with EPROTONOSUPPORT), so try loading the module explicitly; the
+      # test below runs upstream's loopback round-trip only when this works.
+      - name: Load the SCTP kernel module if the runner kernel ships one
+        run: sudo modprobe sctp || echo "::notice::runner kernel $(uname -r) has no SCTP module"
+
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
@@ -70,7 +77,41 @@ jobs:
           # Mirrors upstream's own .github/workflows/wheels.yml, which skips
           # musllinux (no lksctp-tools-dev package on Alpine).
           CIBW_BEFORE_ALL_LINUX: dnf install -y lksctp-tools-devel
-          CIBW_TEST_COMMAND: python3 {project}/test_loopback.py
+          # Stage only the test script so the checkout's sctp.py cannot shadow
+          # the wheel's (gotcha 25). Upstream's test_loopback.py needs a kernel
+          # with SCTP; without one, exercise the extension's C paths that do
+          # not (constant table, sockaddr marshalling, libsctp + SOL_SCTP
+          # sockopt error paths on a TCP fd) and skip only the round-trip.
+          CIBW_TEST_SOURCES: test_loopback.py
+          CIBW_TEST_COMMAND: |
+            python3 - <<'PYEOF'
+            import errno, socket, subprocess, sys
+            import _sctp, sctp
+            assert "site-packages" in sctp.__file__, sctp.__file__
+            assert "site-packages" in _sctp.__file__ and _sctp.__file__.endswith(".so"), _sctp.__file__
+            assert _sctp.getconstant("IPPROTO_SCTP") == 132
+            assert sctp.features() & sctp.HAVE_SCTP
+            for host, family, size in (("127.0.0.1", socket.AF_INET, 16), ("::1", socket.AF_INET6, 28)):
+                got = _sctp._sockaddr_test((host, 10001))[1:]
+                assert got == (family, size, (host, 10001)), got
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+                for call in (lambda: _sctp.get_nodelay(tcp.fileno()),
+                             lambda: _sctp.bindx(tcp.fileno(), [("127.0.0.1", 0)], sctp.BINDX_ADD)):
+                    try:
+                        call()
+                    except OSError as e:
+                        assert e.errno in (errno.ENOPROTOOPT, errno.EOPNOTSUPP), e
+                    else:
+                        raise SystemExit("expected SOL_SCTP to be rejected on a TCP socket")
+            try:
+                socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_SCTP).close()
+            except OSError as e:
+                if e.errno != errno.EPROTONOSUPPORT:
+                    raise
+                print("kernel has no SCTP support (EPROTONOSUPPORT): skipping test_loopback.py")
+            else:
+                subprocess.run([sys.executable, "test_loopback.py"], check=True)
+            PYEOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
