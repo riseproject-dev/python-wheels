@@ -32,7 +32,9 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+  # Final PCRE1 release; superstrings needs libpcre + libpcrecpp (PCRE1, not PCRE2).
+  PCRE_VERSION: '8.45'
+  PCRE_SHA256: '4e6ce03e0336e8b4a3d6c2b70b1c5e18590a5673a98186da90d4f33c23defc09'
 
 jobs:
   setup:
@@ -44,17 +46,22 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build vaex-core ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    name: Build vaex-core ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 180
+    # The four C++ extensions (-O3 -g, heavily templated) take ~2h40m to
+    # compile on the riscv64 runner on their own; 180 left no headroom.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # vaex-core's own setup.py pins python_requires to >=3.9,<3.13, the
-        # same cp39-cp312 span upstream publishes wheels for.
-        python: ["cp39", "cp310", "cp311", "cp312"]
-        libc: [manylinux, musllinux]
+        # vaex-core's setup.py allows >=3.9,<3.13 and upstream ships cp39-cp312
+        # for manylinux and musllinux, but its hard runtime requirement pyarrow
+        # has riscv64 wheels for cp312+ manylinux only (and numpy/pandas/blake3
+        # none for musllinux riscv64), so every other entry would be a wheel
+        # nobody can install on riscv64 (gotcha 84). Add them back as those
+        # ports land.
+        python: ["cp312"]
 
     env:
       VAEX_CORE_VERSION: ${{ matrix.version }}
@@ -75,30 +82,45 @@ jobs:
         with:
           package-dir: packages/vaex-core
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # superstrings links against pcre/pcrecpp (upstream's own
-          # bin/install_pcre.sh: a distro package, falling back to a source
-          # build); manylinux_2_39_riscv64 is Rocky-based (dnf), musllinux is
-          # Alpine (apk). python3-dev/openssl-dev mirror upstream's own
-          # musllinux CIBW_BEFORE_BUILD_LINUX for its pyproject.toml build deps.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            if command -v apk > /dev/null; then
-              apk add --no-cache pcre-dev python3-dev openssl-dev
-            else
-              dnf install -y pcre-devel
-            fi
-          CIBW_TEST_COMMAND: python -c "import vaex; print(vaex.from_arrays(x=[1,2]))"
+          # superstrings links against pcre/pcrecpp. Upstream's
+          # bin/install_pcre.sh tries a distro package, then falls back to a
+          # source build. manylinux_2_39_riscv64 is Rocky Linux 10, and RHEL 10
+          # dropped PCRE1 (only pcre2 is left), so `dnf install pcre-devel`
+          # finds nothing. We take the source-build path with the final PCRE1
+          # release, using the flags distro packages use (no JIT: PCRE1's sljit
+          # has no riscv64 backend). --libdir=/usr/lib64 keeps the libraries on
+          # the riscv64 linker path (gotcha 140). auditwheel vendors
+          # libpcre/libpcrecpp into the wheel, so PCRE's BSD licence goes in
+          # too: setuptools' default LICEN[CS]E* glob picks it up from the
+          # package dir.
+          CIBW_BEFORE_ALL_LINUX: >-
+            cd /tmp &&
+            curl -fsSL --retry 5 -o pcre-${{ env.PCRE_VERSION }}.tar.gz https://sourceforge.net/projects/pcre/files/pcre/${{ env.PCRE_VERSION }}/pcre-${{ env.PCRE_VERSION }}.tar.gz/download &&
+            echo "${{ env.PCRE_SHA256 }}  pcre-${{ env.PCRE_VERSION }}.tar.gz" | sha256sum -c - &&
+            tar xzf pcre-${{ env.PCRE_VERSION }}.tar.gz &&
+            (cd pcre-${{ env.PCRE_VERSION }} && ./configure --prefix=/usr --libdir=/usr/lib64 --disable-static --enable-cpp --enable-utf --enable-unicode-properties && make -j"$(nproc)" && make install) &&
+            cp pcre-${{ env.PCRE_VERSION }}/LICENCE /project/packages/vaex-core/LICENSE.pcre
+          # Upstream's import smoke test, plus a regex search so pcrecpp is
+          # really called, plus a check that the PCRE licence made it in.
+          CIBW_TEST_COMMAND: >-
+            python -c "import vaex, importlib.metadata as md;
+            df = vaex.from_arrays(x=[1,2], s=['ab', 'cd']); print(df);
+            assert df.s.str.contains('^a.').tolist() == [True, False];
+            n = {p.name for p in md.files('vaex-core') if '.dist-info/licenses/' in str(p)};
+            assert n == {'LICENSE.txt', 'LICENSE.pcre'}, n"
+          # Only the compiled distributions are forced to wheels. `:all:` also
+          # rejected aplus, a pure-Python requirement that only ships an sdist
+          # ("No matching distribution found for aplus", gotcha 488).
           CIBW_TEST_ENVIRONMENT_LINUX: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=:all:
+            PIP_ONLY_BINARY=numpy,pandas,pyarrow,blake3,pydantic-core,pyyaml
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: vaex_core-${{ env.VAEX_CORE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          name: vaex_core-${{ env.VAEX_CORE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
