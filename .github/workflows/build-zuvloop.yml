@@ -51,6 +51,11 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp314", "cp314t", "cp315", "cp315t"]
+        include:
+          # hypothesis ships no cp314t riscv64 wheel and its sdist needs a Rust
+          # toolchain riscv64 lacks; pin its last pure-Python release there.
+          - python: cp314t
+            hypothesis: "hypothesis<6.156"
 
     env:
       ZUVLOOP_VERSION: ${{ matrix.version }}
@@ -78,6 +83,20 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The applied patch dirties the tree, so hatch-vcs would stamp the next .dev0.
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.ZUVLOOP_VERSION }}
+          CIBW_TEST_REQUIRES: aiohttp anyio httptools ${{ matrix.hypothesis || 'hypothesis' }} opentelemetry-sdk pytest pytest-timeout uvicorn
+
+      - name: Check the wheel is compiled and carries the release version
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import os, sys, zipfile
+          for whl in sys.argv[1:]:
+              assert os.path.basename(whl).startswith(f"zuvloop-{os.environ['ZUVLOOP_VERSION']}-"), whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("zuvloop/_zuvloop.") and n.endswith(".so") for n in names), names
+              print(whl, "ok")
+          EOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
