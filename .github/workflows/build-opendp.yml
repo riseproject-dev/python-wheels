@@ -104,7 +104,11 @@ jobs:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build opendp ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 240
+    # The polars-ffi feature pulls in polars (features=["full"]) plus
+    # polars-python; the riscv64 cargo build alone was still compiling those
+    # 3h54m in when a 240-minute limit cancelled it (twice). Generous margin
+    # as for other heavy Rust/polars ports (gotcha 365, polars-lts-cpu).
+    timeout-minutes: 1440
     env:
       OPENDP_VERSION: ${{ matrix.version }}
 
@@ -120,14 +124,17 @@ jobs:
 
       # One cp3xx-abi3 wheel (setup.cfg's [bdist_wheel] py_limited_api, since the
       # cdylib has no CPython linkage at all - see the file header); cibuildwheel
-      # builds it once and reuses it across the other selectors.
+      # builds it once and reuses it across the other selectors. manylinux only:
+      # 'cp3xx-*' also selects musllinux, whose Alpine image has no dnf for
+      # CIBW_BEFORE_ALL_LINUX, and would rerun the whole multi-hour cargo
+      # build for an artifact this workflow never uploads.
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
-          CIBW_BUILD: 'cp312-* cp313-* cp314-*'
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # No Rust in the manylinux image; default features pull in a vendored
           # OpenSSL build (openssl-src), which needs perl + a C compiler, and
