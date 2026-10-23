@@ -84,11 +84,15 @@ jobs:
           # libsodium the same way build-bittensor-wallet.yml does and hand it
           # over through SODIUM_LIB_DIR. openssl-sys (vendored, for fernet)
           # needs a perl with IPC::Cmd, which this manylinux image's minimal
-          # perl lacks.
+          # perl lacks. subtensor-macros' #[freeze_struct] hashes with ahash,
+          # whose build.rs matches target_arch "riscv64gc" (never true; it is
+          # "riscv64"), so on riscv64 it skips folded_multiply and computes
+          # different hashes than the ones frozen upstream on x86_64/aarch64.
           before-script-linux: |
             yum install -y perl-core openssl openssl-devel pkgconfig libatomic
             cargo fetch --locked --manifest-path "$GITHUB_WORKSPACE/sdk/bittensor-core-py/Cargo.toml"
             registry=$(echo "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*)
+            sed -i 's/"riscv64gc"/"riscv64"/' "$registry/ahash-0.8.12/build.rs"
             cp -a "$registry/libsodium-sys-0.2.7/libsodium" /tmp/libsodium
             (cd /tmp/libsodium && ./configure --prefix=/opt/libsodium --enable-shared=no --with-pic && make -j"$(nproc)" check && make install)
             export SODIUM_LIB_DIR=/opt/libsodium/lib
@@ -125,8 +129,6 @@ jobs:
       # live under sdk/python/ for the separate `bittensor` SDK package).
       # Smoke-test the abi3 wheel against a well-known Substrate dev key.
       - name: Run smoke test
-        env:
-          UV_ONLY_BINARY: ':all:'
         run: |
           uv pip install dist/*.whl
           python3 - <<'EOF'
