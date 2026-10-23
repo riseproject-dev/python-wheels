@@ -52,6 +52,12 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         libc: [manylinux, musllinux]
+        include:
+          # The manylinux GCC links non-PIE at riscv64's 0x10000 (= mmap_min_addr); the segment
+          # auditwheel's patchelf prepends for the RPATH lands below it and the CLIs die at exec
+          # (gotcha 595). Alpine's GCC links PIE by default, so musllinux is unaffected.
+          - libc: manylinux
+            ldflags: -Wl,-Ttext-segment=0x200000
 
     env:
       TIPPECANOE_VERSION: ${{ matrix.version }}
@@ -89,6 +95,7 @@ jobs:
               apk add sqlite-dev
             fi
             curl -sL https://raw.githubusercontent.com/felt/tippecanoe/${{ env.TIPPECANOE_VERSION }}/LICENSE.md -o {project}/LICENSE.felt-tippecanoe
+          CIBW_ENVIRONMENT_LINUX: LDFLAGS="${{ matrix.ldflags }}"
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('tippecanoe') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.felt-tippecanoe', 'NOTICE'], f"
             && tippecanoe --version
