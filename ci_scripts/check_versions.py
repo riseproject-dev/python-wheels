@@ -15,6 +15,7 @@ https://gitlab.com/riseproject/python/wheel_builder/-/blob/main/ci_scripts/check
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -30,6 +31,7 @@ from update_doc import normalize_name, version_blocks
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "docs" / "packages"
+PATCHES_DIR = ROOT_DIR / "patches"
 PACKAGES_FILE = "ci_scripts/packages.txt"
 DEPRECATED_FILE = "ci_scripts/deprecated.txt"
 REPO = "riseproject-dev/python-wheels"
@@ -321,6 +323,55 @@ def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
     return added
 
 
+def carry_over_patches(
+    package: str, new_versions: List[str], declared: Set[str], patches_dir: Path = PATCHES_DIR
+) -> List[str]:
+    """
+    Copy patches/<pkg>/<previous>/ to patches/<pkg>/<new>/ for each new version,
+    where <previous> is the version declared immediately before <new> (new
+    versions are handled in order, so each one follows the one before it).
+
+    Only that one preceding version is considered: if it has no patch
+    directory, the new version gets none either, since its patches may have
+    been upstreamed since. A local suffix of the previous directory
+    (`2.13.0+cpu`) is kept. Versions that already have a directory are left
+    alone. Returns the directories created, relative to `patches_dir`.
+    """
+    package_dir = next(
+        (d for d in sorted(patches_dir.glob("*")) if d.is_dir() and normalize_name(d.name) == normalize_name(package)),
+        None,
+    )
+    if package_dir is None:
+        return []
+
+    # Public version -> patch directory name.
+    dirs = {}
+    for d in package_dir.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            dirs[version.Version(d.name).public] = d.name
+        except version.InvalidVersion:
+            continue
+
+    known = sorted(set(declared) | set(new_versions), key=version.parse)
+    created = []
+    for new in sorted(new_versions, key=version.parse):
+        new_public = version.parse(new).public
+        index = known.index(new)
+        if index == 0 or new_public in dirs:
+            continue
+        source = dirs.get(version.parse(known[index - 1]).public)
+        if source is None:
+            continue
+        local = version.Version(source).local
+        target = package_dir / (f"{new}+{local}" if local else new)
+        shutil.copytree(package_dir / source, target)
+        dirs[new_public] = target.name
+        created.append(str(target.relative_to(patches_dir)))
+    return created
+
+
 def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
     """
     Released versions of the YAML whose PyPI release is fully yanked and that
@@ -463,6 +514,8 @@ def check_upgrade(
         if declare:
             added = declare_versions(package_yaml(package), new_versions)
             print(f"    [+] declared {', '.join(f'v{v}' for v in added)} in {package_yaml(package).relative_to(ROOT_DIR)}")
+            for created in carry_over_patches(package, added, declared):
+                print(f"    [+] copied the patches of the previous version to patches/{created}")
         return {
             "status": "need_upgrade",
             "package": package,
@@ -715,6 +768,27 @@ def _self_test():
         "arch: mark v1.0 yanked upstream"
     # The body names the package YAML by its normalized name, not PyPI's spelling.
     assert "docs/packages/pyyaml.yaml" in package_report(upgrade)
+
+    # Patches are carried over only from the immediately preceding version.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name in ("1.0.0", "2.0.0"):
+            (root / "My_Pkg" / name).mkdir(parents=True)
+            (root / "My_Pkg" / name / "0001-fix.patch").write_text(name)
+        (root / "torch" / "2.13.0+cpu").mkdir(parents=True)
+        (root / "torch" / "2.13.0+cpu" / "0001-fix.patch").write_text("x")
+        declared = {"1.0.0", "1.1.0", "2.0.0"}  # 1.1.0 is on main without patches
+        # 1.2.0 follows 1.1.0, which has none: nothing is copied (upstreamed).
+        assert carry_over_patches("my-pkg", ["1.2.0"], declared, root) == []
+        # 2.1.0 and 2.2.0 chain from 2.0.0 and then from 2.1.0.
+        assert carry_over_patches("my-pkg", ["2.2.0", "2.1.0"], declared, root) == \
+            ["My_Pkg/2.1.0", "My_Pkg/2.2.0"]
+        assert (root / "My_Pkg" / "2.2.0" / "0001-fix.patch").read_text() == "2.0.0"
+        # A new version below everything declared has no predecessor.
+        assert carry_over_patches("my-pkg", ["0.9.0"], declared, root) == []
+        assert carry_over_patches("unpatched", ["1.0.0"], {"0.1"}, root) == []
+        assert carry_over_patches("torch", ["2.14.0"], {"2.13.0"}, root) == ["torch/2.14.0+cpu"]
 
     print("[+] self-test passed")
 
