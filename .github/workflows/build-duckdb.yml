@@ -49,8 +49,11 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # From 2.0.0 the bindings link the stable ABI (`py-api = "cp312"` in
+        # pyproject.toml), so one cp312-abi3 wheel serves CPython 3.12 and up;
+        # building cp313/cp314 too would only produce the same file name again.
         # Upstream publishes no free-threaded wheel.
-        python: ["cp312", "cp313", "cp314"]
+        python: ["cp312"]
 
     env:
       DUCKDB_VERSION: ${{ matrix.version }}
@@ -73,10 +76,13 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Upstream's build[uv] frontend crashes cibuildwheel's audit step here (no host uv).
           CIBW_BUILD_FRONTEND: build
-          # Clears upstream's `yum install -y ccache`: ccache is EPEL-only, and the riscv64 manylinux image has no EPEL.
-          CIBW_BEFORE_BUILD: ''
+          # Upstream's `yum install -y ccache clang lld` minus ccache (EPEL-only, and the riscv64 manylinux image has no
+          # EPEL): since 2.0.0 the Linux wheels link with ThinLTO (DUCKDB_PY_LTO=thin), which needs clang and lld.
+          CIBW_BEFORE_BUILD: yum install -y clang lld
           # Upstream's release job pins the version the same way (packaging.yml set-version).
           CIBW_ENVIRONMENT: >-
+            CC=clang
+            CXX=clang++
             OVERRIDE_GIT_DESCRIBE=v${{ env.DUCKDB_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Test phase only, so it can't starve the build backend (gotcha 12).
