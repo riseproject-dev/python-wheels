@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `test`, `linux` and `musllinux` jobs of
+# https://github.com/Yiling-J/theine-core/blob/v2.1.0/.github/workflows/CI.yml
+name: Build theine-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/theine-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-theine-core.yml'
+      - 'docs/packages/theine-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-theine-core.yml'
+      - 'docs/packages/theine-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: theine-core
+      version: ${{ inputs.version }}
+
+  test:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test theine-core ${{ matrix.version }} Rust crate
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      THEINE_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout theine-core v${{ env.THEINE_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Yiling-J/theine-core
+          ref: v${{ env.THEINE_CORE_VERSION }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+
+      - run: cargo test
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build theine-core ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+        platform: ['manylinux', 'musllinux']
+
+    env:
+      THEINE_CORE_VERSION: ${{ matrix.version }}
+      IMAGE: ${{ matrix.platform == 'manylinux' && 'quay.io/pypa/manylinux_2_39_riscv64' || 'quay.io/pypa/musllinux_1_2_riscv64' }}
+
+    steps:
+      - name: Checkout theine-core v${{ env.THEINE_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Yiling-J/theine-core
+          ref: v${{ env.THEINE_CORE_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+          echo "prefix=/opt/python/cp${v%t}-${{ matrix.python }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-${{ matrix.platform == 'manylinux' && 'gnu' || 'musl' }}
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: ${{ matrix.platform == 'manylinux' && '2_39' || 'musllinux_1_2' }}
+          # The action maps no musllinux image for a riscv64 host.
+          container: ${{ env.IMAGE }}
+
+      - name: Test wheel
+        run: |
+          cat > "$RUNNER_TEMP/smoke.py" <<'EOF'
+          import theine_core as m
+          assert m.theine_core.__file__.endswith('.so'), m.theine_core.__file__
+          M = (1 << 64) - 1
+          def spread(h):
+              z = h & M
+              z = ((z ^ (z >> 30)) * 0xbf58476d1ce4e5b9) & M
+              z = ((z ^ (z >> 27)) * 0x94d049bb133111eb) & M
+              return z ^ (z >> 31)
+          for h in (0, 1, -1, 12345, -(1 << 63), (1 << 63) - 1):
+              assert m.spread(h) == spread(h), h
+          core = m.TlfuCore(100)
+          keys = [m.spread(i) for i in range(1000)]
+          evicted = core.set([(k, 0) for k in keys])
+          assert core.len() <= 100 and len(evicted) == 1000 - core.len(), (core.len(), len(evicted))
+          kept = core.keys()
+          core.access(kept)
+          assert core.remove(kept[0]) == kept[0] and core.remove(kept[0]) is None
+          info = core.debug_info()
+          assert info.len == core.len() == info.window_len + info.probation_len + info.protected_len
+          core.advance()
+          core.clear()
+          assert core.len() == 0
+          bf = m.BloomFilter(1000, 0.01)
+          for k in keys[:100]:
+              bf.put(k)
+          assert all(bf.contains(k) for k in keys[:100])
+          assert sum(bf.contains(k) for k in keys[500:]) < 50
+          EOF
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$RUNNER_TEMP/smoke.py:/smoke.py:ro" -w / "$IMAGE" sh -ec "
+            ${{ steps.interp.outputs.prefix }}/bin/python -m pip install --no-index --find-links /dist theine_core
+            ${{ steps.interp.outputs.prefix }}/bin/python -W error -I /smoke.py"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: theine-core-${{ env.THEINE_CORE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish theine-core ${{ matrix.version }}
+    needs: [setup, test, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: theine-core-${{ matrix.version }}-*_riscv64
