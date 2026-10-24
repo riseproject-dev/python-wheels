@@ -160,8 +160,15 @@ jobs:
           #!/bin/bash
           set -e -x
 
+          extra_args=()
           case "${PYTHON_TAG}" in
-            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *t)
+              python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin"
+              # test_init_rss_within_budget checks the whole process's RSS (interpreter, pytest, pydantic
+              # and all earlier tests) against a fixed 64 MB, which a free-threaded process exceeds on any
+              # arch (71 MB here, 75 MB with upstream's x86_64 wheel); upstream only tests 3.11/3.12.
+              extra_args+=(--deselect tests/test_memory_baseline.py::TestLiveFFIMemory::test_init_rss_within_budget)
+              ;;
             *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
           esac
           export PATH="${python_dir}:${PATH}"
@@ -187,7 +194,8 @@ jobs:
           # assertion, and a 404 message check predating the v2.2.0 "not_yet_registered:" format.
           CIRIS_VERIFY_LIVE_TESTS=1 python -m pytest -v -p no:cacheprovider tests \
             --deselect tests/test_client.py::TestMockCIRISVerify::test_capability_check_licensed \
-            --deselect tests/test_client.py::TestVerifyTreeFFI::test_walk_succeeds_registry_returns_404
+            --deselect tests/test_client.py::TestVerifyTreeFFI::test_walk_succeeds_registry_returns_404 \
+            "${extra_args[@]}"
           EOF
 
       - name: Install the wheel and run upstream's Python test suite
