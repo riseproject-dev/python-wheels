@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000006 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Fri, 9 Oct 2026 00:00:00 +0000
+Subject: [PATCH 6/7] xnnpack: only query cpuinfo uarchs once cpuinfo is
+ initialized
+
+init_hardware_config() checks cpuinfo_initialize() before reading the L1/L2
+data cache sizes, but the loop that fills hardware_config.uarch[] right
+after it sits outside that check and calls cpuinfo_get_uarch()
+unconditionally. When cpuinfo cannot initialize, cpuinfo_get_uarch() is
+fatal:
+
+  Fatal error in cpuinfo: cpuinfo_get_uarch called before cpuinfo is initialized
+
+and the process aborts. XnnpackBackend's static registration calls
+xnn_initialize() while _portable_lib is being loaded, so this kills
+`import executorch.extension.pybindings.portable_lib` outright.
+
+xnn_init_hardware_config() deliberately skips its cpuinfo_initialize()
+gate on XNN_ARCH_RISCV and XNN_ARCH_PPC64 (both detect their vector
+extensions through getauxval() instead), so on those architectures
+init_hardware_config() is reached with cpuinfo uninitialized whenever
+cpuinfo cannot parse the host's topology - e.g. a riscv64 kernel that
+reports /sys/devices/system/cpu/cpuN/topology/core_id as -1. Only query
+the uarchs when cpuinfo_initialize() succeeds and otherwise record
+xnn_uarch_unknown, which is what the !XNN_ENABLE_CPUINFO branch already
+does.
+
+Upstream-Status: To upstream [not yet submitted to google/XNNPACK; unchanged on XNNPACK master, affects every architecture whose xnn_init_hardware_config() skips the cpuinfo_initialize() gate (riscv64, ppc64) on hosts where cpuinfo cannot initialize]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ .../XNNPACK/src/configs/hardware-config.c     | 22 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/backends/xnnpack/third-party/XNNPACK/src/configs/hardware-config.c b/backends/xnnpack/third-party/XNNPACK/src/configs/hardware-config.c
+index da518a1..620c202 100644
+--- a/backends/xnnpack/third-party/XNNPACK/src/configs/hardware-config.c
++++ b/backends/xnnpack/third-party/XNNPACK/src/configs/hardware-config.c
+@@ -448,16 +448,22 @@ static void init_hardware_config(void) {
+       }
+     }
+ 
++    if (cpuinfo_initialize()) {
+ #if XNN_MAX_UARCH_TYPES > 1
+-    // Print what we think we know about the microarchs.
+-    xnn_log_info("cpuinfo_get_uarchs_count: %u.", cpuinfo_get_uarchs_count());
+-    for (int i = 0; i < cpuinfo_get_uarchs_count(); i++) {
+-      xnn_log_info("cpu_get_uarch(%i): 0x%x", i, cpuinfo_get_uarch(i)->uarch);
+-    }
++      // Print what we think we know about the microarchs.
++      xnn_log_info("cpuinfo_get_uarchs_count: %u.", cpuinfo_get_uarchs_count());
++      for (int i = 0; i < cpuinfo_get_uarchs_count(); i++) {
++        xnn_log_info("cpu_get_uarch(%i): 0x%x", i, cpuinfo_get_uarch(i)->uarch);
++      }
+ #endif  // XNN_MAX_UARCH_TYPES > 1
+-    for (size_t i = 0; i < XNN_MAX_UARCH_TYPES; ++i) {
+-      const struct cpuinfo_uarch_info* uarch = cpuinfo_get_uarch(i);
+-      hardware_config.uarch[i] = uarch ? cpuinfo_to_xnn_uarch(uarch->uarch) : xnn_uarch_unknown;
++      for (size_t i = 0; i < XNN_MAX_UARCH_TYPES; ++i) {
++        const struct cpuinfo_uarch_info* uarch = cpuinfo_get_uarch(i);
++        hardware_config.uarch[i] = uarch ? cpuinfo_to_xnn_uarch(uarch->uarch) : xnn_uarch_unknown;
++      }
++    } else {
++      for (size_t i = 0; i < XNN_MAX_UARCH_TYPES; ++i) {
++        hardware_config.uarch[i] = xnn_uarch_unknown;
++      }
+     }
+ #else
+   xnn_log_warning("Unable to determine L1/L2 data cache properties.");
+-- 
+2.43.0
+
