@@ -81,19 +81,40 @@ jobs:
           swap-size-gb: 10
 
       - name: Build build_environment
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
         run: |
           mkdir -p harvest
           docker run --rm -i --network=host \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
+            -e PIP_EXTRA_INDEX_URL \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT'
           set -eux
 
           dnf install -y --setopt=install_weak_deps=False \
             autoconf automake libtool bison flex ninja-build meson \
-            gettext texinfo help2man patchelf pkgconf-pkg-config tcl \
-            yasm python3-mako zip openssl-devel
+            gettext texinfo help2man pkgconf-pkg-config tcl \
+            python3-mako zip openssl-devel
+
+          # check_software.cmake requires both unconditionally (no riscv64/arch gate,
+          # unlike the deps the riscv64 patch skips), but neither is installable via
+          # dnf here. patchelf needs EPEL, which the image disables for riscv64
+          # (CLAUDE.md gotcha 51); install the riscv64 wheel we already publish
+          # instead (docs/packages/patchelf.yaml). yasm has no riscv64 package in any
+          # Rocky 10 repo and no real PyPI wheel either; build it from its official,
+          # pre-generated-configure release tarball (it's portable C, no x86-only host
+          # code, so it builds fine as a riscv64 host tool even though its output is
+          # x86 machine code).
+          /opt/python/cp312-cp312/bin/pip install --quiet patchelf==0.17.2.2
+          ln -s /opt/python/cp312-cp312/bin/patchelf /usr/local/bin/patchelf
+
+          curl -fsSL -o /tmp/yasm.tar.gz \
+            https://github.com/yasm/yasm/releases/download/v1.3.0/yasm-1.3.0.tar.gz
+          mkdir -p /tmp/yasm-src
+          tar -C /tmp/yasm-src --strip-components=1 -xzf /tmp/yasm.tar.gz
+          ( cd /tmp/yasm-src && ./configure --prefix=/usr/local && make -j"$(nproc)" && make install )
 
           export SOURCE_DATE_EPOCH=1745584760
           cmake -S build_files/build_environment -B deps_build \
