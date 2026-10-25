@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 06:30:19 +0000
+Subject: [PATCH] setup: scope LLVM targets to build on riscv64 linux
+
+Upstream-Status: To upstream [not yet submitted; mirrors the existing macOS arm64 branch below it]
+
+my_cmake_build.run() never passes -DLLVM_TARGETS_TO_BUILD on Linux (only
+macOS arm64 and Windows get an explicit value); src/interpreter/
+CMakeLists.txt does have a `ROOT_ARCHITECTURE MATCHES riscv64` branch that
+would set it to "RISCV;NVPTX", the same shape as its AArch64/ARM/PowerPC/
+SystemZ branches, but ROOT_ARCHITECTURE is never set in this cling-only
+build (src/CMakeLists.txt never include()s ROOT's SetUpLinux.cmake), so
+that branch is unreachable and dispatch falls through to the "all" case:
+every LLVM backend (x86, arm, aarch64, powerpc, systemz, riscv, ...), not
+just the one the build runs on. That turns an already multi-hour
+from-source LLVM+Clang+Cling build into one compiling backends that can
+never be used on this host.
+
+LLVM_TARGETS_TO_BUILD is a CACHE variable; src/interpreter/CMakeLists.txt
+only set()s it (no FORCE), so a value supplied on the cmake command line
+-- as this patch adds -- wins over that fallback, the same way the macOS
+arm64 branch immediately above already overrides it for that platform.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cling/setup.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/cling/setup.py b/cling/setup.py
+index 8dbdf4e..d390f5b 100755
+--- a/cling/setup.py
++++ b/cling/setup.py
+@@ -169,6 +169,10 @@ class my_cmake_build(_build):
+             import platform
+             if 'arm64' in platform.machine():
+                 CMAKE_COMMAND += ['-DLLVM_TARGETS_TO_BUILD=ARM;AArch64;NVPTX']
++        elif 'linux' in sys.platform:
++            import platform
++            if 'riscv64' in platform.machine():
++                CMAKE_COMMAND += ['-DLLVM_TARGETS_TO_BUILD=RISCV;NVPTX']
+         CMAKE_COMMAND.append('-DCMAKE_INSTALL_PREFIX='+prefix)
+ 
+         log.info('Running cmake for cppyy-cling: %s', ' '.join(CMAKE_COMMAND))
