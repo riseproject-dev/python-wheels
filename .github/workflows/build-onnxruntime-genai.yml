@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/microsoft/onnxruntime-genai/blob/v0.15.2/.pipelines/stages/jobs/steps/core-linux-step.yml
+# plus sdk-python-linux-step.yml, collapsed into one build.py invocation (core + Python SDK
+# together) since this repo does not need the azure pipeline's incremental per-interpreter
+# core/sdk split.
+name: Build onnxruntime-genai wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onnxruntime-genai.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime-genai.yml'
+      - 'docs/packages/onnxruntime-genai.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime-genai.yml'
+      - 'docs/packages/onnxruntime-genai.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # onnxruntime-genai links the onnxruntime C/C++ library at build time (ORT_HOME), not
+  # just the Python package; this reuses our own published riscv64 onnxruntime wheel as
+  # that native dependency (gotcha 17's dep-wheel pattern, same shape as
+  # build-sherpa-onnx-core.yml / gotcha 463). genai declares onnxruntime>=1.28.0, and
+  # 1.31.0 is the published version that covers every interpreter this build targets.
+  ONNXRUNTIME_VERSION: 1.31.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: onnxruntime-genai
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onnxruntime-genai ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # onnxruntime-genai is not abi3: upstream publishes one wheel per interpreter
+        # (cp311-cp314). No cp311 here: our onnxruntime 1.31.0 dependency wheel (above)
+        # does not cover it. No cp314t: neither onnxruntime nor onnxruntime-genai
+        # publishes a free-threaded wheel upstream.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      ONNXRUNTIME_GENAI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout onnxruntime-genai v${{ env.ONNXRUNTIME_GENAI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: microsoft/onnxruntime-genai
+          ref: v${{ env.ONNXRUNTIME_GENAI_VERSION }}
+          submodules: none
+          persist-credentials: false
+
+      - name: Write container script
+        run: |
+          mkdir -p build
+          cat > riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin"
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+
+          # Retried: a mirrorlist hiccup here otherwise throws away a multi-hour runner slot.
+          for i in 1 2 3; do dnf install -y patchelf && break || sleep 30; done
+
+          "${python_exe}" -m pip install -q -U pip setuptools wheel pybind11 numpy requests
+
+          case "$1" in
+          build)
+            # Stage ORT_HOME: the real .so keeps its upstream SONAME (libonnxruntime.so.1)
+            # unchanged -- genai's own runtime loader resolves it by soname against the
+            # separately installed onnxruntime Python package, not by bundling a copy
+            # (onnxruntime_genai/_dll_directory.py). The "libonnxruntime.so" symlink exists
+            # only so cmake/global_variables.cmake's EXISTS check and the link step find it;
+            # it is never shipped (contrast gotcha 463's sherpa-onnx-core, which re-sonames
+            # because *that* consumer needs a real file in its own wheel).
+            mkdir -p /build/ort_home/lib /build/ort_home/include
+            "${python_exe}" -m pip download --no-deps --only-binary=:all: \
+              --index-url https://pypi.riseproject.dev/simple/ \
+              -d /tmp/ort_pkg "onnxruntime==${ONNXRUNTIME_VERSION}"
+            unzip -q /tmp/ort_pkg/*.whl -d /tmp/ort_pkg/extracted
+            cp "/tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime.so.${ONNXRUNTIME_VERSION}" /build/ort_home/lib/
+            ln -sf "libonnxruntime.so.${ONNXRUNTIME_VERSION}" /build/ort_home/lib/libonnxruntime.so
+
+            # Headers are architecture-independent; pull them from upstream's aarch64 C/C++
+            # release tarball (same trick as build-sherpa-onnx-core.yml -- our own riscv64
+            # port publishes only the Python wheel, not a C/C++ SDK tarball).
+            curl -fsSL --retry 5 "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz" \
+              | tar xz -C /build/ort_home --wildcards --strip-components=1 "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/include/*.h"
+
+            "${python_exe}" /onnxruntime_genai_src/build.py \
+              --config Release \
+              --parallel \
+              --skip_tests \
+              --skip_examples \
+              --ort_home /build/ort_home \
+              --cmake_extra_defines MANYLINUX=ON \
+              --cmake_path /usr/bin/cmake \
+              --build_dir /build/out
+
+            mkdir -p /build/dist
+            find /build/out -iname "onnxruntime_genai*manylinux*.whl" -exec cp -v {} /build/dist/ \;
+            ls -la /build/dist
+            ;;
+          test)
+            "${python_exe}" -m pip install --no-index --find-links /build/dist onnxruntime_genai
+            "${python_exe}" -m pip install --index-url https://pypi.riseproject.dev/simple/ "onnxruntime==${ONNXRUNTIME_VERSION}"
+            (cd /tmp && "${python_exe}" -c "
+          import onnxruntime_genai as og
+          print(og.__version__)
+          assert og.__version__ == '${ONNXRUNTIME_GENAI_VERSION}', og.__version__")
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/onnxruntime_genai_src \
+            -v "${PWD}/build":/build \
+            --workdir /onnxruntime_genai_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e ONNXRUNTIME_VERSION \
+            -e ONNXRUNTIME_GENAI_VERSION \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /onnxruntime_genai_src/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: onnxruntime-genai-${{ env.ONNXRUNTIME_GENAI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/dist/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/onnxruntime_genai_src \
+            -v "${PWD}/build":/build \
+            --workdir /onnxruntime_genai_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e ONNXRUNTIME_VERSION \
+            -e ONNXRUNTIME_GENAI_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /onnxruntime_genai_src/riscv64-build-and-test.sh test
+
+  publish:
+    name: Publish onnxruntime-genai ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: onnxruntime-genai-${{ matrix.version }}-*-manylinux_riscv64
