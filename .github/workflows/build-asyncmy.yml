@@ -74,9 +74,13 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
+      # Only some versions need patching, so a missing directory is not an error.
       - name: Apply patches
         run: |
-          git apply -v python-wheels/patches/asyncmy/${{ env.ASYNCMY_VERSION }}/*.patch
+          patches="$PWD/python-wheels/patches/asyncmy/${ASYNCMY_VERSION}"
+          if [ -d "$patches" ]; then
+            git apply -v "$patches"/*.patch
+          fi
 
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
@@ -88,7 +92,9 @@ jobs:
           # Every other test needs a live MySQL/MariaDB server, which publishes no
           # riscv64 image (upstream's own CI gets one via a `services:` container,
           # unavailable here); these files exercise the compiled protocol/converters
-          # extensions without one.
+          # extensions without one. test_timedelta_binding_round_trip (added to
+          # test_converters.py in 0.2.17) takes the `connection` fixture and so also
+          # needs a live server, so it is deselected.
           CIBW_TEST_SOURCES: >-
             tests/test_converters.py tests/test_dbapi.py tests/test_errors.py
             tests/test_free_threading.py tests/test_gtid.py
@@ -96,6 +102,7 @@ jobs:
           CIBW_TEST_COMMAND: >-
             python -m pytest -v tests/test_converters.py tests/test_dbapi.py
             tests/test_errors.py tests/test_free_threading.py tests/test_gtid.py
+            --deselect tests/test_converters.py::test_timedelta_binding_round_trip
 
       - name: Check the Cython extensions made it into the wheel
         run: |
