@@ -1,0 +1,121 @@
+From e346d5ee838ae79333ed9e0f6242891c841ed1b8 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 01:53:09 +0000
+Subject: [PATCH] Support riscv64 in pxr/base/arch
+
+pxr/base/arch/defines.h recognises only x86 and ARM, and its "Bits" block
+ends in #error "Unsupported architecture.  x86_64 or ARM64 required." - so
+every translation unit of USD fails on riscv64 before anything else is
+compiled. Two further sites are reached once that is fixed: arch/math.h
+guards ArchSign/ArchFloatToBitPattern/... on
+ARCH_CPU_INTEL || ARCH_CPU_ARM || ARCH_OS_WASM_VM and ends in #error Unknown
+system architecture (the code it guards is portable IEEE-754 bit twiddling,
+not x86 or ARM specific), and nonLockingLinux__execve() in
+arch/stackTrace.cpp has hand-written syscall asm for aarch64 and x86_64 with
+#error Unknown architecture in the #else.
+
+Add an ARCH_CPU_RISCV define for __riscv, admit __riscv_xlen == 64 to
+ARCH_BITS_64, let math.h's gate accept it, and give
+nonLockingLinux__execve() a riscv64 branch. The syscall branch mirrors the
+aarch64 one exactly: the Linux riscv64 ABI passes arguments in a0-a2, takes
+the syscall number in a7, uses the same generic __NR_execve == 221 as
+aarch64, and traps with ecall instead of svc. Everything else in arch is
+already portable: ARCH_SPIN_PAUSE() has a no-op #else, timing.h only reaches
+rdtsc behind PXR_ARCH_PREFER_TSC_TIMING and otherwise uses
+std::chrono::steady_clock, and the remaining #error branches in
+systemInfo.cpp/fileSystem.cpp/assumptions.cpp select on the OS, not the CPU.
+
+With this, the core (non-imaging) USD libraries and their Python bindings
+build and run on riscv64; pxr/base/gf's SIMD paths are already gated on
+__SSE2__/__ARM_NEON with scalar fallbacks, and the vendored
+double-conversion already lists __riscv.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against PixarAnimationStudios/OpenUSD]
+---
+ pxr/base/arch/defines.h      |  7 +++++--
+ pxr/base/arch/math.h         |  1 +
+ pxr/base/arch/overview.dox   |  1 +
+ pxr/base/arch/stackTrace.cpp | 14 ++++++++++++++
+ 4 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/pxr/base/arch/defines.h b/pxr/base/arch/defines.h
+index b7ed634..58e860c 100644
+--- a/pxr/base/arch/defines.h
++++ b/pxr/base/arch/defines.h
+@@ -39,6 +39,8 @@
+ #elif defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || \
+     defined(_M_ARM64)
+ #define ARCH_CPU_ARM
++#elif defined(__riscv)
++#define ARCH_CPU_RISCV
+ #endif
+ 
+ //
+@@ -46,12 +48,13 @@
+ //
+ 
+ #if defined(__x86_64__) || defined(__aarch64__) || defined(_M_X64) || \
+-    defined(_M_ARM64) || defined(__wasm64__)
++    defined(_M_ARM64) || defined(__wasm64__) || \
++    (defined(__riscv) && __riscv_xlen == 64)
+ #define ARCH_BITS_64
+ #elif defined(__wasm32__)
+ #define ARCH_BITS_32
+ #else
+-#error "Unsupported architecture.  x86_64 or ARM64 required."
++#error "Unsupported architecture.  x86_64, ARM64 or RISC-V 64 required."
+ #endif
+ 
+ //
+diff --git a/pxr/base/arch/math.h b/pxr/base/arch/math.h
+index ccd53a6..8191023 100644
+--- a/pxr/base/arch/math.h
++++ b/pxr/base/arch/math.h
+@@ -30,6 +30,7 @@ PXR_NAMESPACE_OPEN_SCOPE
+ ///@{
+ 
+ #if defined (ARCH_CPU_INTEL) || defined (ARCH_CPU_ARM) ||  \
++    defined (ARCH_CPU_RISCV) || \
+     defined(ARCH_OS_WASM_VM) || defined (doxygen)
+ 
+ /// This is the smallest value e such that 1+e^2 == 1, using floats.
+diff --git a/pxr/base/arch/overview.dox b/pxr/base/arch/overview.dox
+index b8eaf9b..045375b 100644
+--- a/pxr/base/arch/overview.dox
++++ b/pxr/base/arch/overview.dox
+@@ -64,6 +64,7 @@ For processor:
+     <ul>
+     <li> ARCH_CPU_INTEL
+     <li> ARCH_CPU_ARM
++    <li> ARCH_CPU_RISCV
+     </ul>
+ 
+ For bits:
+diff --git a/pxr/base/arch/stackTrace.cpp b/pxr/base/arch/stackTrace.cpp
+index 384959e..6a90d38 100644
+--- a/pxr/base/arch/stackTrace.cpp
++++ b/pxr/base/arch/stackTrace.cpp
+@@ -878,6 +878,20 @@ nonLockingLinux__execve (const char *file,
+         );
+         result = __file_result;
+     }
++#elif defined (ARCH_CPU_RISCV) && defined(ARCH_BITS_64)
++    {
++        long __file_result asm ("a0") = (long)file;
++        char* const* __argv asm ("a1") = argv;
++        char* const* __envp asm ("a2") = envp;
++        long __num_execve asm ("a7") = 221;
++        __asm__ __volatile__ (
++            "ecall"
++            : "=r" (__file_result)
++            : "r"(__num_execve), "r" (__file_result), "r" (__argv), "r" (__envp)
++            : "memory"
++        );
++        result = __file_result;
++    }
+ #elif defined(ARCH_CPU_INTEL) && defined(ARCH_BITS_64)
+ 
+     /*
+-- 
+2.43.0
+
