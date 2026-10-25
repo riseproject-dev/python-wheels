@@ -31,6 +31,7 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  LIBUNWIND_VERSION: '1.8.3'
 
 jobs:
   setup:
@@ -71,7 +72,22 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_BUILD_LINUX: dnf install -y libunwind-devel
+          # Upstream's before-build is a plain `dnf install -y libunwind-devel`, which
+          # works on their manylinux_2_28 (AlmaLinux 8) images. RHEL 10 (what
+          # manylinux_2_39 riscv64 is built on) dropped libunwind to EPEL, and manylinux
+          # enables no EPEL on riscv64, so the package simply doesn't exist here
+          # (CLAUDE.md gotcha 140). Build it from source instead: 1.8.3 has riscv64
+          # support since 1.7.0 and `--libdir=/usr/lib64` is load-bearing since
+          # autotools otherwise installs to /usr/lib, off the riscv64 linker/pkg-config
+          # path.
+          CIBW_BEFORE_BUILD_LINUX: >-
+            cd /tmp &&
+            curl -fsSLO https://github.com/libunwind/libunwind/releases/download/v${{ env.LIBUNWIND_VERSION }}/libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
+            tar xf libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
+            cd libunwind-${{ env.LIBUNWIND_VERSION }} &&
+            ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation
+            --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo &&
+            make -j"$(nproc)" install
           CIBW_TEST_GROUPS: test
           CIBW_TEST_COMMAND: cd {package} && pytest vmprof jitlog -vv
 
