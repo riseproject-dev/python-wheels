@@ -81,14 +81,27 @@ jobs:
           # portable EMU128/SCALAR baseline on riscv64 - same reasoning as
           # pillow-jxl-plugin's CIBW_BEFORE_ALL_LINUX comment (gotchas 139/272/279/448).
           # -DJPEGXL_ENABLE_EXAMPLES=OFF: the default-on examples/encode_oneshot
-          # fails to link on riscv64 (undefined reference to
-          # skcms_private::baseline::run_program - a libjxl/skcms toolchain issue
-          # unrelated to jxlpy); none of the three examples are needed to build or
-          # install the libjxl.so/libjxl_threads.so that setup.py links against.
+          # aren't needed to build or install the libjxl.so/libjxl_threads.so
+          # that setup.py links against.
+          #
+          # `git clone --recursive` populates the submodules (incl.
+          # third_party/skcms) at whatever commit libjxl's *default* branch
+          # pins them to; `git checkout "$LIBJXL_TAG"` only moves the
+          # superproject tree - it does not re-sync already-checked-out
+          # submodules to what that tag pins them to (plain `git checkout`
+          # never does, with or without --recursive at clone time). Without
+          # the `git submodule update` below, the build links libjxl_cms.so
+          # against a skcms commit newer than v0.10.1 actually vendors, which
+          # restructured its internal namespacing - that produced an
+          # undefined symbol (skcms_private::baseline::run_program) at import
+          # time on riscv64 specifically because riscv64 takes skcms's
+          # generic/portable SIMD-less code path, the one path whose exact
+          # linkage shape changed between those two skcms commits.
           CIBW_BEFORE_ALL_LINUX: >-
             git clone --recursive --shallow-submodules https://github.com/libjxl/libjxl.git /tmp/libjxl &&
             cd /tmp/libjxl &&
             git checkout "$LIBJXL_TAG" &&
+            git submodule update --init --recursive &&
             mkdir build && cd build &&
             cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
             -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_TOOLS=OFF -DJPEGXL_ENABLE_DEVTOOLS=OFF
