@@ -88,8 +88,17 @@ jobs:
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             LDFLAGS="-Wl,-Ttext-segment=0x200000"
+          # Upstream's pyproject.toml pins setuptools==73.0.1, which predates PEP 639 --
+          # it has no dist-info/licenses/ concept at all, so the default LICENSE*/COPYING*
+          # glob that LICENSE.postgresql/LICENSE.pgvector/LICENSE.readline/LICENSE.ncurses
+          # rely on (gotcha 44) is a no-op and the wheel ships no licence files whatsoever.
+          # setuptools 77.0.3 is the earliest release with that default glob; preinstall it
+          # and build with pip's `--no-build-isolation` (gotcha 76) so the preinstalled
+          # version is actually used instead of the isolated env re-resolving the pin.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           # auditwheel grafts the image's libreadline/libtinfo (psql links them); ship their licence texts.
           CIBW_BEFORE_BUILD: >-
+            pip install "setuptools>=77.0.3" "wheel==0.44.0";
             for p in readline ncurses-libs; do
             srpm=$(rpm -q --qf '%{SOURCERPM}' $p);
             f=$(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' | awk -v s=$srpm '$1==s{print $2}' | xargs rpm -q --licensefiles | grep -m1 -E '/(COPYING|LICENSE)[^/]*$');
