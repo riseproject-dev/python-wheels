@@ -5,7 +5,7 @@ name: Run nightly package version and status checks
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * 1,4'
   workflow_dispatch:
   pull_request:
     paths:
@@ -24,6 +24,10 @@ env:
 jobs:
   check_versions:
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-wheel
+      cancel-in-progress: false
+      queue: max
     steps:
       # A branch pushed or a PR opened with GITHUB_TOKEN raises no events, so
       # the per-package PRs would sit there with no checks at all. Push and open
@@ -71,45 +75,45 @@ jobs:
           base=$(git rev-parse HEAD)
           ci_scripts/git-identity.sh
 
-          # Branch off main and re-declare this package alone, so the PR only
-          # ever touches its own docs/packages/<pkg>.yaml (plus packages.txt and
-          # deprecated.txt for a deprecation).
+          # Re-declare each package on the same package-specific branch used by
+          # wheel publication. This preserves publication metadata already
+          # waiting for review while keeping unrelated packages isolated.
+          #
+          # An existing branch is built on as it is, never rebased: a force push
+          # re-triggers every workflow on its PR, even when they were passing
+          # and nothing conflicted. Conflicts with main are left to be fixed
+          # manually.
           open_pr() {
             local package="$1" slug="$2" title="$3"
-            local branch="github-actions/nightly-upgrade/$slug" pr
+            local branch="package/$slug" pr pr_title="$slug: update packages"
 
-            git switch --force-create "$branch" "$base" || return 1
-            git reset --hard --quiet "$base" || return 1
+            if git fetch --quiet origin "$branch" 2>/dev/null; then
+              git switch --force-create "$branch" FETCH_HEAD || return 1
+            else
+              git switch --force-create "$branch" "$base" || return 1
+            fi
 
             uv run --with-requirements ci_scripts/requirements.txt python3 \
               ci_scripts/check_versions.py --declare "$package" || return 1
 
-            if git diff --quiet -- docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt; then
+            if git diff --quiet -- docs/packages patches ci_scripts/packages.txt ci_scripts/deprecated.txt; then
               echo "$package: nothing to declare"
               return 0
             fi
 
-            git add docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt || return 1
+            git add docs/packages patches ci_scripts/packages.txt ci_scripts/deprecated.txt || return 1
             git commit -s -m "$title" || return 1
 
-            # Leave an open PR alone when it already declares the same thing:
-            # a nightly force-push would restart its build for nothing.
-            if git fetch --quiet origin "$branch" 2>/dev/null &&
-               git diff --quiet FETCH_HEAD HEAD -- "docs/packages/$slug.yaml"; then
-              echo "$package: $branch is already up to date"
-              return 0
-            fi
-
-            git push --force origin "$branch" || return 1
+            git push origin "$branch" || return 1
 
             pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url') || return 1
             if [ -n "$pr" ]; then
-              gh pr edit "$pr" --title "$title" --body-file "$REPORTS/$slug.md" || return 1
+              gh pr edit "$pr" --title "$pr_title" --body-file "$REPORTS/$slug.md" || return 1
               echo "Updated $pr"
             else
               gh pr create --draft --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
                 --reviewer luhenry \
-                --title "$title" --body-file "$REPORTS/$slug.md" || return 1
+                --title "$pr_title" --body-file "$REPORTS/$slug.md" || return 1
             fi
           }
 
@@ -153,8 +157,9 @@ jobs:
               continue
             fi
 
-            if ! echo "$filenames" | grep -qi riscv; then
-              echo "$pkg does not distribute riscv64 wheel anymore!"
+            # A pure-Python wheel (*-none-any.whl) also installs on riscv64
+            if ! echo "$filenames" | grep -Eqi 'riscv|-none-any\.whl$'; then
+              echo "$pkg does not distribute riscv64 or pure-Python wheel anymore!"
               ret=1
             fi
           done < ci_scripts/deprecated.txt

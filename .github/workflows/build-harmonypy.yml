@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/slowkow/harmonypy/blob/v2.1.0/.github/workflows/release.yml
+name: Build harmonypy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/harmonypy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-harmonypy.yml'
+      - 'docs/packages/harmonypy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-harmonypy.yml'
+      - 'docs/packages/harmonypy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: harmonypy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build harmonypy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      HARMONYPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout harmonypy v${{ env.HARMONYPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: slowkow/harmonypy
+          ref: v${{ env.HARMONYPY_VERSION }}
+          persist-credentials: false
+
+      # The extension compiles in Armadillo (Apache-2.0, FetchContent'd by
+      # CMakeLists.txt), nanobind (BSD-3-Clause) and its robin-map (MIT); upstream
+      # ships only its own LICENSE.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          armadillo_url="$(grep -o 'https://sourceforge.net/projects/arma/files/armadillo-[0-9.]*\.tar\.xz' CMakeLists.txt)"
+          mkdir "${RUNNER_TEMP}/armadillo"
+          curl -fsSL --retry 5 "${armadillo_url}" | tar xJ -C "${RUNNER_TEMP}/armadillo" --strip-components=1
+          cp "${RUNNER_TEMP}/armadillo/LICENSE.txt" LICENSE.armadillo
+          cp "${RUNNER_TEMP}/armadillo/NOTICE.txt" NOTICE.armadillo
+          nanobind_version="$(curl -fsSL --retry 5 https://pypi.org/pypi/nanobind/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
+          git clone --depth 1 --branch "v${nanobind_version}" --recurse-submodules --shallow-submodules \
+            https://github.com/wjakob/nanobind.git "${RUNNER_TEMP}/nanobind"
+          cp "${RUNNER_TEMP}/nanobind/LICENSE" LICENSE.nanobind
+          cp "${RUNNER_TEMP}/nanobind/ext/robin_map/LICENSE" LICENSE.robin-map
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert [n for n in names if n.endswith(".so")], names
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.armadillo", "NOTICE.armadillo",
+                              "LICENSE.nanobind", "LICENSE.robin-map"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: harmonypy-${{ env.HARMONYPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish harmonypy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: harmonypy-${{ matrix.version }}-*-manylinux_riscv64

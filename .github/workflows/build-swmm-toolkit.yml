@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/pyswmm/swmm-python/blob/v0.17.0/.github/workflows/build_wheel.yml
+name: Build swmm-toolkit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/swmm-toolkit.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-swmm-toolkit.yml'
+      - 'docs/packages/swmm-toolkit.yaml'
+      - 'patches/swmm-toolkit/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-swmm-toolkit.yml'
+      - 'docs/packages/swmm-toolkit.yaml'
+      - 'patches/swmm-toolkit/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: swmm-toolkit
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build swmm-toolkit ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SWMM_TOOLKIT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyswmm/swmm-python v${{ env.SWMM_TOOLKIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyswmm/swmm-python
+          ref: v${{ env.SWMM_TOOLKIT_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # swig>=4.4.0 has no riscv64 build anywhere; swmm-toolkit's own .i files
+      # only need $action, which works on the 4.3.1 we do have (see the patch).
+      # license-files never names the statically-linked swmm-solver submodule's
+      # own MIT LICENSE.
+      - name: Patch swmm-toolkit source
+        run: git apply python-wheels/patches/swmm-toolkit/${{ env.SWMM_TOOLKIT_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: swmm-toolkit
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp39-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: rm -f $(which swig) && rm -f $(which swig4.0)
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_TEST: pip install -r {package}/test-requirements.txt
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; l = sorted(str(p).split('licenses/', 1)[1] for p in m.files('swmm-toolkit') if 'licenses/' in str(p)); assert 'swmm-solver/LICENSE' in l, l"
+            && pytest {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: swmm-toolkit-${{ env.SWMM_TOOLKIT_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish swmm-toolkit ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: swmm-toolkit-${{ matrix.version }}-*-manylinux_riscv64

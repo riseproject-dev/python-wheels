@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/Illidanz/pyxdelta/blob/v0.2.3/.github/workflows/wheels.yml
+name: Build pyxdelta wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyxdelta.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyxdelta.yml'
+      - 'docs/packages/pyxdelta.yaml'
+      - 'patches/pyxdelta/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyxdelta.yml'
+      - 'docs/packages/pyxdelta.yaml'
+      - 'patches/pyxdelta/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyxdelta
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyxdelta ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYXDELTA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyxdelta v${{ env.PYXDELTA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Illidanz/pyxdelta
+          ref: v${{ env.PYXDELTA_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/pyxdelta/${{ env.PYXDELTA_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_COMMAND: >-
+            python -c "import pyxdelta as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -c "import pyxdelta, tempfile, os; d = tempfile.mkdtemp(); src = os.path.join(d, 'src.bin'); tgt = os.path.join(d, 'tgt.bin'); patch = os.path.join(d, 'p.xdelta'); out = os.path.join(d, 'out.bin'); open(src, 'wb').write(b'hello world' * 100); open(tgt, 'wb').write(b'hello world' * 100 + b'extra'); assert pyxdelta.run(infile=src, outfile=tgt, patchfile=patch); assert pyxdelta.decode(infile=src, patchfile=patch, outfile=out); assert open(out, 'rb').read() == open(tgt, 'rb').read()"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyxdelta-${{ env.PYXDELTA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyxdelta ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyxdelta-${{ matrix.version }}-*-manylinux_riscv64

@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cds-astro/cds-healpix-python/blob/v0.8.1/.github/workflows/deploy_pypi.yml
+# and https://github.com/cds-astro/cds-healpix-python/blob/v0.8.1/.github/workflows/test.yml
+name: Build cdshealpix wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cdshealpix.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cdshealpix.yml'
+      - 'docs/packages/cdshealpix.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cdshealpix.yml'
+      - 'docs/packages/cdshealpix.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cdshealpix
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cdshealpix ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships per-interpreter wheels and no free-threaded one.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CDSHEALPIX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cdshealpix ${{ env.CDSHEALPIX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cds-astro/cds-healpix-python
+          ref: v${{ env.CDSHEALPIX_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: numpy, a hard runtime dependency, has no musllinux riscv64 wheel.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # MPLBACKEND stands in for upstream's root conftest.py, which only selects Agg.
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=:all:
+            MPLBACKEND=Agg
+          CIBW_TEST_REQUIRES: pytest astropy_healpix matplotlib
+          # Upstream's pytest addopts; pytest anchors --ignore-glob at the cwd, hence the leading /*.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -v --pyargs cdshealpix --doctest-modules
+            -o doctest_optionflags=NORMALIZE_WHITESPACE
+            --ignore-glob='/*/test_benchmark_healpix.py'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cdshealpix-${{ env.CDSHEALPIX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cdshealpix ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cdshealpix-${{ matrix.version }}-*-manylinux_riscv64

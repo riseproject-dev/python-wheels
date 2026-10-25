@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# guardpycfn is published from an sdist only: its tree is
+# https://github.com/brianterry/guardpy at v0.1.4 renamed guardpy -> guardpycfn
+# (distribution, crate and #[pymodule]), and that rename was never pushed, so no
+# public checkout builds this package. The released sdist is therefore the
+# upstream tree; it also carries the Cargo.lock the upstream wheel was built
+# with. Otherwise this mirrors upstream's release.yml: `maturin build --release`
+# of a pyo3 `abi3-py39` crate that vendors cloudformation-guard.
+name: Build guardpycfn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/guardpycfn.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-guardpycfn.yml'
+      - 'docs/packages/guardpycfn.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-guardpycfn.yml'
+      - 'docs/packages/guardpycfn.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: guardpycfn
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build guardpycfn ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+
+    env:
+      GUARDPYCFN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch guardpycfn ${{ env.GUARDPYCFN_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/guardpycfn/${GUARDPYCFN_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          # Extracted rather than passed as a tarball so CIBW_TEST_SOURCES resolves.
+          tar xzf sdist.tar.gz
+          test -f "guardpycfn-${GUARDPYCFN_VERSION}/pyproject.toml"
+
+      # The sdist drops cloudformation-guard's LICENSE/NOTICE/ATTRIBUTION (Apache-2.0,
+      # plus its crates' notices); maturin's default LICEN[CS]E*/NOTICE* globs pick
+      # them up from the project root.
+      - name: Stage cloudformation-guard licences
+        working-directory: guardpycfn-${{ env.GUARDPYCFN_VERSION }}
+        run: |
+          tag="$(cat vendor/UPSTREAM_GUARD_VERSION)"
+          base="https://raw.githubusercontent.com/aws-cloudformation/cloudformation-guard/${tag#v}"
+          curl -sSfL -o LICENSE.cfn-guard "$base/LICENSE"
+          curl -sSfL -o NOTICE.cfn-guard "$base/NOTICE"
+          curl -sSfL -o NOTICE.cfn-guard-attribution "$base/ATTRIBUTION"
+
+      - name: Stage smoke tests
+        run: |
+          mkdir -p tests
+          cat > tests/test_guardpycfn.py <<'PYTEST'
+          import importlib.util
+          import json
+
+          import pytest
+
+          import guardpycfn
+
+          TEMPLATE_YAML = """\
+          AWSTemplateFormatVersion: '2010-09-09'
+          Resources:
+            Bucket:
+              Type: AWS::S3::Bucket
+              Properties:
+                BucketName: demo
+          """
+
+          TEMPLATE_JSON = json.dumps(
+              {
+                  "AWSTemplateFormatVersion": "2010-09-09",
+                  "Resources": {
+                      "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "demo"}}
+                  },
+              }
+          )
+
+          NAMED = "rule s3_named { Resources.*[ Type == 'AWS::S3::Bucket' ].Properties.BucketName exists }"
+          VERSIONED = (
+              "rule s3_versioned { Resources.*[ Type == 'AWS::S3::Bucket' ]"
+              ".Properties.VersioningConfiguration exists }"
+          )
+
+
+          def test_extension_is_compiled():
+              origin = importlib.util.find_spec("guardpycfn.guardpycfn").origin
+              assert origin.endswith(".abi3.so"), origin
+
+
+          @pytest.mark.parametrize("template", [TEMPLATE_YAML, TEMPLATE_JSON])
+          def test_compliant(template):
+              res = guardpycfn.validate_with_guard(template, NAMED)
+              assert res["tool"] == "guard"
+              assert res["success"] is True, res
+              assert res["result"]["status"] == "PASS"
+              assert res["result"]["compliant"] == ["s3_named"]
+              assert res["result"]["not_compliant"] == []
+
+
+          def test_not_compliant():
+              res = guardpycfn.validate_with_guard(TEMPLATE_YAML, VERSIONED)
+              assert res["success"] is True, res
+              assert res["result"]["status"] == "FAIL"
+              [failure] = res["result"]["not_compliant"]
+              assert failure["Rule"]["name"] == "s3_versioned"
+
+
+          def test_mixed_rules():
+              res = guardpycfn.validate_with_guard(TEMPLATE_YAML, NAMED + "\n" + VERSIONED)
+              assert res["result"]["status"] == "FAIL"
+              assert res["result"]["compliant"] == ["s3_named"]
+              assert [r["Rule"]["name"] for r in res["result"]["not_compliant"]] == ["s3_versioned"]
+
+
+          @pytest.mark.parametrize("rules", [None, "", "   "])
+          def test_rules_required(rules):
+              res = guardpycfn.validate_with_guard(TEMPLATE_YAML, rules)
+              assert res == {
+                  "tool": "guard",
+                  "success": False,
+                  "error": "rules is required and must be non-empty",
+              }
+
+
+          def test_rules_parse_error():
+              res = guardpycfn.validate_with_guard(TEMPLATE_YAML, "this is not guard")
+              assert res["success"] is False
+              assert "RULES_STDIN" in res["error"]
+
+
+          def test_verbose():
+              res = guardpycfn.validate_with_guard(TEMPLATE_YAML, NAMED, verbose=True)
+              assert res["success"] is True, res
+              assert res["result"]
+          PYTEST
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          package-dir: guardpycfn-${{ env.GUARDPYCFN_VERSION }}
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ARCHS: riscv64
+          # pyo3 `abi3-py39`: compiled once on cp39 (the floor the tag claims), then
+          # reused and re-tested on the newer interpreters. No free-threaded build:
+          # abi3 cannot target it and upstream ships none.
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*"
+          # rustup.rs ships no riscv64 musl host toolchain.
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests
+
+      - name: Check the extension module and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith('.so'))
+          assert sos == ['guardpycfn/guardpycfn.abi3.so'], sos
+          lic = sorted(n.rsplit('/', 1)[1] for n in names
+                       if '.dist-info/licenses/' in n and not n.endswith('/'))
+          assert lic == ['LICENSE', 'LICENSE.cfn-guard', 'NOTICE.cfn-guard',
+                         'NOTICE.cfn-guard-attribution'], lic
+          print('OK:', sys.argv[1], sos, lic)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: guardpycfn-${{ env.GUARDPYCFN_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish guardpycfn ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: guardpycfn-${{ matrix.version }}-*-manylinux_riscv64

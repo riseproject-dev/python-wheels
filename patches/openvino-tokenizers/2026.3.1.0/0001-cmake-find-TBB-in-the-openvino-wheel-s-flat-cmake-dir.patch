@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 22 Oct 2026 09:45:00 +0000
+Subject: [PATCH] cmake: find TBB in the openvino wheel's flat cmake dir
+
+The riscv64 openvino wheel from pypi.riseproject.dev is built against a
+oneTBB compiled from source and passed in with -DTBB_DIR, because the
+prebuilt riscv64 oneTBB that openvino downloads targets T-Head cores only.
+openvino's install_tbb.cmake treats such a TBB as "custom" and records
+OV_TBB_DIR_INSTALL as runtime/3rdparty/tbb/lib/cmake/TBB, which the wheel's
+setup.py then rewrites to <openvino>/cmake/lib/cmake/TBB while flattening
+TBBConfig.cmake and friends into <openvino>/cmake. The wheel's
+OpenVINOConfig.cmake therefore fails find_package(OpenVINO COMPONENTS
+Threading) with:
+
+  CMake Error at .../openvino/cmake/OpenVINOConfig.cmake:119 (message):
+    File or directory
+    .../openvino/cmake/lib/cmake/TBB
+    referenced by variable _tbb_dir does not exist !
+
+The PyPI x86_64 wheel bundles the downloaded TBB instead, so its
+_tbb_dir is <openvino>/cmake and the build works there.
+
+When the wheel ships TBBConfig.cmake flat and the nested directory is
+missing, create it so set_and_check() passes, and point TBB_DIR at the
+flat directory so find_package(TBB) loads the config from where its
+relative import paths resolve to <site-packages>/openvino/libs.
+
+Upstream-Status: Inappropriate [works around the packaging of our riscv64 openvino wheel, built with a custom oneTBB]
+---
+ CMakeLists.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c722713..d28c974 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -80,6 +80,10 @@ if(BUILD_CPP_EXTENSION)
+                  COMPONENTS Runtime Threading
+                  PATHS "${OpenVINO_DIR}")
+     if(NOT OpenVINODeveloperPackage_FOUND)
++        if(OpenVINO_DIR_PY AND EXISTS "${OpenVINO_DIR_PY}/TBBConfig.cmake" AND NOT EXISTS "${OpenVINO_DIR_PY}/lib/cmake/TBB")
++            file(MAKE_DIRECTORY "${OpenVINO_DIR_PY}/lib/cmake/TBB")
++            set(TBB_DIR "${OpenVINO_DIR_PY}" CACHE PATH "Directory containing TBBConfig.cmake")
++        endif()
+         find_package(OpenVINO ${OV_COMPATIBILITY_VERSION} REQUIRED
+                      COMPONENTS Runtime Threading
+                      PATHS "${OpenVINO_DIR_PY}")
+--
+2.43.0
+

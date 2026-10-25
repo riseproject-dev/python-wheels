@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/GraphBLAS/python-suitesparse-graphblas/blob/main/.github/workflows/wheels.yml
+# Upstream's Linux x86_64 job builds SuiteSparse:GraphBLAS from source in
+# cibuildwheel's before-all (suitesparse.sh) for every interpreter leg. That C
+# library does not depend on the Python version, so it is built once here and
+# shared via an artifact, matching build-pycolmap.yml's SDK-caching shape.
+name: Build suitesparse-graphblas wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/suitesparse-graphblas.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-suitesparse-graphblas.yml'
+      - 'docs/packages/suitesparse-graphblas.yaml'
+      - 'patches/suitesparse-graphblas/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-suitesparse-graphblas.yml'
+      - 'docs/packages/suitesparse-graphblas.yaml'
+      - 'patches/suitesparse-graphblas/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: suitesparse-graphblas
+      version: ${{ inputs.version }}
+
+  build_graphblas:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build GraphBLAS ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    container:
+      image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SSGB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-suitesparse-graphblas ${{ env.SSGB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: GraphBLAS/python-suitesparse-graphblas
+          ref: ${{ env.SSGB_VERSION }}
+          persist-credentials: false
+
+      - name: Build and install GraphBLAS
+        run: bash suitesparse.sh refs/tags/${{ env.SSGB_VERSION }}
+
+      - name: Pack the GraphBLAS SDK
+        run: tar -C /usr/local -czf graphblas-sdk.tar.gz .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: suitesparse-graphblas-${{ env.SSGB_VERSION }}-sdk
+          path: graphblas-sdk.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_graphblas]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build suitesparse-graphblas ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      SSGB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-suitesparse-graphblas ${{ env.SSGB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: GraphBLAS/python-suitesparse-graphblas
+          ref: ${{ env.SSGB_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch python-suitesparse-graphblas
+        run: git apply python-wheels/patches/suitesparse-graphblas/${{ env.SSGB_VERSION }}/*.patch
+
+      - name: Download the GraphBLAS SDK
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: suitesparse-graphblas-${{ env.SSGB_VERSION }}-sdk
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            tar -C /usr/local -xzf {project}/graphblas-sdk.tar.gz &&
+            curl -fsSL -o {project}/LICENSE.graphblas "https://raw.githubusercontent.com/DrTimothyAldenDavis/GraphBLAS/v$(cat {project}/GB_VERSION.txt)/LICENSE"
+          CIBW_BEFORE_BUILD_LINUX: dnf install -y libffi-devel || true
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: >-
+            python -m pytest --pyargs suitesparse_graphblas -s -k test_print_jit_config &&
+            python -m pytest -v -W error --pyargs suitesparse_graphblas
+
+      - name: Check the wheel ships the GraphBLAS licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert "LICENSE.graphblas" in licences, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: suitesparse-graphblas-${{ env.SSGB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish suitesparse-graphblas ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: suitesparse-graphblas-${{ matrix.version }}-*-manylinux_riscv64

@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/JackismyShephard/diffq/blob/688d8908433481d85d210f558d4f72961ffe4f9e/.github/workflows/build.yml
+name: Build diffq-fixed wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/diffq-fixed.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-diffq-fixed.yml'
+      - 'docs/packages/diffq-fixed.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-diffq-fixed.yml'
+      - 'docs/packages/diffq-fixed.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream (the JackismyShephard fork) releases without git tags, and its
+  # published sdist omits bitpack.pyx (not listed in MANIFEST.in), so pin the
+  # commit whose tree the 0.2.4 wheels were actually built from instead.
+  DIFFQ_FIXED_REF: 688d8908433481d85d210f558d4f72961ffe4f9e
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: diffq-fixed
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build diffq-fixed ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      DIFFQ_FIXED_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout diffq-fixed ${{ env.DIFFQ_FIXED_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: JackismyShephard/diffq
+          ref: ${{ env.DIFFQ_FIXED_REF }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # diffq.bitpack is a plain Cython extension (no torch/CUDA headers at
+          # build time); torch is only a runtime import, needed for the tests.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=Cython,numpy,torch
+          CIBW_TEST_SOURCES: diffq/tests
+          CIBW_TEST_REQUIRES: pytest torch
+          # diffq/tests lives inside the diffq package itself, so staging it
+          # alone leaves a diffq/ dir with no __init__.py in the test cwd, which
+          # pytest's rootdir insertion turns into a namespace package shadowing
+          # the installed wheel. Rebuild diffq/ from the installed wheel's own
+          # tree, then lay the tests back on top of it, before testing.
+          # test_torchscript_export needs torchvision, which we don't carry.
+          CIBW_TEST_COMMAND: >-
+            mv diffq diffq-tests-only &&
+            python -c "import diffq, os, shutil; shutil.copytree(os.path.dirname(diffq.__file__), 'diffq')" &&
+            cp -a diffq-tests-only/tests diffq/tests &&
+            python -m pytest -v diffq/tests --deselect diffq/tests/test_diffq.py::TestDiffQ::test_torchscript_export
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: diffq-fixed-${{ env.DIFFQ_FIXED_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish diffq-fixed ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: diffq-fixed-${{ matrix.version }}-*-manylinux_riscv64

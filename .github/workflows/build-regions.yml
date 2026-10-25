@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/astropy/regions/blob/v0.12/.github/workflows/publish.yml,
+# which calls OpenAstronomy/github-actions-workflows' publish.yml.
+name: Build regions wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/regions.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-regions.yml'
+      - 'docs/packages/regions.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-regions.yml'
+      - 'docs/packages/regions.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: regions
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build regions ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      REGIONS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout regions v${{ env.REGIONS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: astropy/regions
+          ref: v${{ env.REGIONS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject.toml pins py-limited-api = cp311: one abi3 wheel built on cp311
+          # and re-tested on the newer interpreters via find_compatible_wheel.
+          CIBW_BUILD: >-
+            cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_REGIONS=${{ env.REGIONS_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: pytest -p no:warnings --pyargs regions
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,scipy,astropy,pyerfa,pyyaml,coverage,hypothesis
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          assert "-cp311-abi3-" in path, path
+          names = zipfile.ZipFile(path).namelist()
+          exts = {n.rsplit("/", 1)[1] for n in names if n.endswith(".so")}
+          assert exts == {"compiler_version.abi3.so", "core.abi3.so",
+                          "circle_overlap.abi3.so", "ellipse_overlap.abi3.so",
+                          "polygon_contains.abi3.so", "polygon_overlap.abi3.so",
+                          "rectangle_overlap.abi3.so"}, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE.rst"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: regions-${{ env.REGIONS_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish regions ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: regions-${{ matrix.version }}-*-manylinux_riscv64

@@ -15,6 +15,7 @@ https://gitlab.com/riseproject/python/wheel_builder/-/blob/main/ci_scripts/check
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -30,6 +31,7 @@ from update_doc import normalize_name, version_blocks
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "docs" / "packages"
+PATCHES_DIR = ROOT_DIR / "patches"
 PACKAGES_FILE = "ci_scripts/packages.txt"
 DEPRECATED_FILE = "ci_scripts/deprecated.txt"
 REPO = "riseproject-dev/python-wheels"
@@ -153,11 +155,11 @@ def matching_riscv64_wheels(
     }
 
 
-def has_riscv64_wheel(
+def has_any_riscv64_wheel(
     package_info: Dict, target_version: str, python_versions: List[str] = TARGET_PYTHON_VERSIONS
 ) -> bool:
-    """Check whether a version has upstream riscv64 wheels covering every python_versions entry."""
-    return all(matching_riscv64_wheels(package_info, target_version, python_versions).values())
+    """Check whether a version has an upstream riscv64 wheel for any python_versions entry."""
+    return any(matching_riscv64_wheels(package_info, target_version, python_versions).values())
 
 
 def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
@@ -185,7 +187,6 @@ def find_upstream_issue(package: str) -> Optional[str]:
         issue_title = f"{package} riscv64 support"
         result = subprocess.run([
             "gh", "issue", "list",
-            "--milestone", "Upstream",
             "--search", issue_title,
             "--json", "number",
             "--jq", ".[0].number",
@@ -322,6 +323,55 @@ def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
     return added
 
 
+def carry_over_patches(
+    package: str, new_versions: List[str], declared: Set[str], patches_dir: Path = PATCHES_DIR
+) -> List[str]:
+    """
+    Copy patches/<pkg>/<previous>/ to patches/<pkg>/<new>/ for each new version,
+    where <previous> is the version declared immediately before <new> (new
+    versions are handled in order, so each one follows the one before it).
+
+    Only that one preceding version is considered: if it has no patch
+    directory, the new version gets none either, since its patches may have
+    been upstreamed since. A local suffix of the previous directory
+    (`2.13.0+cpu`) is kept. Versions that already have a directory are left
+    alone. Returns the directories created, relative to `patches_dir`.
+    """
+    package_dir = next(
+        (d for d in sorted(patches_dir.glob("*")) if d.is_dir() and normalize_name(d.name) == normalize_name(package)),
+        None,
+    )
+    if package_dir is None:
+        return []
+
+    # Public version -> patch directory name.
+    dirs = {}
+    for d in package_dir.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            dirs[version.Version(d.name).public] = d.name
+        except version.InvalidVersion:
+            continue
+
+    known = sorted(set(declared) | set(new_versions), key=version.parse)
+    created = []
+    for new in sorted(new_versions, key=version.parse):
+        new_public = version.parse(new).public
+        index = known.index(new)
+        if index == 0 or new_public in dirs:
+            continue
+        source = dirs.get(version.parse(known[index - 1]).public)
+        if source is None:
+            continue
+        local = version.Version(source).local
+        target = package_dir / (f"{new}+{local}" if local else new)
+        shutil.copytree(package_dir / source, target)
+        dirs[new_public] = target.name
+        created.append(str(target.relative_to(patches_dir)))
+    return created
+
+
 def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
     """
     Released versions of the YAML whose PyPI release is fully yanked and that
@@ -451,19 +501,21 @@ def check_upgrade(
         candidates = [v for v in get_new_versions(pypi_info, registry_version) or [pypi_version] if v not in declared]
 
     # We provide wheels up to the point where upstream does: a version that
-    # already has riscv64 wheels for every target Python, or that went pure
+    # already has a riscv64 wheel for any target Python, or that went pure
     # Python, is never built here, but every gap before it is.
-    upstream = [v for v in candidates if has_riscv64_wheel(pypi_info, v) or is_pure_python_wheel(pypi_info, v)]
+    upstream = [v for v in candidates if has_any_riscv64_wheel(pypi_info, v) or is_pure_python_wheel(pypi_info, v)]
     new_versions = [v for v in candidates if v not in upstream]
     if upstream:
         print(f"    [=] {package}: skipping {', '.join(f'v{v}' for v in upstream)}, "
-              f"riscv64 or pure Python wheels on PyPI for Python {', '.join(TARGET_PYTHON_VERSIONS)}")
+              "already riscv64 (full or partial) or pure Python upstream")
 
     if new_versions:
         print(f"[^] {package} can be upgraded: v{registry_version} -> {', '.join(f'v{v}' for v in new_versions)}")
         if declare:
             added = declare_versions(package_yaml(package), new_versions)
             print(f"    [+] declared {', '.join(f'v{v}' for v in added)} in {package_yaml(package).relative_to(ROOT_DIR)}")
+            for created in carry_over_patches(package, added, declared):
+                print(f"    [+] copied the patches of the previous version to patches/{created}")
         return {
             "status": "need_upgrade",
             "package": package,
@@ -479,15 +531,14 @@ def check_upgrade(
         print(f"[+] {package}: {', '.join(f'v{v}' for v in pending)} already declared, waiting for the build")
         return up_to_date
 
-    if behind and has_riscv64_wheel(pypi_info, pypi_version):
-        py_list = ", ".join(TARGET_PYTHON_VERSIONS)
+    if behind and has_any_riscv64_wheel(pypi_info, pypi_version):
         wheels_by_version = matching_riscv64_wheels(pypi_info, pypi_version)
-        print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}. Can be deprecated.")
+        print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI. Can be deprecated.")
         wheel_lines = [f"- {pv}: {fn}" for pv, files in wheels_by_version.items() for fn in files]
         for line in wheel_lines:
             print(f"        {line}")
         reason = (
-            f"{package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}: "
+            f"{package} v{pypi_version} has riscv64 wheels on PyPI: "
             f"{pypi_package_url}\n\n" + "\n".join(wheel_lines)
         )
         return deprecation_result(package, registry_version, pypi_version, reason, declare)
@@ -682,7 +733,7 @@ def write_reports(results: List[Dict[str, any]], directory: Path) -> List[Dict[s
 
 
 def _self_test():
-    """Sanity-check has_riscv64_wheel's per-interpreter matching. Run with --self-test."""
+    """Sanity-check has_any_riscv64_wheel's per-interpreter matching. Run with --self-test."""
     releases = {
         "1.0": [
             {"filename": "pkg-1.0-cp312-cp312-manylinux_2_34_riscv64.whl"},
@@ -692,19 +743,20 @@ def _self_test():
         ]
     }
     info = {"releases": releases}
-    # Missing 3.14t -> not all target versions covered.
-    assert has_riscv64_wheel(info, "1.0") is False
-    assert has_riscv64_wheel(info, "1.0", ["3.12", "3.13"]) is True
+    # Missing 3.14t, but 3.12/3.13/3.14 are covered -> deprecatable even though
+    # the matrix isn't complete.
+    assert has_any_riscv64_wheel(info, "1.0") is True
+    assert has_any_riscv64_wheel(info, "1.0", ["3.14t"]) is False
 
     releases["1.0"].append({"filename": "pkg-1.0-cp314-cp314t-manylinux_2_34_riscv64.whl"})
-    assert has_riscv64_wheel(info, "1.0") is True
+    assert has_any_riscv64_wheel(info, "1.0") is True
 
     # abi3 wheel covers any cp3X >= its floor, but never a free-threaded target.
     abi3_info = {"releases": {"1.0": [
         {"filename": "pkg-1.0-cp39-abi3-manylinux_2_34_riscv64.whl"},
     ]}}
-    assert has_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
-    assert has_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
+    assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
+    assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
 
     # Per-package PR titles, one PR per package.
     upgrade = {"status": "need_upgrade", "package": "PyYAML", "registry_version": "6.0",
@@ -716,6 +768,27 @@ def _self_test():
         "arch: mark v1.0 yanked upstream"
     # The body names the package YAML by its normalized name, not PyPI's spelling.
     assert "docs/packages/pyyaml.yaml" in package_report(upgrade)
+
+    # Patches are carried over only from the immediately preceding version.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name in ("1.0.0", "2.0.0"):
+            (root / "My_Pkg" / name).mkdir(parents=True)
+            (root / "My_Pkg" / name / "0001-fix.patch").write_text(name)
+        (root / "torch" / "2.13.0+cpu").mkdir(parents=True)
+        (root / "torch" / "2.13.0+cpu" / "0001-fix.patch").write_text("x")
+        declared = {"1.0.0", "1.1.0", "2.0.0"}  # 1.1.0 is on main without patches
+        # 1.2.0 follows 1.1.0, which has none: nothing is copied (upstreamed).
+        assert carry_over_patches("my-pkg", ["1.2.0"], declared, root) == []
+        # 2.1.0 and 2.2.0 chain from 2.0.0 and then from 2.1.0.
+        assert carry_over_patches("my-pkg", ["2.2.0", "2.1.0"], declared, root) == \
+            ["My_Pkg/2.1.0", "My_Pkg/2.2.0"]
+        assert (root / "My_Pkg" / "2.2.0" / "0001-fix.patch").read_text() == "2.0.0"
+        # A new version below everything declared has no predecessor.
+        assert carry_over_patches("my-pkg", ["0.9.0"], declared, root) == []
+        assert carry_over_patches("unpatched", ["1.0.0"], {"0.1"}, root) == []
+        assert carry_over_patches("torch", ["2.14.0"], {"2.13.0"}, root) == ["torch/2.14.0+cpu"]
 
     print("[+] self-test passed")
 

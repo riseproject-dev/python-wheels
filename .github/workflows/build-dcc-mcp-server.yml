@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-admin-ui` and `build-binaries` jobs of
+# https://github.com/dcc-mcp/dcc-mcp-core/blob/main/.github/workflows/release.yml
+name: Build dcc-mcp-server wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dcc-mcp-server.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dcc-mcp-server.yml'
+      - 'docs/packages/dcc-mcp-server.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dcc-mcp-server.yml'
+      - 'docs/packages/dcc-mcp-server.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dcc-mcp-server
+      version: ${{ inputs.version }}
+
+  build_admin_ui:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build dcc-mcp-server ${{ matrix.version }} admin UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DCC_MCP_SERVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dcc-mcp-core v${{ env.DCC_MCP_SERVER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dcc-mcp/dcc-mcp-core
+          ref: v${{ env.DCC_MCP_SERVER_VERSION }}
+          persist-credentials: false
+
+      # Upstream provisions Node through vx (vx.toml pins node 22) and runs
+      # scripts/release/prebuild_admin_ui.sh; these are that script's npm calls.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Build admin UI bundle
+        run: |
+          npm --prefix admin-ui ci --ignore-scripts --include=optional
+          npm --prefix admin-ui install lightningcss-linux-x64-gnu --no-save --ignore-scripts
+          npm --prefix admin-ui run build
+          test -f crates/dcc-mcp-gateway-admin/src/generated/index.html
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dcc-mcp-server-${{ env.DCC_MCP_SERVER_VERSION }}-admin-ui-bundle
+          path: crates/dcc-mcp-gateway-admin/src/generated/index.html
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, build_admin_ui]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build dcc-mcp-server ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      DCC_MCP_SERVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dcc-mcp-core v${{ env.DCC_MCP_SERVER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dcc-mcp/dcc-mcp-core
+          ref: v${{ env.DCC_MCP_SERVER_VERSION }}
+          persist-credentials: false
+
+      - name: Download admin UI bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dcc-mcp-server-${{ env.DCC_MCP_SERVER_VERSION }}-admin-ui-bundle
+          path: crates/dcc-mcp-gateway-admin/src/generated
+
+      # Upstream builds this wheel in manylinux2014 (Maya 2022's glibc); the
+      # oldest riscv64 manylinux image is 2_39, so the tag check of
+      # scripts/release/server_wheel_tags.py does not apply here.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out wheels
+          manylinux: '2_39'
+          working-directory: pkg/dcc-mcp-server-bin
+          docker-options: -e DCC_MCP_ADMIN_UI_PREBUILT=1
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Check the wheel carries the binary and no extension module
+        run: |
+          python3 - pkg/dcc-mcp-server-bin/wheels/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              assert "-py3-none-manylinux" in whl, whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".data/scripts/dcc-mcp-server") for n in names), names
+              assert "dcc_mcp_server/__init__.py" in names, names
+              assert not any(n.endswith(".so") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dcc-mcp-server-${{ env.DCC_MCP_SERVER_VERSION }}-py3-none-manylinux_riscv64
+          path: pkg/dcc-mcp-server-bin/wheels/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test dcc-mcp-server ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      DCC_MCP_SERVER_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout dcc-mcp-core v${{ env.DCC_MCP_SERVER_VERSION }} catalog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dcc-mcp/dcc-mcp-core
+          ref: v${{ env.DCC_MCP_SERVER_VERSION }}
+          path: upstream
+          sparse-checkout: dcc-mcp-catalog.yml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dcc-mcp-server-${{ env.DCC_MCP_SERVER_VERSION }}-py3-none-manylinux_riscv64
+          path: wheels
+
+      - name: Download admin UI bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dcc-mcp-server-${{ env.DCC_MCP_SERVER_VERSION }}-admin-ui-bundle
+          path: admin-ui
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links wheels dcc-mcp-server
+
+      # Upstream ships no wheel-level test suite (its tests/ load the locator from
+      # the source tree and test the binary through cargo), so drive the
+      # installed binary: locator, catalog search, then the gateway daemon's
+      # health, embedded admin UI and MCP initialize/tools/list.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          python -c "import dcc_mcp_server, os, sys; p = dcc_mcp_server.binary_path(); assert str(p).startswith(sys.prefix), p; assert os.access(p, os.X_OK), p; assert dcc_mcp_server.__version__ == os.environ['DCC_MCP_SERVER_VERSION']; print(p)"
+          dcc-mcp-server --version | grep -F "$DCC_MCP_SERVER_VERSION"
+          dcc-mcp-server --help >/dev/null
+
+          DCC_MCP_CATALOG_PATH=upstream/dcc-mcp-catalog.yml dcc-mcp-server catalog search --query maya > catalog.json
+          python -c "import json; hits = json.load(open('catalog.json')); assert any(h['name'] == 'dcc-mcp-maya' for h in hits), hits"
+
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          port=19765
+          dcc-mcp-server gateway --port "$port" --remote-port 0 --registry-dir "$RUNNER_TEMP/registry" > gateway.log 2>&1 &
+          gw=$!
+          trap 'kill "$gw" 2>/dev/null || true; cat gateway.log' EXIT
+          for _ in $(seq 1 60); do
+            curl -sf "http://127.0.0.1:$port/health" >/dev/null && break
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:$port/health" | grep -F '"ok":true'
+          curl -sf "http://127.0.0.1:$port/admin" -o admin.html
+          cmp admin.html admin-ui/index.html
+
+          mcp() {
+            curl -sf -X POST "http://127.0.0.1:$port/mcp" \
+              -H 'content-type: application/json' \
+              -H 'accept: application/json, text/event-stream' \
+              -d "$1"
+          }
+          mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"riscv64-ci","version":"0"}}}' > init.json
+          mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' > tools.json
+          python - <<'EOF'
+          import json, os
+          init = json.load(open("init.json"))["result"]
+          assert init["serverInfo"]["version"] == os.environ["DCC_MCP_SERVER_VERSION"], init["serverInfo"]
+          tools = {t["name"] for t in json.load(open("tools.json"))["result"]["tools"]}
+          assert {"search", "describe", "load_skill", "call"} <= tools, tools
+          print(init["serverInfo"], sorted(tools))
+          EOF
+
+          kill "$gw"
+          wait "$gw" || true
+          trap - EXIT
+
+  publish:
+    name: Publish dcc-mcp-server ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dcc-mcp-server-${{ matrix.version }}-py3-none-manylinux_riscv64

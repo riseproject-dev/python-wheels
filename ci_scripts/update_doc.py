@@ -278,22 +278,51 @@ def push_remote():
     return f"https://x-access-token:{GH_TOKEN}@github.com/{REPO}"
 
 
-def checkout_shared_branch(branch):
+def checkout_package_branch(branch):
     """
-    Check out the shared docs branch as a local worktree HEAD, based on
+    Check out the package's branch as a local worktree HEAD, based on
     origin/<branch> if it already exists, otherwise on origin/main, and replay
     its pending commits on top of origin/main.
 
-    All docs updates are pushed to this single branch, so a run needs to build
-    on whatever is already there rather than starting from main each time. main
-    keeps moving under it while it waits for review, so without the rebase the
-    branch carries an ever older tree and the PR ends up conflicting.
+    Nightly declarations and publication metadata share this package-specific
+    branch, so a run needs to build on whatever is already there rather than
+    starting from main each time. main keeps moving under it while it waits for
+    review, so without the rebase the branch carries an ever older tree and the
+    PR ends up conflicting.
 
     Returns the origin/<branch> commit the checkout started from, or None when
     the branch is new, so the push can lease against it.
     """
-    git_run("fetch", "origin")
+    # Checkout starts at depth 1. Fetch only main and this package branch with
+    # enough history to find their merge base, deepening only when necessary.
+    branch_ref = f"refs/heads/{branch}"
+    branch_exists = subprocess.run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch_ref],
+        stdout=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    refspecs = ["+refs/heads/main:refs/remotes/origin/main"]
+    if branch_exists:
+        refspecs.append(f"+{branch_ref}:refs/remotes/origin/{branch}")
+
+    git_run(
+        "fetch",
+        "--depth=100" if branch_exists else "--depth=1",
+        "origin",
+        *refspecs,
+    )
     remote_ref = f"origin/{branch}"
+    if branch_exists:
+        for deepen in (500, 2000):
+            if git_run(
+                "merge-base", "origin/main", remote_ref, check=False
+            ).returncode == 0:
+                break
+            git_run("fetch", f"--deepen={deepen}", "origin", *refspecs)
+        else:
+            # Rare fallback for a package branch with a very old merge base.
+            git_run("fetch", "--unshallow", "origin", *refspecs)
+
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", remote_ref],
         capture_output=True,
@@ -377,8 +406,8 @@ def main():
     comment = None
     yaml_path = DOCS_DIR / f"{slug}.yaml"
 
-    branch = "github-actions/update-doc"
-    pr_title = "docs: Update projects"
+    branch = f"package/{slug}"
+    pr_title = f"{slug}: update packages"
 
     def compute_content():
         """Read the current YAML and return (is_new, old_content, new_content)."""
@@ -425,10 +454,10 @@ def main():
         return
 
     configure_git_identity()
-    remote_sha = checkout_shared_branch(branch)
+    remote_sha = checkout_package_branch(branch)
 
-    # Compute the change against the shared branch's contents, so a package
-    # already documented there by an earlier run in this batch is seen.
+    # Compute the change against the package branch's contents, so a version
+    # declared by the nightly workflow is retained and filled in here.
     is_new, _old_content, new_content = compute_content()
     if new_content is None:
         print(f"{slug} {version} is already documented; nothing to do")

@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/tdewolff/minify/blob/v2.24.12/.github/workflows/python.yml
+name: Build tdewolff-minify wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tdewolff-minify.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tdewolff-minify.yml'
+      - 'docs/packages/tdewolff-minify.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tdewolff-minify.yml'
+      - 'docs/packages/tdewolff-minify.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tdewolff-minify
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tdewolff-minify ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      TDEWOLFF_MINIFY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout minify v${{ env.TDEWOLFF_MINIFY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tdewolff/minify
+          ref: v${{ env.TDEWOLFF_MINIFY_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Stage the licence beside bindings/py/setup.py
+        run: cp LICENSE bindings/py/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/py
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: .ci/ensure-go.sh; make -C bindings/py compile
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's wheel job runs no tests; this is bindings/py/example/example.py.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata, pathlib, tempfile, minify;
+            minify.config({'html-keep-document-tags': 0});
+            assert minify.string('text/html', '<html><div> lala') == '<div>lala', minify.string('text/html', '<html><div> lala');
+            assert minify.string('application/json', '{ \"a\" : [ 1 , 2 ] }') == '{\"a\":[1,2]}';
+            d = pathlib.Path(tempfile.mkdtemp()); (d / 'in.css').write_text('a { color : #ff0000 ; }');
+            minify.file('text/css', str(d / 'in.css'), str(d / 'out.css'));
+            assert (d / 'out.css').read_text() == 'a{color:red}', (d / 'out.css').read_text();
+            assert any(str(p).endswith('licenses/LICENSE') for p in importlib.metadata.files('tdewolff-minify'))"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tdewolff-minify-${{ env.TDEWOLFF_MINIFY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tdewolff-minify ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tdewolff-minify-${{ matrix.version }}-*-manylinux_riscv64

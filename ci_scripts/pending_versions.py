@@ -13,6 +13,10 @@ A version entry without `tag`/`files` has not been released yet and is
 pending; with no --glob, those are the versions returned. With --glob, every
 version matching the glob is returned, released or not, so a workflow_dispatch
 can force a rebuild.
+
+With --base-file, versions that the given (base branch) copy of the package
+YAML already declares are left out, so a pull request only builds the versions
+it adds.  An empty or missing base file means every version is new.
 """
 
 import argparse
@@ -65,6 +69,13 @@ def select_versions(versions, glob=None):
     return [str(v["version"]) for v in versions if is_pending(v)]
 
 
+def base_versions(path):
+    """Versions declared in the base branch's copy of the package YAML."""
+    text = Path(path).read_text() if Path(path).exists() else ""
+    data = yaml.safe_load(text) or {}
+    return {str(v["version"]).strip() for v in data.get("versions") or []}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", help="docs/packages/<package>.yaml to read")
@@ -72,6 +83,10 @@ def main():
         "--glob",
         default="",
         help="version glob to build, released or not (default: pending versions only)",
+    )
+    parser.add_argument(
+        "--base-file",
+        help="base branch copy of the package YAML; skip versions it declares",
     )
     parser.add_argument(
         "--check",
@@ -83,6 +98,10 @@ def main():
     versions = load_versions(args.package)
     if args.check:
         return
+
+    if args.base_file and not args.glob:
+        already_on_base = base_versions(args.base_file)
+        versions = [v for v in versions if str(v["version"]) not in already_on_base]
 
     selected = select_versions(versions, args.glob)
     if args.glob and not selected:

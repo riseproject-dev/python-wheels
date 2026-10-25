@@ -1,0 +1,252 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_sdist` and `build_wheels_linux` jobs of
+# https://github.com/ViennaRNA/ViennaRNA/blob/v2.7.2/.github/workflows/build_python_package.yaml
+name: Build viennarna wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/viennarna.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-viennarna.yml'
+      - 'docs/packages/viennarna.yaml'
+      - 'patches/viennarna/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-viennarna.yml'
+      - 'docs/packages/viennarna.yaml'
+      - 'patches/viennarna/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: viennarna
+      version: ${{ inputs.version }}
+
+  build_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build viennarna ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      VIENNARNA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ViennaRNA v${{ env.VIENNARNA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ViennaRNA/ViennaRNA
+          ref: v${{ env.VIENNARNA_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/viennarna/${{ env.VIENNARNA_VERSION }}/00*.patch
+
+      - name: install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install build-essential autoconf automake gengetopt help2man libtool check graphviz python3-sphinx
+
+      - name: Checkout swig repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: swig/swig
+          ref: 'v4.4.0'
+          path: swig
+          persist-credentials: false
+
+      - name: Install swig
+        run: |
+          cd swig
+          ./autogen.sh && ./configure --prefix=/usr
+          make -j $(nproc)
+          sudo make install
+
+      - name: Checkout doxygen repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: doxygen/doxygen
+          ref: 'Release_1_15_0'
+          path: doxygen
+          persist-credentials: false
+
+      - name: Install doxygen
+        run: |
+          cd doxygen
+          mkdir build
+          cd build
+          cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX:PATH=/usr -Dbuild_doc:BOOL=OFF ..
+          make -j $(nproc)
+          sudo make install
+
+      - name: autotools setup
+        run: |
+          autoreconf -i
+          tar -xjf src/dlib-20.0.tar.bz2 -C src
+          tar -xzf src/libsvm-3.35.tar.gz -C src
+
+      - name: configure
+        run: ./configure --without-kinfold --without-forester --without-rnalocmin --without-rnaxplorer --without-perl --without-gsl --disable-mpfr
+
+      - name: prepare source files
+        run: |
+          cd src/ViennaRNA/static
+          make
+
+      - name: prepare doxygen XML
+        run: |
+          cd doc/doxygen
+          make doxygen-xml
+
+      - name: prepare Python wrapper
+        run: |
+          cd interfaces/Python
+          make RNA/RNA.py
+
+      # The extension statically compiles libsvm (BSD-3-Clause), dlib (BSL-1.0)
+      # and ccan/json (MIT); stage their notices where the licence glob finds them.
+      - name: Stage vendored licences
+        run: |
+          cp src/libsvm-3.35/COPYRIGHT LICENSE.libsvm
+          cp src/dlib-20.0/dlib/LICENSE.txt LICENSE.dlib
+          cp src/json/LICENSE LICENSE.json
+
+      - name: build Python source distribution
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: viennarna-${{ env.VIENNARNA_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build viennarna ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      VIENNARNA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: viennarna-${{ env.VIENNARNA_VERSION }}-sdist
+          path: dist/
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ${{ steps.sdist_path.outputs.path }}
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md;
+            got = {p.name for p in md.files('viennarna') if '.dist-info/licenses/' in str(p)};
+            assert {'COPYING', 'LICENSE.libsvm', 'LICENSE.dlib', 'LICENSE.json'} <= got, got" &&
+            pytest --datadir {package}/tests/data {package}/tests/python
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: viennarna-${{ env.VIENNARNA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      VIENNARNA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup.cfg enables OpenMP, so auditwheel vendors the image's libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: viennarna-${{ env.VIENNARNA_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish viennarna ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: viennarna-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: viennarna-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

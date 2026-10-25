@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/jdegenstein/py-lib3mf/blob/v2.5.0/.github/workflows/aarch64.yml
+name: Build py-lib3mf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/py-lib3mf.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-lib3mf.yml'
+      - 'docs/packages/py-lib3mf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-lib3mf.yml'
+      - 'docs/packages/py-lib3mf.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: py-lib3mf
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build py-lib3mf ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream's CIBW_BUILD lists cp310-cp314 only and ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PY_LIB3MF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout py-lib3mf v${{ env.PY_LIB3MF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jdegenstein/py-lib3mf
+          ref: v${{ env.PY_LIB3MF_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch py-lib3mf source
+        run: git apply python-wheels/patches/py-lib3mf/${{ env.PY_LIB3MF_VERSION }}/*.patch
+
+      - name: Checkout lib3mf v${{ env.PY_LIB3MF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: 3MFConsortium/lib3mf
+          ref: v${{ env.PY_LIB3MF_VERSION }}
+          path: lib3mf-src
+          submodules: true
+          persist-credentials: false
+
+      # lib3mf.so (fetched and built by CMakeLists.txt) statically links zlib,
+      # libzip and cpp-base64 and inlines fast_float, but the wheel ships only
+      # LICENSE-3RD-PARTY.txt.
+      - name: Stage lib3mf's and its statically linked libraries' licences
+        run: |
+          cp lib3mf-src/LICENSE LICENSE.lib3mf
+          cp lib3mf-src/submodules/zlib/LICENSE LICENSE.zlib
+          cp lib3mf-src/submodules/libzip/LICENSE LICENSE.libzip
+          cp lib3mf-src/submodules/cpp-base64/LICENSE LICENSE.cpp-base64
+          cp lib3mf-src/submodules/fast_float/LICENSE-MIT LICENSE.fast_float
+          rm -rf lib3mf-src
+
+      - name: Write smoke test
+        run: |
+          cat > smoke_test.py <<'EOF'
+          import os
+          import tempfile
+
+          import lib3mf
+          from lib3mf import Lib3MF
+
+          wrapper = Lib3MF.Wrapper()
+          print("lib3mf", wrapper.GetLibraryVersion(), "from", lib3mf.__file__)
+
+          corners = [(x, y, z) for z in (0, 10) for y in (0, 10) for x in (0, 10)]
+          faces = [(2, 1, 0), (1, 2, 3), (4, 5, 6), (7, 6, 5), (0, 1, 4), (5, 4, 1),
+                   (2, 6, 3), (7, 3, 6), (0, 4, 2), (6, 2, 4), (1, 3, 5), (7, 5, 3)]
+          vertices = []
+          for corner in corners:
+              position = Lib3MF.Position()
+              position.Coordinates[:] = corner
+              vertices.append(position)
+          triangles = []
+          for face in faces:
+              triangle = Lib3MF.Triangle()
+              triangle.Indices[:] = face
+              triangles.append(triangle)
+
+          model = wrapper.CreateModel()
+          mesh = model.AddMeshObject()
+          mesh.SetName("cube")
+          mesh.SetGeometry(vertices, triangles)
+          model.AddBuildItem(mesh, wrapper.GetIdentityTransform())
+
+          path = os.path.join(tempfile.mkdtemp(), "cube.3mf")
+          model.QueryWriter("3mf").WriteToFile(path)
+
+          reread = wrapper.CreateModel()
+          reread.QueryReader("3mf").ReadFromFile(path)
+          meshes = reread.GetMeshObjects()
+          assert meshes.MoveNext()
+          cube = meshes.GetCurrentMeshObject()
+          assert cube.GetName() == "cube", cube.GetName()
+          assert (cube.GetVertexCount(), cube.GetTriangleCount()) == (8, 12)
+          assert not meshes.MoveNext()
+          print("round-tripped", path)
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_BEFORE_ALL_LINUX: >
+            yum install -y libuuid-devel || apt-get install -y uuid-dev
+          # License.txt (py-lib3mf's own licence) and the staged LICENSE.* files are not matched by the default glob.
+          CIBW_ENVIRONMENT: >
+            CMAKE_BUILD_TYPE=Release
+            SKBUILD_WHEEL_LICENSE_FILES="License.txt;LICENSE*"
+          CIBW_TEST_COMMAND: python {project}/smoke_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-lib3mf-${{ env.PY_LIB3MF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish py-lib3mf ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: py-lib3mf-${{ matrix.version }}-*-manylinux_riscv64

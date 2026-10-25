@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/fplll/fpylll/blob/0.6.4/.github/workflows/tests.yml
+# fpylll's own release.yml builds wheels via passagemath's Sage-distribution
+# tooling (not reusable here); tests.yml's from-source fplll build is what we
+# mirror, narrowed to riscv64.
+name: Build fpylll wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fpylll.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fpylll.yml'
+      - 'docs/packages/fpylll.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fpylll.yml'
+      - 'docs/packages/fpylll.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The C++ fplll release fpylll 0.6.4 is tested against (tests.yml clones
+  # fplll's default branch, which was 5.5.0 at the time of this release).
+  FPLLL_CXX_VERSION: '5.5.0'
+  FPLLL_CXX_SHA256: 'f0af6bdd0ebd5871e87ff3ef7737cb5360b1e38181a4e5a8c1236f3476fec3b2'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fpylll
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fpylll ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        # musllinux dropped: same shape of C++-from-source build as
+        # symengine/gmpy2/chiavdf, none of which target musllinux either.
+
+    env:
+      FPYLLL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fpylll ${{ env.FPYLLL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: fplll/fpylll
+          ref: ${{ env.FPYLLL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # gmp/mpfr come from Rocky 10's own repos (gmp-devel, mpfr-devel);
+          # fplll itself has no Rocky package and is built once per container
+          # from its own release tarball, with the same configure flags
+          # tests.yml uses. --libdir=/usr/lib64 matches where gmp-devel/
+          # mpfr-devel already put their libraries, so no extra -L/-I or
+          # LD_LIBRARY_PATH plumbing is needed for setup.py's hardcoded
+          # sys.prefix-relative include/library dirs. libqd is skipped:
+          # Rocky 10 ships no qd package on any arch, and HAVE_QD=no is one
+          # of the two configurations tests.yml itself exercises.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install gmp-devel mpfr-devel &&
+            cd /tmp &&
+            curl -fsSLO https://github.com/fplll/fplll/releases/download/${{ env.FPLLL_CXX_VERSION }}/fplll-${{ env.FPLLL_CXX_VERSION }}.tar.gz &&
+            echo "${{ env.FPLLL_CXX_SHA256 }}  fplll-${{ env.FPLLL_CXX_VERSION }}.tar.gz" | sha256sum -c - &&
+            tar xzf fplll-${{ env.FPLLL_CXX_VERSION }}.tar.gz &&
+            cd fplll-${{ env.FPLLL_CXX_VERSION }} &&
+            ./configure --disable-static --prefix=/usr --libdir=/usr/lib64 --with-max-enum-dim=64 --with-max-parallel-enum-dim=20 &&
+            make -j"$(nproc)" && make install && ldconfig &&
+            cp COPYING /project/LICENSE.fplll &&
+            cp /usr/share/licenses/gmp/COPYINGv3 /project/LICENSE.gmp &&
+            cp /usr/share/licenses/mpfr/COPYING.LESSER /project/LICENSE.mpfr
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # cysignals is a genuine runtime import of fpylll.fplll.integer_matrix
+          # (upstream's own install_requires), not just a test dependency; our
+          # registry already hosts a riscv64 wheel for it.
+          CIBW_TEST_REQUIRES: pytest numpy cysignals
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: PY_IGNORE_IMPORTMISMATCH=1 python -m pytest tests -v
+
+      - name: Check the extensions and vendored libraries made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              so = {n for n in names if n.endswith(".so")}
+              assert any(n.startswith("fpylll/fplll/lll") for n in so), so
+              assert any(n.startswith("fpylll/util") for n in so), so
+              libs = {n.split("/")[-1].split("-")[0] for n in names if ".libs/" in n and not n.endswith("/")}
+              assert "libfplll" in libs, libs
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fpylll-${{ env.FPYLLL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      FPYLLL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gmp mpfr
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fpylll-${{ env.FPYLLL_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish fpylll ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fpylll-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: fpylll-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc, gmp, mpfr

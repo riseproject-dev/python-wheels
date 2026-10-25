@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/rapidsai/ucx-wheels/blob/eb5c51bc99469b337766454e3df7bc1506f9fa23/.github/workflows/build_and_test.yaml
+#   https://github.com/rapidsai/ucx-wheels/blob/eb5c51bc99469b337766454e3df7bc1506f9fa23/ci/build_wheel.sh
+#   https://github.com/rapidsai/ucx-wheels/blob/eb5c51bc99469b337766454e3df7bc1506f9fa23/ci/test_wheel.sh
+name: Build libucx-cu12 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libucx-cu12.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libucx-cu12.yml'
+      - 'docs/packages/libucx-cu12.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libucx-cu12.yml'
+      - 'docs/packages/libucx-cu12.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # rapidsai/ucx-wheels pushes no tags; this is "Release 1.21.0 (#45)", the
+  # libucx/GIT_COMMIT recorded in the 1.21.0 PyPI wheels. Update alongside LIBUCX_CU12_VERSION.
+  LIBUCX_CU12_REF: eb5c51bc99469b337766454e3df7bc1506f9fa23
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: libucx-cu12
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build libucx-cu12 ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      LIBUCX_CU12_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rapidsai/ucx-wheels ${{ env.LIBUCX_CU12_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rapidsai/ucx-wheels
+          ref: ${{ env.LIBUCX_CU12_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch ucx-wheels source
+        run: |
+          git apply python-wheels/patches/libucx-cu12/${{ env.LIBUCX_CU12_VERSION }}/*.patch
+
+      # The wheel ships UCX's libraries but upstream only includes the packaging repo's LICENSE.
+      - name: Stage UCX licence
+        run: |
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/openucx/ucx/v${LIBUCX_CU12_VERSION}/LICENSE" -o python/libucx/LICENSE.ucx
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build and repair the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf install -y --enablerepo=crb autoconf automake libtool
+            git config --global --add safe.directory /work
+            export PATH=/opt/python/cp314-cp314/bin:$PATH
+
+            python -m pip wheel python/libucx/ -w python/libucx/dist -v --no-deps --disable-pip-version-check
+
+            auditwheel repair             \
+                -w wheelhouse             \
+                --exclude "libucm.so.0"   \
+                --exclude "libuct.so.0"   \
+                --exclude "libucs.so.0"   \
+                --exclude "libucp.so.0"   \
+                python/libucx/dist/*
+          '
+
+      - name: Test the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /tmp "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            for pydir in cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+              pybin=/opt/python/$pydir/bin
+              "$pybin/pip" install -q /work/wheelhouse/*.whl
+              "$pybin/python" -c "import libucx; assert all(libucx.load_library()); print(\"Loaded libucx libraries successfully!\")"
+            done
+            ucx_bin=$("$pybin/python" -c "import libucx, os; print(os.path.join(os.path.dirname(libucx.__file__), \"bin\"))")
+            "$ucx_bin/ucx_info" -v
+            "$ucx_bin/ucx_info" -d
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libucx-cu12-${{ env.LIBUCX_CU12_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Collect GPL sources for libucx-cu12 ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      LIBUCX_CU12_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libucx-cu12-${{ env.LIBUCX_CU12_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish libucx-cu12 ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: libucx-cu12-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: libucx-cu12-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/microsoft/onnxruntime-extensions/blob/rel-0.15/.pipelines/wheels_linux.yml
+# (cibuildwheel), with the Python tests of .pipelines/ci.yml.
+name: Build onnxruntime-extensions wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onnxruntime-extensions.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime-extensions.yml'
+      - 'docs/packages/onnxruntime-extensions.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime-extensions.yml'
+      - 'docs/packages/onnxruntime-extensions.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: onnxruntime-extensions
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onnxruntime-extensions ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream ships no free-threaded wheel and its pinned pybind11 2.12 predates free-threading support.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      ONNXRUNTIME_EXTENSIONS_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream tags no 0.15.x release; each is cut from a rel-X.Y branch commit carrying the version in version.txt.
+      - id: ref
+        run: |
+          case "${ONNXRUNTIME_EXTENSIONS_VERSION}" in
+            0.15.2) sha=8599e104c73429bf9e267e215504e296607a2ae9 ;;
+            *) echo "no release commit known for ${ONNXRUNTIME_EXTENSIONS_VERSION}" >&2; exit 1 ;;
+          esac
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "branch=rel-${ONNXRUNTIME_EXTENSIONS_VERSION%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout onnxruntime-extensions ${{ env.ONNXRUNTIME_EXTENSIONS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: microsoft/onnxruntime-extensions
+          ref: ${{ steps.ref.outputs.sha }}
+          persist-credentials: false
+
+      # The extension statically links protobuf, pybind11 and dlib's libpng/libjpeg/zlib, which
+      # ThirdPartyNotices.txt does not cover, and the wheel ships neither.
+      - name: Add third-party licences
+        run: |
+          cp ThirdPartyNotices.txt LICENSE.ThirdPartyNotices
+          curl -fsSL https://raw.githubusercontent.com/protocolbuffers/protobuf/v21.12/LICENSE -o LICENSE.protobuf
+          curl -fsSL https://raw.githubusercontent.com/pybind/pybind11/v2.12.0/LICENSE -o LICENSE.pybind11
+          curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/libpng/LICENSE -o LICENSE.libpng
+          curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/libjpeg/README -o LICENSE.libjpeg
+          curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/zlib/README -o LICENSE.zlib
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # BUILD_SOURCEBRANCHNAME is what upstream's release pipeline sets; without it setup.py
+          # appends +<sha> to the version of a commit that is not a rel-* branch tip.
+          CIBW_ENVIRONMENT: >-
+            OCOS_ENABLE_AZURE=0
+            BUILD_SOURCEBRANCHNAME=${{ steps.ref.outputs.branch }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest onnx onnxruntime
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,onnx,onnxruntime,ml_dtypes
+          # The test modules that need nothing beyond onnx/onnxruntime; the rest import
+          # torch, transformers or tensorflow, which have no riscv64 wheels.
+          CIBW_TEST_COMMAND: >-
+            cd {project}/test && python -m pytest
+            test_audio_codec.py test_audio_signal.py test_blingfire_sentencebreaker.py
+            test_masked_fill.py test_pyops.py test_segment_extraction.py
+            test_string_concat.py test_string_ecma_regex.py test_string_length.py
+            test_string_mapping.py test_string_ops.py test_string_to_vector.py
+            test_vector_to_string.py --verbose
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          assert "-${{ env.ONNXRUNTIME_EXTENSIONS_VERSION }}-${{ matrix.python }}-${{ matrix.python }}-" in path, path
+          names = zipfile.ZipFile(path).namelist()
+          exts = {n.rsplit("/", 1)[1].split(".", 1)[0] for n in names if n.endswith(".so")}
+          assert exts == {"_extensions_pydll"}, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.ThirdPartyNotices", "LICENSE.protobuf",
+                              "LICENSE.pybind11", "LICENSE.libpng", "LICENSE.libjpeg",
+                              "LICENSE.zlib"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: onnxruntime-extensions-${{ env.ONNXRUNTIME_EXTENSIONS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish onnxruntime-extensions ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: onnxruntime-extensions-${{ matrix.version }}-*-manylinux_riscv64

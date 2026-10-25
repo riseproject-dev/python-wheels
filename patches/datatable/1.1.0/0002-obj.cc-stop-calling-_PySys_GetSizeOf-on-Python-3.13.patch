@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 14 Oct 2026 19:11:27 +0000
+Subject: [PATCH 2/8] obj.cc: stop calling _PySys_GetSizeOf() on Python 3.13+
+
+_obj::get_sizeof() (used by Frame.__sizeof__ to account for the column
+names tuple and dict) calls _PySys_GetSizeOf(). Python 3.13 moved that
+function to the internal C API (Include/internal/pycore_sysmodule.h), so
+the extension no longer compiles:
+
+  src/core/python/obj.cc: error: '_PySys_GetSizeOf' was not declared
+  in this scope
+
+This is the reason datatable 1.1.0 cannot be built for cp313/cp314.
+On 3.13+ call sys.getsizeof() through the public API instead, which is
+what _PySys_GetSizeOf() implements (__sizeof__ plus the GC header), so
+the reported sizes are unchanged. Older interpreters keep the original
+call.
+
+Upstream-Status: To upstream [upstream has merged no external code change since the 1.1.0 release]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/core/python/obj.cc | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/core/python/obj.cc b/src/core/python/obj.cc
+index 6e9a228..75e99cb 100644
+--- a/src/core/python/obj.cc
++++ b/src/core/python/obj.cc
+@@ -1191,7 +1191,18 @@ std::string _obj::typestr() const {
+ 
+ 
+ size_t _obj::get_sizeof() const {
++#if PY_VERSION_HEX >= 0x030D0000
++  // _PySys_GetSizeOf() is internal API as of Python 3.13
++  PyObject* getsizeof = PySys_GetObject("getsizeof");
++  if (!getsizeof) return static_cast<size_t>(-1);
++  PyObject* res = PyObject_CallOneArg(getsizeof, v);
++  if (!res) return static_cast<size_t>(-1);
++  size_t size = PyLong_AsSize_t(res);
++  Py_DECREF(res);
++  return size;
++#else
+   return _PySys_GetSizeOf(v);
++#endif
+ }
+ 
+ size_t _obj::get_refcount() const {
+-- 
+2.43.0
+

@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `check_frontends` job of
+# https://github.com/Decompollaborate/mapfile_parser/blob/2.13.2/.github/workflows/tests.yml
+# and the `linux` job of
+# https://github.com/Decompollaborate/mapfile_parser/blob/2.13.2/.github/workflows/maturin_upload_pypi.yml
+name: Build mapfile-parser wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mapfile-parser.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mapfile-parser.yml'
+      - 'docs/packages/mapfile-parser.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mapfile-parser.yml'
+      - 'docs/packages/mapfile-parser.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mapfile-parser
+      version: ${{ inputs.version }}
+
+  # pyo3's generic `abi3` feature (Cargo.toml) tags the wheel with whichever
+  # interpreter builds it (CLAUDE.md gotcha 313), so this builds on our own
+  # cp312 floor rather than upstream's cp38; cp313/cp314 reuse that wheel via
+  # find_compatible_wheel. PyPy is dropped: no PyPy interpreter exists for
+  # riscv64.
+  build_abi3:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build mapfile-parser ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    env:
+      MAPFILE_PARSER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mapfile_parser ${{ env.MAPFILE_PARSER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Decompollaborate/mapfile_parser
+          ref: ${{ env.MAPFILE_PARSER_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # musllinux dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: >-
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # mapfile_parser ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            mapfile_parser bss_check tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser first_diff tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser jsonify tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser objdiff_report tests/maps/gnuld/n64/drmario64.us.map objdiff_report.json &&
+            mapfile_parser pj64_syms tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser progress tests/maps/gnuld/n64/drmario64.us.map asm asm/nonmatchings &&
+            mapfile_parser sym_info tests/maps/gnuld/n64/drmario64.us.map entrypoint &&
+            mapfile_parser symbol_sizes_csv tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser upload_frogress tests/maps/gnuld/n64/drmario64.us.map asm asm/nonmatchings drmario64 us code --verbose --dry-run
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mapfile-parser-${{ env.MAPFILE_PARSER_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded wheel: pyo3's abi3 feature can't target Py_GIL_DISABLED
+  # builds, so lib.rs's #[pymodule(gil_used = false)] gets its own
+  # per-interpreter build here, matching upstream's own cp314t wheel.
+  build_freethreaded:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build mapfile-parser ${{ matrix.version }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    env:
+      MAPFILE_PARSER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mapfile_parser ${{ env.MAPFILE_PARSER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Decompollaborate/mapfile_parser
+          ref: ${{ env.MAPFILE_PARSER_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp314t-manylinux_riscv64'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            mapfile_parser bss_check tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser first_diff tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser jsonify tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser objdiff_report tests/maps/gnuld/n64/drmario64.us.map objdiff_report.json &&
+            mapfile_parser pj64_syms tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser progress tests/maps/gnuld/n64/drmario64.us.map asm asm/nonmatchings &&
+            mapfile_parser sym_info tests/maps/gnuld/n64/drmario64.us.map entrypoint &&
+            mapfile_parser symbol_sizes_csv tests/maps/gnuld/n64/drmario64.us.map &&
+            mapfile_parser upload_frogress tests/maps/gnuld/n64/drmario64.us.map asm asm/nonmatchings drmario64 us code --verbose --dry-run
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mapfile-parser-${{ env.MAPFILE_PARSER_VERSION }}-cp314t-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mapfile-parser ${{ matrix.version }}
+    needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mapfile-parser-${{ matrix.version }}-*-manylinux_riscv64

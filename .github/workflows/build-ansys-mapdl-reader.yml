@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/pyansys/pymapdl-reader/blob/v0.56.0/.github/workflows/ci.yml
+# and the [tool.cibuildwheel] table of its pyproject.toml.
+name: Build ansys-mapdl-reader wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ansys-mapdl-reader.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ansys-mapdl-reader.yml'
+      - 'docs/packages/ansys-mapdl-reader.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ansys-mapdl-reader.yml'
+      - 'docs/packages/ansys-mapdl-reader.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ansys-mapdl-reader
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ansys-mapdl-reader ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no cp314t.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      ANSYS_MAPDL_READER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pymapdl-reader v${{ env.ANSYS_MAPDL_READER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyansys/pymapdl-reader
+          ref: v${{ env.ANSYS_MAPDL_READER_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy,vtk,scipy,matplotlib,pillow,contourpy,kiwisolver
+          # ansys-mapdl-core only feeds the suite's skip_no_ansys guard, which needs a local MAPDL install.
+          CIBW_TEST_REQUIRES: matplotlib pytest scipy
+
+      - name: Check the extensions and license made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          assert len(sys.argv) == 2, sys.argv[1:]
+          whl = sys.argv[1]
+          names = zipfile.ZipFile(whl).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names
+                  if n.startswith("ansys/mapdl/reader/") and n.endswith(".so")}
+          assert exts == {"_archive", "_reader", "_relaxmidside", "_cellqual", "_binary_reader"}, exts
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ansys-mapdl-reader-${{ env.ANSYS_MAPDL_READER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ansys-mapdl-reader ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ansys-mapdl-reader-${{ matrix.version }}-*-manylinux_riscv64

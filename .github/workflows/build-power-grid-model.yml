@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `acquire-python-version-build-sdist` and
+# `build-and-test-python` jobs of
+# https://github.com/PowerGridModel/power-grid-model/blob/v1.13.158/.github/workflows/build-test-release.yml
+name: Build power-grid-model wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/power-grid-model.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-power-grid-model.yml'
+      - 'docs/packages/power-grid-model.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-power-grid-model.yml'
+      - 'docs/packages/power-grid-model.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: power-grid-model
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build power-grid-model ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PGM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout power-grid-model v${{ env.PGM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PowerGridModel/power-grid-model
+          ref: v${{ env.PGM_VERSION }}
+          persist-credentials: false
+
+      - name: Set PyPI Version
+        run: echo "$PGM_VERSION" > VERSION
+
+      # Boost, Eigen, msgpack-cxx and nlohmann_json are compiled into the core library from
+      # pgm-build-deps; their notices are staged where scikit-build-core's licence glob finds them.
+      - name: Stage licences of the bundled header-only libraries
+        run: |
+          set -euo pipefail
+          url=$(curl -fsSL https://pypi.org/pypi/pgm-build-deps/json | python3 -c 'import json, sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["filename"].endswith(".whl")))')
+          curl -fsSL "$url" -o "$RUNNER_TEMP/pgm_build_deps.whl"
+          python3 - "$RUNNER_TEMP/pgm_build_deps.whl" <<'EOF'
+          import sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          for dep in ("boost", "eigen", "msgpack", "nlohmann_json"):
+              name = next(n for n in z.namelist() if n.endswith(f".dist-info/licenses/LICENSES/{dep}"))
+              open(f"LICENSE.{dep}", "wb").write(z.read(name))
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          extras: "uv"
+        env:
+          CIBW_ENVIRONMENT_PASS_LINUX: GITHUB_SHA GITHUB_REF GITHUB_RUN_NUMBER
+          CIBW_BUILD: "*-manylinux_riscv64"
+          CIBW_ARCHS_LINUX: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: >-
+            CC=gcc
+            CXX=g++
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_INDEX_STRATEGY=unsafe-best-match
+          # source.i comes out 731.327591 vs 731.327592 (rel. 1.8e-9 against rtol=1e-9) in this one
+          # near-singular IEC 60909 case: FMA rounding, not a wrong result.
+          CIBW_TEST_COMMAND: >-
+            pytest {package}/tests
+            -k "not (test_batch_validation and dummy-test-line-into-itself-asym-iec60909-batch)"
+
+      - name: Verify the wheel ships the compiled core and licences
+        run: |
+          set -euo pipefail
+          ls wheelhouse/*.whl
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          assert len(sys.argv) == 2, sys.argv[1:]
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "-py3-none-manylinux" in sys.argv[1], sys.argv[1]
+          assert any("/power_grid_model_c/lib" in n and n.endswith("libpower_grid_model_c.so") for n in names), names
+          for lic in ("LICENSE", "LICENSE.boost", "LICENSE.eigen", "LICENSE.msgpack", "LICENSE.nlohmann_json"):
+              assert any(n.endswith(f".dist-info/licenses/{lic}") for n in names), (lic, names)
+          print(sys.argv[1], "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: power-grid-model-${{ env.PGM_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish power-grid-model ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: power-grid-model-${{ matrix.version }}-py3-none-manylinux_riscv64

@@ -1,0 +1,4087 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 16 Oct 2026 00:00:01 +0000
+Subject: [PATCH] vendor crash-handler 0.7.0 for riscv64 support
+
+Upstream-Status: Inappropriate [riscv64 support needs a newer transitive dependency, but crash-handler's own Cargo.toml pins its two resolved versions out of semver range of each other]
+
+The "Build fbuild 2.5.21 manylinux_riscv64" job still fails after the
+existing vendor-crash-context-riscv64.patch, with a *different* compile
+error in a *different* crate:
+
+  error[E0425]: cannot find type `__jmp_buf` in this scope
+    --> crash-handler-0.6.3/src/linux/jmp.rs:51:16
+  error[E0609]: no field `fpregs` on type `crash_context::mcontext_t`
+    --> crash-handler-0.6.3/src/linux/state.rs:461:48
+
+zccache (an external git dependency, not an fbuild workspace member)
+pins `crash-handler = "0.6"`, which resolves to crash-handler 0.6.3.
+That crate version has no riscv64 branch in its own linux/jmp.rs
+(`__jmp_buf`) or linux/state.rs (reading `uc_mcontext.fpregs`/`__fpregs`
+for the float state) -- this is crash-handler's *own* arch-specific code,
+separate from (and not fixed by) vendoring crash-context. Cargo.lock
+resolves a second, unrelated crash-handler 0.7.0 for running-process's
+pin; that one already has riscv64 support (EmbarkStudios/crash-handling,
+same 0.7.0 release that added crash-context's riscv64 getcontext()), so
+only the 0.6.3 line used by zccache needs fixing.
+
+crash-handler can't just be bumped to 0.7.0 for zccache's pin either:
+zccache's own Cargo.toml requires `crash-handler = "0.6"`, a caret
+requirement that rejects 0.7.0/0.8.x outright, and zccache is not ours
+to patch.
+
+Vendors the complete, unmodified crash-handler 0.7.0 release (from its
+own published .crate tarball) under vendor/crash-handler/, with only its
+Cargo.toml version string turned back to "0.6.3" so it keeps satisfying
+every "crash-handler = 0.6" requirement in the graph, and wires it in via
+a second [patch.crates-io] entry in the top-level Cargo.toml, alongside
+the existing crash-context one. crash-handler 0.7.0 depends on
+`crash-context = "0.6"`, which the existing crash-context patch already
+resolves to the riscv64-capable vendored copy, so the two patches compose
+correctly. No hand-written code: the riscv64 __jmp_buf layout, the
+riscv64/s390x float-state branch in state.rs, and everything else come
+straight from crash-handler's own tested, released 0.7.0 source.
+
+Validated with `cargo check --target riscv64gc-unknown-linux-gnu`
+(rust-std component installed) in three steps, each against a throwaway
+crate depending on crash-handler the same way zccache does:
+1. Plain registry crash-handler 0.6.3 (no patches): fails compiling
+   crash-context, matching the error 0002 already fixes.
+2. Registry crash-handler 0.6.3 + 0002's crash-context patch only (no
+   this patch): reproduces the CI job's exact failure byte-for-byte --
+   same E0425 on jmp.rs:51 (`__jmp_buf`) and the same two E0609s on
+   state.rs:461-462 (`mcontext_t.fpregs`).
+3. This patch's vendored crash-handler + 0002's crash-context patch
+   together (i.e. how fbuild's own Cargo.toml resolves both): compiles
+   cleanly for riscv64gc, no errors.
+The patch applies cleanly on top of 0002-vendor-crash-context-riscv64.patch
+against a fresh v2.5.21 checkout.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/Cargo.toml b/Cargo.toml
+index f4514cf..21a87d6 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -216,3 +216,14 @@ debug = false
+ # requirement; everything else, including the riscv64 getcontext asm, is
+ # unmodified upstream code.
+ crash-context = { path = "vendor/crash-context" }
++
++# crash-handler 0.6.3 (zccache's pin) lacks riscv64 entirely in its own
++# linux/jmp.rs (`__jmp_buf`) and linux/state.rs (`uc_mcontext.fpregs`) --
++# a separate crate from crash-context above, and not fixed by the patch
++# above. running-process's crash-handler 0.7.0 pin already has riscv64
++# support, so only the 0.6.3 line needs it. Vendor the real upstream 0.7.0
++# release (EmbarkStudios/crash-handling, same riscv64 work) with its
++# version string turned back to "0.6.3" so it still satisfies zccache's
++# "0.6" requirement; it depends on `crash-context = "0.6"`, which the
++# patch above already resolves to the riscv64-capable vendored copy.
++crash-handler = { path = "vendor/crash-handler" }
+diff --git a/vendor/crash-handler/CHANGELOG.md b/vendor/crash-handler/CHANGELOG.md
+new file mode 100644
+index 0000000..daa3699
+--- /dev/null
++++ b/vendor/crash-handler/CHANGELOG.md
+@@ -0,0 +1,114 @@
++<!-- markdownlint-disable blanks-around-headings blanks-around-lists no-duplicate-heading -->
++
++# Changelog
++
++All notable changes to this project will be documented in this file.
++
++The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
++and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
++
++<!-- next-header -->
++## [Unreleased] - ReleaseDate
++## [0.7.0] - 2026-01-13
++### Fixed
++- [PR#105](https://github.com/EmbarkStudios/crash-handling/pull/105) fixed pthread interposition when statically linking `musl`.
++
++### Changed
++- [PR#111](https://github.com/EmbarkStudios/crash-handling/pull/111) updated MSRV to 1.85.0.
++
++## [0.6.3] - 2025-05-13
++### Fixed
++- [PR#94](https://github.com/EmbarkStudios/crash-handling/pull/94) resolved a case of UB, resolving [#93](https://github.com/EmbarkStudios/crash-handling/issues/93). Thanks [@Chain-Fox](https://github.com/Chain-Fox)!
++- [PR#96](https://github.com/EmbarkStudios/crash-handling/pull/96) resolved [#92](https://github.com/EmbarkStudios/crash-handling/issues/92) by avoid creating a copy of the crash context on the stack, which on `aarch64-linux` would result in a stack overflow in the signal handler.
++
++### Added
++- [PR#96](https://github.com/EmbarkStudios/crash-handling/pull/96) added testing of `aarch64-linux` to CI.
++
++### Changed
++- [PR#95](https://github.com/EmbarkStudios/crash-handling/pull/95) updated crates, and changed the edition to 2024.
++
++## [0.6.2] - 2024-06-08
++### Added
++- [PR#86](https://github.com/EmbarkStudios/crash-handling/pull/86) (carrying on from [PR#85](https://github.com/EmbarkStudios/crash-handling/pull/85)) added support for [vectored exception handlers](https://learn.microsoft.com/en-us/windows/win32/debug/vectored-exception-handling) on Windows, which can catch heap corruption exceptions that the vanilla exception handler cannot catch. Thanks [Tom!](https://github.com/h3r2tic)!
++
++## [0.6.1] - 2024-01-29
++### Added
++- [PR#81](https://github.com/EmbarkStudios/crash-handling/pull/81) resolved [#79](https://github.com/EmbarkStudios/crash-handling/issues/79) by adding `make_single_crash_event`.
++
++## [0.6.0] - 2023-04-03
++### Changed
++- [PR#70](https://github.com/EmbarkStudios/crash-handling/pull/70) removed `winapi` in favor of embedded bindings.
++
++## [0.5.1] - 2022-11-17
++### Fixed
++- [PR#64](https://github.com/EmbarkStudios/crash-handling/pull/64) fixed compilation for `aarch64-linux-android`. Additional targets were added to CI so they get caught before release.
++
++## [0.5.0] - 2022-11-17
++### Added
++- [PR#62](https://github.com/EmbarkStudios/crash-handling/pull/62) and [PR#63](https://github.com/EmbarkStudios/crash-handling/pull/63) added support for handling `SIGABRT` on Windows.
++
++### Fixed
++- [PR#62](https://github.com/EmbarkStudios/crash-handling/pull/62) changed from using `RtlCaptureContext` on Windows to using `crash_context::capture_context`. This implementation fixes a crash issue due to `winapi` and `windows-sys` having [improper bindings](https://github.com/microsoft/win32metadata/issues/1044).
++
++### Changed
++- [PR#62](https://github.com/EmbarkStudios/crash-handling/pull/62) changed from using `RtlCaptureContext` on Windows to using `crash_context::capture_context`. This implementation additionally captures floating point and vector state on `x86_64` unlike `RtlCaptureContext`.
++
++## [0.4.0] - 2022-10-21
++### Added
++- [PR#60](https://github.com/EmbarkStudios/crash-handling/pull/60) resolved [#59](https://github.com/EmbarkStudios/crash-handling/issues/59) by adding support for `PR_SET_PTRACER` before invoking the user callback, ensuring that an external process has permissions to perform `ptrace` operations on the crashing process, even if `/proc/sys/kernel/yama/ptrace_scope` is set to restricted (1), as this is the default for most newer distributions.
++
++### Changed
++- [PR#60](https://github.com/EmbarkStudios/crash-handling/pull/60) bumped `windows-sys` to 0.42.
++
++## [0.3.3] - 2022-07-21
++### Added
++- [PR#46](https://github.com/EmbarkStudios/crash-handling/pull/46) resolved [#33](https://github.com/EmbarkStudios/crash-handling/issues/33) by adding support for `EXC_RESOURCE` exceptions. Since not all resource exceptions are fatal, they are checked and only reported to the user callback if they are indeed fatal.
++- [PR#47](https://github.com/EmbarkStudios/crash-handling/pull/47) resolved [#34](https://github.com/EmbarkStudios/crash-handling/issues/34) by adding support for `EXC_GUARD` exceptions.
++
++## [0.3.2] - 2022-07-19
++### Fixed
++- [PR#38](https://github.com/EmbarkStudios/crash-handling/pull/38) resolved [#31](https://github.com/EmbarkStudios/crash-handling/issues/31) and [#35](https://github.com/EmbarkStudios/crash-handling/issues/35) by adding support for 64-bit codes in the mach exception information, as well as now handling `EXC_CRASH` exceptions.
++- [PR#43](https://github.com/EmbarkStudios/crash-handling/pull/42) resolved [#42](https://github.com/EmbarkStudios/crash-handling/issues/42) by fixing a bug on `aarch64-linux`. Thanks [@sfackler](https://github.com/sfackler)!
++
++## [0.3.1] - 2022-05-25
++### Changed
++- Updated to `minidump-writer` 0.2.1 which includes support for MacOS thread names, and aligns on crash-context 0.3.0.
++
++## [0.3.0] - 2022-05-23
++### Added
++- First usable release of `crash-context`, `crash-handler`, `sadness-generator`, and `minidumper` crates.
++
++## [crash-handler-v0.1.0] - 2022-04-29
++### Added
++- Initial publish of crash-handler with Linux, Windows, and MacOS support
++
++## [sadness-generator-v0.1.0] - 2022-04-29
++### Added
++- Initial published of sadness-generator, can generated crashes on Linux, Windows, and MacOS
++
++## [crash-context-v0.2.0] - 2022-04-29
++### Added
++- Add Windows and MacOS support
++
++## [crash-context-v0.1.0] - 2022-04-21
++### Added
++- Initial pass of crash-context, Linux only
++
++<!-- next-url -->
++[Unreleased]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.7.0...HEAD
++[0.7.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.6.3...crash-handler-0.7.0
++[0.6.3]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.6.2...crash-handler-0.6.3
++[0.6.2]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.6.1...crash-handler-0.6.2
++[0.6.1]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.6.0...crash-handler-0.6.1
++[0.6.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.5.1...crash-handler-0.6.0
++[0.5.1]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.5.0...crash-handler-0.5.1
++[0.5.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.4.0...crash-handler-0.5.0
++[0.4.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.3.3...crash-handler-0.4.0
++[0.3.3]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-0.3.2...crash-handler-0.3.3
++[0.3.2]: https://github.com/EmbarkStudios/crash-handling/compare/0.3.1...crash-handler-0.3.2
++[0.3.1]: https://github.com/EmbarkStudios/crash-handling/compare/0.3.1...0.3.1
++[0.3.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-v0.1.0...0.3.0
++[crash-handler-v0.1.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/crash-handler-v0.1.0
++[sadness-generator-v0.1.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/sadness-generator-v0.1.0
++[crash-context-v0.2.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/crash-context-v0.2.0
++[crash-context-v0.1.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/crash-context-v0.1.0
+diff --git a/vendor/crash-handler/Cargo.toml b/vendor/crash-handler/Cargo.toml
+new file mode 100644
+index 0000000..e62a999
+--- /dev/null
++++ b/vendor/crash-handler/Cargo.toml
+@@ -0,0 +1,120 @@
++# THIS FILE IS AUTOMATICALLY GENERATED BY CARGO
++#
++# When uploading crates to the registry Cargo will automatically
++# "normalize" Cargo.toml files for maximal compatibility
++# with all versions of Cargo and also rewrite `path` dependencies
++# to registry (e.g., crates.io) dependencies.
++#
++# If you are reading this file be aware that the original Cargo.toml
++# will likely look very different (and much more reasonable).
++# See Cargo.toml.orig for the original contents.
++
++# Keep this out of fbuild's own workspace -- it's a vendored, patched
++# copy of a third-party crate, not a first-party fbuild crate.
++[workspace]
++
++[package]
++edition = "2024"
++name = "crash-handler"
++version = "0.6.3"
++authors = [
++    "Embark <opensource@embark-studios.com>",
++    "Jake Shadle <jake.shadle@embark-studios.com>",
++]
++build = false
++autolib = false
++autobins = false
++autoexamples = false
++autotests = false
++autobenches = false
++description = "Allows running of user code during crash events"
++homepage = "https://github.com/EmbarkStudios/crash-handling/tree/main/crash-handler"
++documentation = "https://docs.rs/crash-handler"
++readme = "README.md"
++keywords = [
++    "breakpad",
++    "minidump",
++    "crash",
++    "signal",
++    "exception",
++]
++license = "MIT OR Apache-2.0"
++repository = "https://github.com/EmbarkStudios/crash-handling"
++resolver = "2"
++
++[features]
++debug-print = []
++default = []
++
++[lib]
++name = "crash_handler"
++path = "src/lib.rs"
++
++[[test]]
++name = "abort"
++path = "tests/abort.rs"
++
++[[test]]
++name = "bus"
++path = "tests/bus.rs"
++
++[[test]]
++name = "fpe"
++path = "tests/fpe.rs"
++
++[[test]]
++name = "guard"
++path = "tests/guard.rs"
++
++[[test]]
++name = "heap_corruption"
++path = "tests/heap_corruption.rs"
++
++[[test]]
++name = "illegal"
++path = "tests/illegal.rs"
++
++[[test]]
++name = "invalid_param"
++path = "tests/invalid_param.rs"
++
++[[test]]
++name = "purecall"
++path = "tests/purecall.rs"
++
++[[test]]
++name = "segv"
++path = "tests/segv.rs"
++
++[[test]]
++name = "shared"
++path = "tests/shared.rs"
++
++[[test]]
++name = "stack_overflow"
++path = "tests/stack_overflow.rs"
++
++[[test]]
++name = "stack_overflow_pthread"
++path = "tests/stack_overflow_pthread.rs"
++
++[[test]]
++name = "trap"
++path = "tests/trap.rs"
++
++[dependencies.cfg-if]
++version = "1.0"
++
++[dependencies.crash-context]
++version = "0.6"
++
++[dependencies.libc]
++version = ">=0.2.180"
++
++[dependencies.parking_lot]
++version = "0.12"
++
++[dev-dependencies]
++
++[target.'cfg(target_os = "macos")'.dependencies.mach2]
++version = "0.4"
+diff --git a/vendor/crash-handler/Cargo.toml.orig b/vendor/crash-handler/Cargo.toml.orig
+new file mode 100644
+index 0000000..c7c0f0f
+--- /dev/null
++++ b/vendor/crash-handler/Cargo.toml.orig
+@@ -0,0 +1,37 @@
++[package]
++name = "crash-handler"
++description = "Allows running of user code during crash events"
++repository = "https://github.com/EmbarkStudios/crash-handling"
++version = "0.7.0"
++authors.workspace = true
++edition.workspace = true
++license.workspace = true
++readme = "README.md"
++documentation = "https://docs.rs/crash-handler"
++homepage = "https://github.com/EmbarkStudios/crash-handling/tree/main/crash-handler"
++keywords = ["breakpad", "minidump", "crash", "signal", "exception"]
++
++[features]
++default = []
++# If enabled, will log out information when a signal is raised/exception thrown
++# but logged in a manner that is safe.
++debug-print = []
++
++[dependencies]
++# Nicer handling of complex cfg expressions
++cfg-if.workspace = true
++# Definition of a portable crash-context that can be shared between various
++# crates
++crash-context.workspace = true
++# Wrapper around libc
++libc.workspace = true
++# Nicer sync primitives
++parking_lot.workspace = true
++
++[target.'cfg(target_os = "macos")'.dependencies]
++# Bindings to MacOS specific APIs that are used. Note we don't use the `mach`
++# crate as it is unmaintained
++mach2.workspace = true
++
++[dev-dependencies]
++sadness-generator = { path = "../sadness-generator" }
+diff --git a/vendor/crash-handler/LICENSE-APACHE b/vendor/crash-handler/LICENSE-APACHE
+new file mode 100644
+index 0000000..11069ed
+--- /dev/null
++++ b/vendor/crash-handler/LICENSE-APACHE
+@@ -0,0 +1,201 @@
++                              Apache License
++                        Version 2.0, January 2004
++                     http://www.apache.org/licenses/
++
++TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++1. Definitions.
++
++   "License" shall mean the terms and conditions for use, reproduction,
++   and distribution as defined by Sections 1 through 9 of this document.
++
++   "Licensor" shall mean the copyright owner or entity authorized by
++   the copyright owner that is granting the License.
++
++   "Legal Entity" shall mean the union of the acting entity and all
++   other entities that control, are controlled by, or are under common
++   control with that entity. For the purposes of this definition,
++   "control" means (i) the power, direct or indirect, to cause the
++   direction or management of such entity, whether by contract or
++   otherwise, or (ii) ownership of fifty percent (50%) or more of the
++   outstanding shares, or (iii) beneficial ownership of such entity.
++
++   "You" (or "Your") shall mean an individual or Legal Entity
++   exercising permissions granted by this License.
++
++   "Source" form shall mean the preferred form for making modifications,
++   including but not limited to software source code, documentation
++   source, and configuration files.
++
++   "Object" form shall mean any form resulting from mechanical
++   transformation or translation of a Source form, including but
++   not limited to compiled object code, generated documentation,
++   and conversions to other media types.
++
++   "Work" shall mean the work of authorship, whether in Source or
++   Object form, made available under the License, as indicated by a
++   copyright notice that is included in or attached to the work
++   (an example is provided in the Appendix below).
++
++   "Derivative Works" shall mean any work, whether in Source or Object
++   form, that is based on (or derived from) the Work and for which the
++   editorial revisions, annotations, elaborations, or other modifications
++   represent, as a whole, an original work of authorship. For the purposes
++   of this License, Derivative Works shall not include works that remain
++   separable from, or merely link (or bind by name) to the interfaces of,
++   the Work and Derivative Works thereof.
++
++   "Contribution" shall mean any work of authorship, including
++   the original version of the Work and any modifications or additions
++   to that Work or Derivative Works thereof, that is intentionally
++   submitted to Licensor for inclusion in the Work by the copyright owner
++   or by an individual or Legal Entity authorized to submit on behalf of
++   the copyright owner. For the purposes of this definition, "submitted"
++   means any form of electronic, verbal, or written communication sent
++   to the Licensor or its representatives, including but not limited to
++   communication on electronic mailing lists, source code control systems,
++   and issue tracking systems that are managed by, or on behalf of, the
++   Licensor for the purpose of discussing and improving the Work, but
++   excluding communication that is conspicuously marked or otherwise
++   designated in writing by the copyright owner as "Not a Contribution."
++
++   "Contributor" shall mean Licensor and any individual or Legal Entity
++   on behalf of whom a Contribution has been received by Licensor and
++   subsequently incorporated within the Work.
++
++2. Grant of Copyright License. Subject to the terms and conditions of
++   this License, each Contributor hereby grants to You a perpetual,
++   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++   copyright license to reproduce, prepare Derivative Works of,
++   publicly display, publicly perform, sublicense, and distribute the
++   Work and such Derivative Works in Source or Object form.
++
++3. Grant of Patent License. Subject to the terms and conditions of
++   this License, each Contributor hereby grants to You a perpetual,
++   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++   (except as stated in this section) patent license to make, have made,
++   use, offer to sell, sell, import, and otherwise transfer the Work,
++   where such license applies only to those patent claims licensable
++   by such Contributor that are necessarily infringed by their
++   Contribution(s) alone or by combination of their Contribution(s)
++   with the Work to which such Contribution(s) was submitted. If You
++   institute patent litigation against any entity (including a
++   cross-claim or counterclaim in a lawsuit) alleging that the Work
++   or a Contribution incorporated within the Work constitutes direct
++   or contributory patent infringement, then any patent licenses
++   granted to You under this License for that Work shall terminate
++   as of the date such litigation is filed.
++
++4. Redistribution. You may reproduce and distribute copies of the
++   Work or Derivative Works thereof in any medium, with or without
++   modifications, and in Source or Object form, provided that You
++   meet the following conditions:
++
++   (a) You must give any other recipients of the Work or
++       Derivative Works a copy of this License; and
++
++   (b) You must cause any modified files to carry prominent notices
++       stating that You changed the files; and
++
++   (c) You must retain, in the Source form of any Derivative Works
++       that You distribute, all copyright, patent, trademark, and
++       attribution notices from the Source form of the Work,
++       excluding those notices that do not pertain to any part of
++       the Derivative Works; and
++
++   (d) If the Work includes a "NOTICE" text file as part of its
++       distribution, then any Derivative Works that You distribute must
++       include a readable copy of the attribution notices contained
++       within such NOTICE file, excluding those notices that do not
++       pertain to any part of the Derivative Works, in at least one
++       of the following places: within a NOTICE text file distributed
++       as part of the Derivative Works; within the Source form or
++       documentation, if provided along with the Derivative Works; or,
++       within a display generated by the Derivative Works, if and
++       wherever such third-party notices normally appear. The contents
++       of the NOTICE file are for informational purposes only and
++       do not modify the License. You may add Your own attribution
++       notices within Derivative Works that You distribute, alongside
++       or as an addendum to the NOTICE text from the Work, provided
++       that such additional attribution notices cannot be construed
++       as modifying the License.
++
++   You may add Your own copyright statement to Your modifications and
++   may provide additional or different license terms and conditions
++   for use, reproduction, or distribution of Your modifications, or
++   for any such Derivative Works as a whole, provided Your use,
++   reproduction, and distribution of the Work otherwise complies with
++   the conditions stated in this License.
++
++5. Submission of Contributions. Unless You explicitly state otherwise,
++   any Contribution intentionally submitted for inclusion in the Work
++   by You to the Licensor shall be under the terms and conditions of
++   this License, without any additional terms or conditions.
++   Notwithstanding the above, nothing herein shall supersede or modify
++   the terms of any separate license agreement you may have executed
++   with Licensor regarding such Contributions.
++
++6. Trademarks. This License does not grant permission to use the trade
++   names, trademarks, service marks, or product names of the Licensor,
++   except as required for reasonable and customary use in describing the
++   origin of the Work and reproducing the content of the NOTICE file.
++
++7. Disclaimer of Warranty. Unless required by applicable law or
++   agreed to in writing, Licensor provides the Work (and each
++   Contributor provides its Contributions) on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++   implied, including, without limitation, any warranties or conditions
++   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++   PARTICULAR PURPOSE. You are solely responsible for determining the
++   appropriateness of using or redistributing the Work and assume any
++   risks associated with Your exercise of permissions under this License.
++
++8. Limitation of Liability. In no event and under no legal theory,
++   whether in tort (including negligence), contract, or otherwise,
++   unless required by applicable law (such as deliberate and grossly
++   negligent acts) or agreed to in writing, shall any Contributor be
++   liable to You for damages, including any direct, indirect, special,
++   incidental, or consequential damages of any character arising as a
++   result of this License or out of the use or inability to use the
++   Work (including but not limited to damages for loss of goodwill,
++   work stoppage, computer failure or malfunction, or any and all
++   other commercial damages or losses), even if such Contributor
++   has been advised of the possibility of such damages.
++
++9. Accepting Warranty or Additional Liability. While redistributing
++   the Work or Derivative Works thereof, You may choose to offer,
++   and charge a fee for, acceptance of support, warranty, indemnity,
++   or other liability obligations and/or rights consistent with this
++   License. However, in accepting such obligations, You may act only
++   on Your own behalf and on Your sole responsibility, not on behalf
++   of any other Contributor, and only if You agree to indemnify,
++   defend, and hold each Contributor harmless for any liability
++   incurred by, or claims asserted against, such Contributor by reason
++   of your accepting any such warranty or additional liability.
++
++END OF TERMS AND CONDITIONS
++
++APPENDIX: How to apply the Apache License to your work.
++
++   To apply the Apache License to your work, attach the following
++   boilerplate notice, with the fields enclosed by brackets "[]"
++   replaced with your own identifying information. (Don't include
++   the brackets!)  The text should be enclosed in the appropriate
++   comment syntax for the file format. We also recommend that a
++   file or class name and description of purpose be included on the
++   same "printed page" as the copyright notice for easier
++   identification within third-party archives.
++
++Copyright [yyyy] [name of copyright owner]
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
+diff --git a/vendor/crash-handler/LICENSE-MIT b/vendor/crash-handler/LICENSE-MIT
+new file mode 100644
+index 0000000..0bdad8f
+--- /dev/null
++++ b/vendor/crash-handler/LICENSE-MIT
+@@ -0,0 +1,25 @@
++Copyright (c) 2019 Embark Studios
++
++Permission is hereby granted, free of charge, to any
++person obtaining a copy of this software and associated
++documentation files (the "Software"), to deal in the
++Software without restriction, including without
++limitation the rights to use, copy, modify, merge,
++publish, distribute, sublicense, and/or sell copies of
++the Software, and to permit persons to whom the Software
++is furnished to do so, subject to the following
++conditions:
++
++The above copyright notice and this permission notice
++shall be included in all copies or substantial portions
++of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
++ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
++TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
++SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
++IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++DEALINGS IN THE SOFTWARE.
+diff --git a/vendor/crash-handler/README.md b/vendor/crash-handler/README.md
+new file mode 100644
+index 0000000..2980066
+--- /dev/null
++++ b/vendor/crash-handler/README.md
+@@ -0,0 +1,100 @@
++<!-- Allow this file to not have a first line heading -->
++<!-- markdownlint-disable-file MD041 -->
++
++<!-- inline html -->
++<!-- markdownlint-disable-file MD033 MD036 -->
++
++<div align="center">
++
++# `🔥 crash-handler`
++
++**Runs user-specified code when a crash occurs**
++
++[![Embark](https://img.shields.io/badge/embark-open%20source-blueviolet.svg)](https://embark.dev)
++[![Embark](https://img.shields.io/badge/discord-ark-%237289da.svg?logo=discord)](https://discord.gg/dAuKfZS)
++[![Crates.io](https://img.shields.io/crates/v/crash-handler.svg)](https://crates.io/crates/crash-handler)
++[![Docs](https://docs.rs/crash-handler/badge.svg)](https://docs.rs/crash-handler)
++[![dependency status](https://deps.rs/repo/github/EmbarkStudios/crash-handling/status.svg)](https://deps.rs/repo/github/EmbarkStudios/crash-handling)
++[![Build status](https://github.com/EmbarkStudios/crash-handling/workflows/CI/badge.svg)](https://github.com/EmbarkStudios/crash-handling/actions)
++
++</div>
++
++## Linux/Android
++
++On Linux this is done by handling [signals](https://man7.org/linux/man-pages/man7/signal.7.html), namely the following.
++
++One important detail of the Linux signal handling is that this crate hooks [`pthread_create`](https://man7.org/linux/man-pages/man3/pthread_create.3.html) so that an [alternate signal stack](https://man7.org/linux/man-pages/man2/sigaltstack.2.html) is always installed on every thread. [`std::thread::Thread`] already does this, however hooking `pthread_create` allows us to ensure this occurs for threads created from eg. C/C++ code as well. An alternate stack is necessary to reliably handle a [`SIGSEGV`](#sigsegv) caused by a [stack overflow](https://en.wikipedia.org/wiki/Stack_buffer_overflow), as signals are otherwise handled on the same stack that raised the signal.
++
++### `SIGABRT`
++
++Signal sent to a process to tell it to abort, i.e. to terminate. The signal is usually initiated by the process itself when it calls `std::process::abort` or `libc::abort`, but it can be sent to the process from outside itself like any other signal.
++
++### `SIGBUS`
++
++Signal sent to a process when it causes a [bus error](https://en.wikipedia.org/wiki/Bus_error).
++
++### `SIGFPE`
++
++Signal sent to a process when it executes an erroneous arithmetic operation. Though it stands for **f**loating **p**oint **e**xception this signal covers integer operations as well.
++
++### `SIGILL`
++
++Signal sent to a process when it attempts to execute an **illegal**, malformed, unknown, or privileged, instruction.
++
++### `SIGSEGV`
++
++Signal sent to a process when it makes an invalid virtual memory reference, a [segmentation fault](https://en.wikipedia.org/wiki/Segmentation_fault). This covers infamous `null` pointer access, out of bounds access, use after free, stack overflows, etc.
++
++### `SIGTRAP`
++
++Signal sent to a process when a trap is raised, eg. a breakpoint or debug assertion.
++
++## Windows
++
++On Windows we catch [exceptions](https://docs.microsoft.com/en-us/windows/win32/debug/structured-exception-handling), which cover a wide range of crash reasons, as well as [invalid parameters](https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/set-invalid-parameter-handler-set-thread-local-invalid-parameter-handler?view=msvc-170) and [purecall](https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/get-purecall-handler-set-purecall-handler?view=msvc-170)
++
++## `MacOS`
++
++On Macos we use [exception ports](https://flylib.com/books/en/3.126.1.109/1/). Exception ports are the first layer that exceptions are filtered, from a thread level, to a process (task) level, and finally to a host level.
++
++If no user ports have been registered, the default Macos implementation is to convert the Mach exception into an equivalent Unix signal and deliver it to any registered signal handlers before performing the default action for the exception/signal (ie process termination). This means that if you use this crate in conjunction with signal handling on `MacOS`, **you will not get the results you expect** as the exception port used by this crate will take precedence over the signal handler. See [this issue](https://github.com/bytecodealliance/wasmtime/issues/2456) for a concrete example.
++
++Note that there is one exception to the above, which is that `SIGABRT` is handled by a signal handler, as there is no equivalent Mach exception for it.
++
++### `EXC_BAD_ACCESS`
++
++Covers similar crashes as [`SIGSEGV`](#sigsegv) and [`SIGBUS`](#sigbus)
++
++### `EXC_BAD_INSTRUCTION`
++
++Covers similar crashes as [`SIGILL`](#sigill)
++
++### `EXC_ARITHMETIC`
++
++Covers similar crashes as [`SIGFPE`](#sigfpe)
++
++### `EXC_BREAKPOINT`
++
++Covers similar crashes as [`SIGTRAP`](#sigtrap)
++
++## Contribution
++
++[![Contributor Covenant](https://img.shields.io/badge/contributor%20covenant-v1.4-ff69b4.svg)](../CODE_OF_CONDUCT.md)
++
++We welcome community contributions to this project.
++
++Please read our [Contributor Guide](../CONTRIBUTING.md) for more information on how to get started.
++Please also read our [Contributor Terms](../CONTRIBUTING.md#contributor-terms) before you make any contributions.
++
++Any contribution intentionally submitted for inclusion in an Embark Studios project, shall comply with the Rust standard licensing model (MIT OR Apache 2.0) and therefore be dual licensed as described below, without any additional terms or conditions:
++
++### License
++
++This contribution is dual licensed under EITHER OF
++
++- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
++- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
++
++at your option.
++
++For clarity, "your" refers to Embark or any other licensee/user of the contribution.
+diff --git a/vendor/crash-handler/release.toml b/vendor/crash-handler/release.toml
+new file mode 100644
+index 0000000..23935de
+--- /dev/null
++++ b/vendor/crash-handler/release.toml
+@@ -0,0 +1,10 @@
++pre-release-commit-message = "Release crash-handler-{{version}}"
++tag-message = "Release crash-handler-{{version}}"
++tag-name = "crash-handler-{{version}}"
++pre-release-replacements = [
++    { file = "CHANGELOG.md", search = "Unreleased", replace = "{{version}}" },
++    { file = "CHANGELOG.md", search = "\\.\\.\\.HEAD", replace = "...{{tag_name}}" },
++    { file = "CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}" },
++    { file = "CHANGELOG.md", search = "<!-- next-header -->", replace = "<!-- next-header -->\n## [Unreleased] - ReleaseDate" },
++    { file = "CHANGELOG.md", search = "<!-- next-url -->", replace = "<!-- next-url -->\n[Unreleased]: https://github.com/EmbarkStudios/crash-handling/compare/{{tag_name}}...HEAD" },
++]
+diff --git a/vendor/crash-handler/src/error.rs b/vendor/crash-handler/src/error.rs
+new file mode 100644
+index 0000000..05ee4b9
+--- /dev/null
++++ b/vendor/crash-handler/src/error.rs
+@@ -0,0 +1,40 @@
++use std::fmt;
++
++/// An error that can occur when attaching or detaching a [`crate::CrashHandler`]
++#[derive(Debug)]
++pub enum Error {
++    /// Unable to `mmap` memory
++    OutOfMemory,
++    /// For simplicity sake, only one [`crate::CrashHandler`] can be registered
++    /// at any one time.
++    HandlerAlreadyInstalled,
++    /// An I/O or other syscall failed
++    Io(std::io::Error),
++}
++
++impl std::error::Error for Error {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        match self {
++            Self::Io(inner) => Some(inner),
++            _ => None,
++        }
++    }
++}
++
++impl fmt::Display for Error {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::OutOfMemory => f.write_str("unable to allocate memory"),
++            Self::HandlerAlreadyInstalled => {
++                f.write_str("an exception handler is already installed")
++            }
++            Self::Io(e) => write!(f, "{}", e),
++        }
++    }
++}
++
++impl From<std::io::Error> for Error {
++    fn from(e: std::io::Error) -> Self {
++        Self::Io(e)
++    }
++}
+diff --git a/vendor/crash-handler/src/lib.rs b/vendor/crash-handler/src/lib.rs
+new file mode 100644
+index 0000000..89853ff
+--- /dev/null
++++ b/vendor/crash-handler/src/lib.rs
+@@ -0,0 +1,201 @@
++#![doc = include_str!("../README.md")]
++#![allow(unsafe_code)]
++
++mod error;
++
++pub use error::Error;
++
++#[cfg(feature = "debug-print")]
++#[macro_export]
++macro_rules! debug_print {
++    ($s:literal) => {
++        let cstr = concat!(file!(), ":", line!(), " ", $s, "\n");
++        $crate::write_stderr(cstr);
++    };
++}
++
++#[cfg(not(feature = "debug-print"))]
++#[macro_export]
++macro_rules! debug_print {
++    ($s:literal) => {};
++}
++
++/// Writes the specified string directly to stderr.
++///
++/// This is safe to be called from within a compromised context.
++#[inline]
++pub fn write_stderr(s: &'static str) {
++    unsafe {
++        #[cfg(target_os = "windows")]
++        libc::write(2, s.as_ptr().cast(), s.len() as u32);
++
++        #[cfg(not(target_os = "windows"))]
++        libc::write(2, s.as_ptr().cast(), s.len());
++    }
++}
++
++cfg_if::cfg_if! {
++    if #[cfg(all(unix, not(target_os = "macos")))] {
++        /// The sole purpose of the unix module is to hook `pthread_create` to ensure
++        /// an alternate stack is installed for every native thread in case of a
++        /// stack overflow. This doesn't apply to `MacOS` as it uses exception ports,
++        /// which are always delivered to a specific thread owned by the exception
++        /// handler
++        pub mod unix;
++    }
++}
++
++pub use crash_context::CrashContext;
++
++/// The result of the user code executed during a crash event
++pub enum CrashEventResult {
++    /// The event was handled in some way
++    Handled(bool),
++    #[cfg(any(
++        target_os = "linux",
++        target_os = "android",
++        all(target_os = "windows", target_arch = "x86_64"),
++    ))]
++    /// The handler wishes to jump somewhere else, presumably to return
++    /// execution and skip the code that caused the exception
++    Jump {
++        /// The location to jump back to, retrieved via sig/setjmp
++        jmp_buf: *mut jmp::JmpBuf,
++        /// The value that will be returned from the sig/setjmp call that we
++        /// jump to. Note that if the value is 0 it will be corrected to 1
++        value: i32,
++    },
++}
++
++impl From<bool> for CrashEventResult {
++    fn from(b: bool) -> Self {
++        Self::Handled(b)
++    }
++}
++
++/// User implemented trait for handling a crash event that has ocurred.
++///
++/// # Safety
++///
++/// This trait is marked unsafe as care needs to be taken when implementing it
++/// due to the [`Self::on_crash`] method being run in a compromised context. In
++/// general, it is advised to do as _little_ as possible when handling a
++/// crash, with more complicated or dangerous (in a compromised context) code
++/// being intialized before the [`CrashHandler`] is installed, or hoisted out to
++/// another process entirely.
++///
++/// ## Linux
++///
++/// Notably, only a small subset of libc functions are
++/// [async signal safe](https://man7.org/linux/man-pages/man7/signal-safety.7.html)
++/// and calling non-safe ones can have undefined behavior, including such common
++/// ones as `malloc` (especially if using a multi-threaded allocator).
++///
++/// ## Windows
++///
++/// Windows [structured exceptions](https://docs.microsoft.com/en-us/windows/win32/debug/structured-exception-handling)
++/// don't have the a notion similar to signal safety, but it is again recommended
++/// to do as little work as possible in response to an exception.
++///
++/// ## Macos
++///
++/// Mac uses exception ports (sorry, can't give a good link here since Apple
++/// documentation is terrible) which are handled by a thread owned by the
++/// exception handler which makes them slightly safer to handle than UNIX signals,
++/// but it is again recommended to do as little work as possible.
++pub unsafe trait CrashEvent: Send + Sync {
++    /// Method invoked when a crash occurs.
++    ///
++    /// Returning true indicates your handler has processed the crash and that
++    /// no further handlers should run.
++    fn on_crash(&self, context: &CrashContext) -> CrashEventResult;
++}
++
++/// Creates a [`CrashEvent`] using the supplied closure as the implementation.
++///
++/// The supplied closure will be called for both real crash events as well as
++/// those simulated by calling `simulate_signal/exception`, which is why it is
++/// not `FnOnce`
++///
++/// # Safety
++///
++/// See the [`CrashEvent`] Safety section for information on why this is `unsafe`.
++#[inline]
++pub unsafe fn make_crash_event<F>(closure: F) -> Box<dyn CrashEvent>
++where
++    F: Send + Sync + Fn(&CrashContext) -> CrashEventResult + 'static,
++{
++    struct Wrapper<F> {
++        inner: F,
++    }
++
++    unsafe impl<F> CrashEvent for Wrapper<F>
++    where
++        F: Send + Sync + Fn(&CrashContext) -> CrashEventResult,
++    {
++        fn on_crash(&self, context: &CrashContext) -> CrashEventResult {
++            (self.inner)(context)
++        }
++    }
++
++    Box::new(Wrapper { inner: closure })
++}
++
++/// Creates a [`CrashEvent`] using the supplied closure as the implementation.
++///
++/// This uses an `FnOnce` closure instead of `Fn` like `[make_crash_event]`, but
++/// means this closure can only be used for the first crash, and cannot be used
++/// in a situation where user-triggered crashes via the `simulate_signal/exception`
++/// methods are used.
++///
++/// # Safety
++///
++/// See the [`CrashEvent`] Safety section for information on why this is `unsafe`.
++#[inline]
++pub unsafe fn make_single_crash_event<F>(closure: F) -> Box<dyn CrashEvent>
++where
++    F: Send + Sync + FnOnce(&CrashContext) -> CrashEventResult + 'static,
++{
++    struct Wrapper<F> {
++        // technically mutexes are not async signal safe on linux, but this is
++        // an internal-only detail that will be safe _unless_ the callback invoked
++        // by the user also crashes, but if that occurs...that's on them
++        inner: parking_lot::Mutex<Option<F>>,
++    }
++
++    unsafe impl<F> CrashEvent for Wrapper<F>
++    where
++        F: Send + Sync + FnOnce(&CrashContext) -> CrashEventResult,
++    {
++        fn on_crash(&self, context: &CrashContext) -> CrashEventResult {
++            if let Some(inner) = self.inner.lock().take() {
++                (inner)(context)
++            } else {
++                false.into()
++            }
++        }
++    }
++
++    Box::new(Wrapper {
++        inner: parking_lot::Mutex::new(Some(closure)),
++    })
++}
++
++cfg_if::cfg_if! {
++    if #[cfg(any(target_os = "linux", target_os = "android"))] {
++        mod linux;
++
++        pub use linux::{CrashHandler, Signal, jmp};
++    } else if #[cfg(target_os = "windows")] {
++        mod windows;
++
++        #[cfg(target_arch = "x86_64")]
++        pub use windows::jmp;
++
++        pub use windows::{CrashHandler, ExceptionCode};
++    } else if #[cfg(target_os = "macos")] {
++        mod mac;
++
++        pub use mac::{CrashHandler, ExceptionType};
++    }
++}
+diff --git a/vendor/crash-handler/src/linux.rs b/vendor/crash-handler/src/linux.rs
+new file mode 100644
+index 0000000..1cb0eca
+--- /dev/null
++++ b/vendor/crash-handler/src/linux.rs
+@@ -0,0 +1,116 @@
++pub mod jmp;
++mod state;
++
++use crate::Error;
++
++/// The signals that we support catching and raising
++#[derive(Copy, Clone, PartialEq, Eq)]
++#[repr(i32)]
++pub enum Signal {
++    Abort = libc::SIGABRT,
++    Bus = libc::SIGBUS,
++    Fpe = libc::SIGFPE,
++    Illegal = libc::SIGILL,
++    Segv = libc::SIGSEGV,
++    Trap = libc::SIGTRAP,
++}
++
++impl Signal {
++    #[inline]
++    pub fn ignore(self) {
++        unsafe {
++            state::ignore_signal(self);
++        }
++    }
++}
++
++/// A Linux/Android signal handler
++pub struct CrashHandler;
++
++#[allow(clippy::unused_self)]
++impl CrashHandler {
++    /// Attaches the signal handler.
++    ///
++    /// The provided callback will be invoked if a signal is caught, providing a
++    /// [`crate::CrashContext`] with the details of the thread where the
++    /// signal was raised.
++    ///
++    /// The callback runs in a compromised context, so it is highly recommended
++    /// to not perform actions that may fail due to corrupted state that caused
++    /// or is a symptom of the original signal. This includes doing heap
++    /// allocations from the same allocator as the crashing code.
++    pub fn attach(on_crash: Box<dyn crate::CrashEvent>) -> Result<Self, Error> {
++        state::attach(on_crash)?;
++        Ok(Self)
++    }
++
++    /// Detaches the handler.
++    ///
++    /// This is done automatically when this [`CrashHandler`] is dropped.
++    #[inline]
++    pub fn detach(self) {
++        state::detach();
++    }
++
++    /// Set the process that is allowed to perform `ptrace` operations on the
++    /// current process.
++    ///
++    /// If you want to write a minidump from a child/external process when
++    /// a crash occurs in this process, you can use this method to set that
++    /// process as the only process allowed to use ptrace on this process.
++    ///
++    /// The process set by this method will be used by calling
++    /// `prctl(PR_SET_PTRACER, <the pid you want to ptrace this process>, ...)`
++    /// before handing off control to your user callback, presumably to trigger
++    /// dumping of your process via the specified process. By default if this
++    /// method is not called, `PR_SET_PTRACER_ANY` is used to allow any process
++    /// to dump the current process.
++    ///
++    /// Note that this is only needed if `/proc/sys/kernel/yama/ptrace_scope`
++    /// is 1 "restricted ptrace", but there is no harm in setting this if it is
++    /// in another mode.
++    ///
++    /// See <https://www.kernel.org/doc/Documentation/security/Yama.txt> for
++    /// the full documentation.
++    #[inline]
++    pub fn set_ptracer(&self, pid: Option<u32>) {
++        let mut lock = state::HANDLER.lock();
++
++        if let Some(handler) = &mut *lock {
++            handler.dump_process = pid;
++        }
++    }
++
++    /// Sends the specified user signal.
++    pub fn simulate_signal(&self, signal: u32) -> crate::CrashEventResult {
++        // Normally this would be an unsafe function, since this unsafe encompasses
++        // the entirety of the body, however the user is really not required to
++        // uphold any guarantees on their end, so no real need to declare the
++        // function itself unsafe.
++        unsafe {
++            let mut siginfo: libc::signalfd_siginfo = std::mem::zeroed();
++            siginfo.ssi_signo = signal;
++            siginfo.ssi_code = state::SI_USER;
++            siginfo.ssi_pid = std::process::id();
++
++            let mut context = std::mem::zeroed();
++            crash_context::crash_context_getcontext(&mut context);
++
++            let lock = state::HANDLER.lock();
++            if let Some(handler) = &*lock {
++                handler.handle_signal(
++                    &mut *(&mut siginfo as *mut libc::signalfd_siginfo).cast::<libc::siginfo_t>(),
++                    &mut *(&mut context as *mut crash_context::ucontext_t).cast::<libc::c_void>(),
++                )
++            } else {
++                crate::CrashEventResult::Handled(false)
++            }
++        }
++    }
++}
++
++impl Drop for CrashHandler {
++    fn drop(&mut self) {
++        state::detach();
++    }
++}
+diff --git a/vendor/crash-handler/src/linux/jmp.rs b/vendor/crash-handler/src/linux/jmp.rs
+new file mode 100644
+index 0000000..321c993
+--- /dev/null
++++ b/vendor/crash-handler/src/linux/jmp.rs
+@@ -0,0 +1,96 @@
++//! FFI bindings for non-local goto
++//!
++//! ```
++//! use crash_handler::jmp;
++//!
++//! unsafe {
++//!     let mut jmp_buf = std::mem::MaybeUninit::uninit();
++//!
++//!     let val = jmp::sigsetjmp(jmp_buf.as_mut_ptr(), 1);
++//!
++//!     if val == 0 {
++//!         jmp::siglongjmp(jmp_buf.as_mut_ptr(), 22);
++//!     } else {
++//!         assert_eq!(val, 22);
++//!     }
++//! }
++//! ```
++
++cfg_if::cfg_if! {
++    if #[cfg(target_arch = "x86_64")] {
++        #[repr(C)]
++        #[doc(hidden)]
++        #[allow(non_camel_case_types)]
++        pub struct __jmp_buf([u64; 8]);
++    } else if #[cfg(target_arch = "x86")] {
++        #[repr(C)]
++        #[doc(hidden)]
++        #[allow(non_camel_case_types)]
++        pub struct __jmp_buf([u32; 6]);
++    } else if #[cfg(target_arch = "arm")] {
++        #[repr(C)]
++        #[doc(hidden)]
++        #[allow(non_camel_case_types)]
++        pub struct __jmp_buf([u64; 32]);
++    } else if #[cfg(target_arch = "aarch64")] {
++        #[repr(C)]
++        #[doc(hidden)]
++        #[allow(non_camel_case_types)]
++        pub struct __jmp_buf([u64; 22]);
++    } else if #[cfg(target_arch = "riscv64")] {
++        #[repr(C)]
++        #[doc(hidden)]
++        #[allow(non_camel_case_types)]
++        pub struct __jmp_buf {
++            __pc: u64,
++            __regs: [u64; 12],
++            __sp: u64,
++            __fpregs: [f64; 12],
++        }
++    } else if #[cfg(target_arch = "s390x" )] {
++        #[repr(C)]
++        #[doc(hidden)]
++        #[allow(non_camel_case_types)]
++        pub struct __jmp_buf{
++            __gregs: [u64; 10],
++            __fpregs: [f64; 8],
++        }
++    }
++}
++
++/// A jump buffer.
++///
++/// This is essentially the register state of a point in execution at the time
++/// of a [`sigsetjmp`] call that can be returned to by passing this buffer to
++/// [`siglongjmp`].
++#[repr(C)]
++pub struct JmpBuf {
++    /// CPU context
++    __jmp_buf: __jmp_buf,
++    /// Whether the signal mask was saved
++    __fl: u32,
++    /// Saved signal mask
++    __ss: [u32; 32],
++}
++
++unsafe extern "C" {
++    /// Set jump point for a non-local goto.
++    ///
++    /// The return value will be 0 if this is a direct invocation (ie the "first
++    /// time" `sigsetjmp` is executed), and will be the value passed to `siglongjmp`
++    /// otherwise.
++    ///
++    /// See [sigsetjmp](https://man7.org/linux/man-pages/man3/sigsetjmp.3p.html)
++    /// for more information.
++    #[cfg_attr(target_env = "gnu", link_name = "__sigsetjmp")]
++    pub fn sigsetjmp(jb: *mut JmpBuf, save_mask: i32) -> i32;
++    /// Non-local goto with signal handling
++    ///
++    /// The value passed here will be returned by `sigsetjmp` when returning
++    /// to that callsite. Note that passing a value of 0 here will be changed
++    /// to a 1.
++    ///
++    /// See [siglongjmp](https://man7.org/linux/man-pages/man3/siglongjmp.3p.html)
++    /// for more information.
++    pub fn siglongjmp(jb: *mut JmpBuf, val: i32) -> !;
++}
+diff --git a/vendor/crash-handler/src/linux/state.rs b/vendor/crash-handler/src/linux/state.rs
+new file mode 100644
+index 0000000..dc7cda2
+--- /dev/null
++++ b/vendor/crash-handler/src/linux/state.rs
+@@ -0,0 +1,528 @@
++use crate::{Error, Signal};
++use std::{mem, ptr};
++
++// std::cmp::max is not const :(
++const fn get_stack_size() -> usize {
++    if libc::SIGSTKSZ > 16 * 1024 {
++        libc::SIGSTKSZ
++    } else {
++        16 * 1024
++    }
++}
++
++/// The size of the alternate stack that is mapped for every thread.
++///
++/// This has a minimum size of 16k, which might seem a bit large, but this
++/// memory will only ever be committed in case we actually get a stack overflow,
++/// which is (hopefully) exceedingly rare
++const SIG_STACK_SIZE: usize = get_stack_size();
++
++/// kill
++pub(crate) const SI_USER: i32 = 0;
++
++struct StackSave {
++    old: Option<libc::stack_t>,
++    new: libc::stack_t,
++}
++
++unsafe impl Send for StackSave {}
++
++static STACK_SAVE: parking_lot::Mutex<Option<StackSave>> = parking_lot::const_mutex(None);
++
++/// Create an alternative stack to run the signal handlers on. This is done since
++/// the signal might have been caused by a stack overflow.
++pub unsafe fn install_sigaltstack() -> Result<(), Error> {
++    unsafe {
++        // Check to see if the existing sigaltstack, and if it exists, is it big
++        // enough. If so we don't need to allocate our own.
++        let mut old_stack = mem::zeroed();
++        let r = libc::sigaltstack(ptr::null(), &mut old_stack);
++        assert_eq!(
++            r,
++            0,
++            "learning about sigaltstack failed: {}",
++            std::io::Error::last_os_error()
++        );
++
++        if old_stack.ss_flags & libc::SS_DISABLE == 0 && old_stack.ss_size >= SIG_STACK_SIZE {
++            return Ok(());
++        }
++
++        // ... but failing that we need to allocate our own, so do all that
++        // here.
++        let guard_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
++        let alloc_size = guard_size + SIG_STACK_SIZE;
++
++        let ptr = libc::mmap(
++            ptr::null_mut(),
++            alloc_size,
++            libc::PROT_NONE,
++            libc::MAP_PRIVATE | libc::MAP_ANON,
++            -1,
++            0,
++        );
++        if ptr == libc::MAP_FAILED {
++            return Err(Error::OutOfMemory);
++        }
++
++        // Prepare the stack with readable/writable memory and then register it
++        // with `sigaltstack`.
++        let stack_ptr = (ptr as usize + guard_size) as *mut libc::c_void;
++        let r = libc::mprotect(
++            stack_ptr,
++            SIG_STACK_SIZE,
++            libc::PROT_READ | libc::PROT_WRITE,
++        );
++        assert_eq!(
++            r,
++            0,
++            "mprotect to configure memory for sigaltstack failed: {}",
++            std::io::Error::last_os_error()
++        );
++        let new_stack = libc::stack_t {
++            ss_sp: stack_ptr,
++            ss_flags: 0,
++            ss_size: SIG_STACK_SIZE,
++        };
++        let r = libc::sigaltstack(&new_stack, ptr::null_mut());
++        assert_eq!(
++            r,
++            0,
++            "registering new sigaltstack failed: {}",
++            std::io::Error::last_os_error()
++        );
++
++        *STACK_SAVE.lock() = Some(StackSave {
++            old: (old_stack.ss_flags & libc::SS_DISABLE != 0).then_some(old_stack),
++            new: new_stack,
++        });
++
++        Ok(())
++    }
++}
++
++pub unsafe fn restore_sigaltstack() {
++    let mut ssl = STACK_SAVE.lock();
++
++    // Only restore the old_stack if the current alternative stack is the one
++    // installed by the call to install_sigaltstack.
++    if let Some(ss) = &mut *ssl {
++        unsafe {
++            let mut current_stack = mem::zeroed();
++            if libc::sigaltstack(ptr::null(), &mut current_stack) == -1 {
++                return;
++            }
++
++            if current_stack.ss_sp == ss.new.ss_sp {
++                if let Some(old) = ss.old {
++                    // Restore the old alt stack if there was one
++                    if libc::sigaltstack(&old, ptr::null_mut()) == -1 {
++                        return;
++                    }
++                } else {
++                    // Restore to the default alt stack otherwise
++                    let mut disable: libc::stack_t = mem::zeroed();
++                    disable.ss_flags = libc::SS_DISABLE;
++                    if libc::sigaltstack(&disable, ptr::null_mut()) == -1 {
++                        return;
++                    }
++                }
++            }
++
++            let r = libc::munmap(ss.new.ss_sp, ss.new.ss_size);
++            debug_assert_eq!(r, 0, "munmap failed during thread shutdown");
++            *ssl = None;
++        }
++    }
++}
++
++/// Restores the signal handler for the specified signal back to its default
++/// handler, which _should_ perform the default signal action as seen in
++/// <https://man7.org/linux/man-pages/man7/signal.7.html>
++#[inline]
++unsafe fn install_default_handler(sig: Signal) {
++    unsafe { set_handler(sig, libc::SIG_DFL) };
++}
++
++#[inline]
++pub(crate) unsafe fn ignore_signal(sig: Signal) {
++    unsafe { set_handler(sig, libc::SIG_IGN) };
++}
++
++unsafe fn set_handler(sig: Signal, action: usize) {
++    // Android L+ expose signal and sigaction symbols that override the system
++    // ones. There is a bug in these functions where a request to set the handler
++    // to SIG_DFL is ignored. In that case, an infinite loop is entered as the
++    // signal is repeatedly sent to breakpad's signal handler.
++    // To work around this, directly call the system's sigaction.
++    unsafe {
++        cfg_if::cfg_if! {
++            if #[cfg(target_os = "android")] {
++                let mut sa: libc::sigaction = mem::zeroed();
++                libc::sigemptyset(&mut sa.sa_mask);
++                sa.sa_sigaction = action;
++                sa.sa_flags = libc::SA_RESTART;
++                libc::syscall(
++                    libc::SYS_rt_sigaction,
++                    sig as i32,
++                    &sa,
++                    ptr::null::<libc::sigaction>(),
++                    mem::size_of::<libc::sigset_t>(),
++                );
++            } else {
++                libc::signal(sig as i32, action);
++            }
++        }
++    }
++}
++
++/// The various signals we attempt to handle
++const EXCEPTION_SIGNALS: [Signal; 6] = [
++    Signal::Abort,
++    Signal::Bus,
++    Signal::Fpe,
++    Signal::Illegal,
++    Signal::Segv,
++    Signal::Trap,
++];
++
++static OLD_HANDLERS: parking_lot::Mutex<Option<[libc::sigaction; 6]>> =
++    parking_lot::const_mutex(None);
++
++/// Restores all of the signal handlers back to their previous values, or the
++/// default if the previous value cannot be restored
++pub unsafe fn restore_handlers() {
++    let mut ohl = OLD_HANDLERS.lock();
++
++    if let Some(old) = &*ohl {
++        unsafe {
++            for (sig, action) in EXCEPTION_SIGNALS.into_iter().zip(old.iter()) {
++                if libc::sigaction(sig as i32, action, ptr::null_mut()) == -1 {
++                    install_default_handler(sig);
++                }
++            }
++        }
++    }
++
++    ohl.take();
++}
++
++pub unsafe fn install_handlers() {
++    let mut ohl = OLD_HANDLERS.lock();
++
++    if ohl.is_some() {
++        return;
++    }
++
++    unsafe {
++        // Attempt store all of the current handlers so we can restore them later
++        let mut old_handlers: [mem::MaybeUninit<libc::sigaction>; 6] =
++            mem::MaybeUninit::uninit().assume_init();
++
++        for (sig, handler) in EXCEPTION_SIGNALS
++            .iter()
++            .copied()
++            .zip(old_handlers.iter_mut())
++        {
++            let mut old = mem::zeroed();
++            if libc::sigaction(sig as i32, ptr::null(), &mut old) == -1 {
++                return;
++            }
++            *handler = mem::MaybeUninit::new(old);
++        }
++
++        let mut sa: libc::sigaction = mem::zeroed();
++        libc::sigemptyset(&mut sa.sa_mask);
++
++        // Mask all exception signals when we're handling one of them.
++        for sig in EXCEPTION_SIGNALS {
++            libc::sigaddset(&mut sa.sa_mask, sig as i32);
++        }
++
++        sa.sa_sigaction = signal_handler as usize;
++        sa.sa_flags = libc::SA_ONSTACK | libc::SA_SIGINFO;
++
++        // Use our signal_handler for all of the signals we wish to catch
++        for sig in EXCEPTION_SIGNALS {
++            // At this point it is impractical to back out changes, and so failure to
++            // install a signal is intentionally ignored.
++            let _ = libc::sigaction(sig as i32, &sa, ptr::null_mut());
++        }
++
++        // Everything is initialized. Transmute the array to the
++        // initialized type.
++        let old_handlers = old_handlers.map(|h| h.assume_init());
++        *ohl = Some(old_handlers);
++    }
++}
++
++pub(super) fn attach(on_crash: Box<dyn crate::CrashEvent>) -> Result<(), Error> {
++    let mut lock = HANDLER.lock();
++
++    if lock.is_some() {
++        return Err(Error::HandlerAlreadyInstalled);
++    }
++
++    // SAFETY: syscalls
++    unsafe {
++        install_sigaltstack()?;
++        install_handlers();
++    }
++
++    *lock = Some(HandlerInner::new(on_crash));
++
++    Ok(())
++}
++
++/// Detaches our signal handle, restoring the previously installed or default
++/// handlers
++pub(super) fn detach() {
++    let mut lock = HANDLER.lock();
++    if lock.is_some() {
++        // SAFETY: syscalls
++        unsafe {
++            restore_sigaltstack();
++            restore_handlers();
++        }
++        lock.take();
++    }
++}
++
++pub(super) static HANDLER: parking_lot::Mutex<Option<HandlerInner>> =
++    parking_lot::const_mutex(None);
++
++/// This is the actual function installed for each signal we support, invoked
++/// by the kernel
++unsafe extern "C" fn signal_handler(
++    sig: Signal,
++    info: *mut libc::siginfo_t,
++    uc: *mut libc::c_void,
++) {
++    unsafe {
++        let info = &mut *info;
++        let uc = &mut *uc;
++
++        enum Action {
++            RestoreDefault,
++            RestorePrevious,
++            Jump((*mut super::jmp::JmpBuf, i32)),
++        }
++
++        let action = {
++            // We might run inside a process where some other buggy code saves and
++            // restores signal handlers temporarily with `signal` instead of `sigaction`.
++            // This loses the `SA_SIGINFO` flag associated with this function. As a
++            // consequence, the values of `info` and `uc` become totally bogus,
++            // generally inducing a crash.
++            //
++            // The following code tries to detect this case. When it does, it
++            // resets the signal handlers with `sigaction` & `SA_SIGINFO` and returns.
++            // This forces the signal to be thrown again, but this time the kernel
++            // will call the function with the right arguments.
++            {
++                let mut cur_handler = mem::zeroed();
++                if libc::sigaction(sig as i32, ptr::null_mut(), &mut cur_handler) == 0
++                    && cur_handler.sa_sigaction == signal_handler as usize
++                    && cur_handler.sa_flags & libc::SA_SIGINFO == 0
++                {
++                    // Reset signal handler with the correct flags.
++                    libc::sigemptyset(&mut cur_handler.sa_mask);
++                    libc::sigaddset(&mut cur_handler.sa_mask, sig as i32);
++
++                    cur_handler.sa_sigaction = signal_handler as usize;
++                    cur_handler.sa_flags = libc::SA_ONSTACK | libc::SA_SIGINFO;
++
++                    if libc::sigaction(sig as i32, &cur_handler, ptr::null_mut()) == -1 {
++                        // When resetting the handler fails, try to reset the
++                        // default one to avoid an infinite loop here.
++                        install_default_handler(sig);
++                    }
++
++                    // exit the handler as we should be called again soon
++                    return;
++                }
++            }
++
++            let handler = HANDLER.lock();
++
++            if let Some(handler) = &*handler {
++                match handler.handle_signal(info, uc) {
++                    crate::CrashEventResult::Handled(true) => Action::RestoreDefault,
++                    crate::CrashEventResult::Handled(false) => Action::RestorePrevious,
++                    crate::CrashEventResult::Jump { jmp_buf, value } => {
++                        Action::Jump((jmp_buf, value))
++                    }
++                }
++            } else {
++                Action::RestorePrevious
++            }
++        };
++
++        // Upon returning from this signal handler, sig will become unmasked and
++        // then it will be retriggered. If one of the ExceptionHandlers handled
++        // it successfully, restore the default handler. Otherwise, restore the
++        // previously installed handler. Then, when the signal is retriggered,
++        // it will be delivered to the appropriate handler.
++        match action {
++            Action::RestoreDefault => {
++                debug_print!("installing default handler");
++                install_default_handler(sig);
++            }
++            Action::RestorePrevious => {
++                debug_print!("restoring handlers");
++                restore_handlers();
++            }
++            Action::Jump((jmp_buf, value)) => {
++                debug_print!("jumping");
++                super::jmp::siglongjmp(jmp_buf, value);
++            }
++        }
++
++        debug_print!("finishing signal handler");
++
++        if info.si_code <= 0 || sig == Signal::Abort {
++            // This signal was triggered by somebody sending us the signal with kill().
++            // In order to retrigger it, we have to queue a new signal by calling
++            // kill() ourselves.  The special case (si_pid == 0 && sig == SIGABRT) is
++            // due to the kernel sending a SIGABRT from a user request via SysRQ.
++            let tid = libc::syscall(libc::SYS_gettid) as i32;
++            if libc::syscall(libc::SYS_tgkill, std::process::id(), tid, sig) < 0 {
++                // If we failed to kill ourselves (e.g. because a sandbox disallows us
++                // to do so), we instead resort to terminating our process. This will
++                // result in an incorrect exit code.
++                libc::_exit(1);
++            }
++        } else {
++            // This was a synchronous signal triggered by a hard fault (e.g. SIGSEGV).
++            // No need to reissue the signal. It will automatically trigger again,
++            // when we return from the signal handler.
++        }
++    }
++}
++
++/// The size of `CrashContext` can be too big w.r.t the size of alternatate stack
++/// for `signal_handler`. Keep the crash context as a .bss field.
++static CRASH_CONTEXT: parking_lot::Mutex<crash_context::CrashContext> =
++    parking_lot::const_mutex(unsafe { mem::zeroed() });
++
++pub(super) struct HandlerInner {
++    handler: Box<dyn crate::CrashEvent>,
++    pub(super) dump_process: Option<u32>,
++}
++
++impl HandlerInner {
++    #[inline]
++    pub(super) fn new(handler: Box<dyn crate::CrashEvent>) -> Self {
++        Self {
++            handler,
++            dump_process: None,
++        }
++    }
++
++    pub(super) unsafe fn handle_signal(
++        &self,
++        info: &mut libc::siginfo_t,
++        uc: &mut libc::c_void,
++    ) -> crate::CrashEventResult {
++        unsafe {
++            // The siginfo_t in libc is lowest common denominator, but this code is
++            // specifically targeting linux/android, which contains the si_pid field
++            // that we require
++            let nix_info = &*((info as *const libc::siginfo_t).cast::<libc::signalfd_siginfo>());
++
++            debug_print!("acquired siginfo");
++
++            // Allow ourselves to be dumped, if that is what the user handler wishes to do
++            let _set_dumpable = SetDumpable::new(self.dump_process);
++            debug_print!("set dumpable");
++            let mut cc = CRASH_CONTEXT.lock();
++
++            {
++                use std::ops::DerefMut;
++                #[allow(clippy::explicit_deref_methods)]
++                ptr::write_bytes(cc.deref_mut(), 0, 1);
++                debug_print!("zeroed crashctx");
++
++                ptr::copy_nonoverlapping(nix_info, &mut cc.siginfo, 1);
++                debug_print!("copied siginfo");
++
++                let uc_ptr = &*(uc as *const libc::c_void).cast::<crash_context::ucontext_t>();
++                ptr::copy_nonoverlapping(uc_ptr, &mut cc.context, 1);
++                debug_print!("copied context");
++
++                cfg_if::cfg_if! {
++                    if #[cfg(target_arch = "aarch64")] {
++                        let fp_ptr = uc_ptr.uc_mcontext.__reserved.as_ptr().cast::<crash_context::fpsimd_context>();
++
++                        if (*fp_ptr).head.magic == crash_context::FPSIMD_MAGIC {
++                            ptr::copy_nonoverlapping(fp_ptr, &mut cc.float_state, 1);
++                        }
++                    } else if #[cfg(any(target_arch = "riscv64", target_arch = "s390x"))] {
++                        cc.float_state = uc_ptr.uc_mcontext.__fpregs;
++                    } else if #[cfg(not(target_arch = "arm"))] {
++                        if !uc_ptr.uc_mcontext.fpregs.is_null() {
++                            ptr::copy_nonoverlapping(uc_ptr.uc_mcontext.fpregs, ((&mut cc.float_state) as *mut crash_context::fpregset_t).cast(), 1);
++                        }
++                    }
++                }
++
++                cc.pid = std::process::id() as i32;
++                cc.tid = libc::syscall(libc::SYS_gettid) as i32;
++            }
++
++            self.handler.on_crash(&cc)
++        }
++    }
++}
++
++/// We define these constans ourselves rather than use libc as they are missing
++/// from eg. Android
++const PR_GET_DUMPABLE: i32 = 3;
++const PR_SET_DUMPABLE: i32 = 4;
++const PR_SET_PTRACER: i32 = 0x59616d61;
++const PR_SET_PTRACER_ANY: i32 = -1;
++
++/// Helper that sets the process as dumpable if it is not, and when dropped
++/// returns it back to the original state if needed
++struct SetDumpable {
++    was_dumpable: bool,
++}
++
++impl SetDumpable {
++    unsafe fn new(dump_process: Option<u32>) -> Self {
++        unsafe {
++            let is_dumpable = libc::syscall(libc::SYS_prctl, PR_GET_DUMPABLE, 0, 0, 0, 0);
++            let was_dumpable = is_dumpable > 0;
++
++            if !was_dumpable {
++                libc::syscall(libc::SYS_prctl, PR_SET_DUMPABLE, 1, 0, 0, 0);
++            }
++
++            // Set the process that is allowed to do ptrace operations on this process,
++            // we either set it to the process that the user specified, or allow
++            // any process, which _somewhat_ defeats the purpose of the yama security
++            // that this call is needed for
++            let ptracer = dump_process.map_or(PR_SET_PTRACER_ANY, |dp| dp as i32);
++
++            // Note that this will fail with EINVAL if the pid does not exist, but
++            // that would be on the user. We only need to do this if
++            // `/proc/sys/kernel/yama/ptrace_scope` = 1, but should not have a negative
++            // impact if it is in any other mode
++            libc::syscall(libc::SYS_prctl, PR_SET_PTRACER, ptracer, 0, 0, 0);
++
++            Self { was_dumpable }
++        }
++    }
++}
++
++impl Drop for SetDumpable {
++    fn drop(&mut self) {
++        unsafe {
++            libc::syscall(libc::SYS_prctl, PR_SET_PTRACER, 0, 0, 0, 0);
++
++            if !self.was_dumpable {
++                libc::syscall(libc::SYS_prctl, PR_SET_DUMPABLE, 0, 0, 0, 0);
++            }
++        }
++    }
++}
+diff --git a/vendor/crash-handler/src/mac.rs b/vendor/crash-handler/src/mac.rs
+new file mode 100644
+index 0000000..6227d81
+--- /dev/null
++++ b/vendor/crash-handler/src/mac.rs
+@@ -0,0 +1,90 @@
++mod ffi;
++mod signal;
++mod state;
++
++/// High level exception types
++///
++/// `exception_types.h`
++#[repr(i32)]
++pub enum ExceptionType {
++    /// Could not access memory. (SIGSEGV/SIGBUS)
++    ///
++    /// Code field contains `kern_return_t` describing error.
++    /// Subcode field contains bad memory address.
++    BadAccess = 1,
++    /// Instruction failed. (SIGILL)
++    ///
++    /// Illegal or undfined instruction or operand.
++    BadInstruction = 2,
++    /// Arithmetic exception (SIGFPE)
++    ///
++    /// Exact nature of the exception is in code field.
++    Arithmetic = 3,
++    /// Emulation instruction
++    ///
++    /// Emulation support instruction encountered
++    /// Details in code and subcode fields.
++    Emulation = 4,
++    /// Software generated exception
++    ///
++    /// Exaction exception is in the code field.
++    /// Codes 0 - 0xffff reserved to hardware.
++    /// Codes 0x10000 - 0x1ffff reserved for OS emulation (Unix)
++    Software = 5,
++    /// Trace, breakpoint, etc
++    ///
++    /// Details in the code field
++    Breakpoint = 6,
++    /// System calls
++    SysCall = 7,
++    /// Mach system calls
++    MachSysCall = 8,
++    /// RPC alert
++    RpcAlert = 9,
++    /// Abnormal process exit
++    Crash = 10,
++    /// Hit resource consumption limit
++    ///
++    /// Exact resource is in the code field.
++    Resource = 11,
++    /// Violated guarded resource protections
++    Guard = 12,
++    /// Abnormal process exited to corpse state
++    CorpseNotify = 13,
++}
++
++/// A Macos exception handler
++pub struct CrashHandler;
++
++#[allow(clippy::unused_self)]
++impl CrashHandler {
++    /// Attaches the exception handler.
++    ///
++    /// The provided callback will be invoked if an exception is caught,
++    /// providing a [`crate::CrashContext`] with the details of the thread where
++    /// the exception was thrown.
++    pub fn attach(on_crash: Box<dyn crate::CrashEvent>) -> Result<Self, crate::Error> {
++        state::attach(on_crash)?;
++        Ok(Self)
++    }
++
++    /// Detaches the handler.
++    ///
++    /// This is done automatically when [`CrashHandler`] is dropped.
++    #[inline]
++    pub fn detach(self) {
++        state::detach(false);
++    }
++
++    // Raises the specified user exception
++    #[inline]
++    pub fn simulate_exception(&self, exception_info: Option<crash_context::ExceptionInfo>) -> bool {
++        state::simulate_exception(exception_info)
++    }
++}
++
++impl Drop for CrashHandler {
++    fn drop(&mut self) {
++        state::detach(false);
++    }
++}
+diff --git a/vendor/crash-handler/src/mac/ffi.rs b/vendor/crash-handler/src/mac/ffi.rs
+new file mode 100644
+index 0000000..bb5d249
+--- /dev/null
++++ b/vendor/crash-handler/src/mac/ffi.rs
+@@ -0,0 +1,160 @@
++//! Additional bindings not (or incorrectly) exposed by the [`mach2`] crate.
++//! These are lifted from <https://github.com/apple-oss-distributions/xnu>
++
++pub use mach2::{
++    exception_types as et,
++    kern_return::{KERN_SUCCESS, kern_return_t},
++    mach_init::mach_thread_self,
++    mach_port as mp, mach_types as mt, message as msg,
++    port::{self, MACH_PORT_NULL, mach_port_t},
++    task, thread_status as ts,
++    traps::mach_task_self,
++};
++
++/// Number of top level exception types
++///
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/arm/exception.h#L34>
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/i386/exception.h#L68>
++pub const EXC_TYPES_COUNT: usize = 14;
++/// For `EXC_SOFTWARE` exceptions, this indicates the exception was due to a Unix signal
++///
++/// The actual Unix signal is stored in the subcode of the exception
++///
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/exception_types.h#L176-L182>
++pub const EXC_SOFT_SIGNAL: u32 = 0x10003;
++
++cfg_if::cfg_if! {
++    if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
++        /// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/i386/thread_status.h#L118>
++        pub const THREAD_STATE_NONE: ts::thread_state_flavor_t = 13;
++    } else if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
++        /// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/arm/thread_status.h#L57>
++        pub const THREAD_STATE_NONE: ts::thread_state_flavor_t = 5;
++    }
++}
++
++/// Network Data Representation Record
++///
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/ndr.h#L40-L49>
++#[repr(C)]
++#[derive(Copy, Clone)]
++pub struct NdrRecord {
++    pub mig_vers: u8,
++    pub if_vers: u8,
++    pub reserved1: u8,
++    pub mig_encoding: u8,
++    pub int_rep: u8,
++    pub char_rep: u8,
++    pub float_rep: u8,
++    pub reserved2: u8,
++}
++
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/message.h#L379-L391>
++#[repr(C, packed(4))]
++pub struct MachMsgPortDescriptor {
++    pub name: u32,
++    __pad1: u32,
++    __pad2: u16,
++    __disposition: u8,
++    __type: u8,
++}
++
++#[repr(C, packed(4))]
++pub struct MachMsgBody {
++    pub descriptor_count: u32,
++}
++
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/message.h#L545-L552>
++#[repr(C, packed(4))]
++pub struct MachMsgHeader {
++    pub bits: u32,
++    pub size: u32,
++    pub remote_port: u32,
++    pub local_port: u32,
++    pub voucher_port: u32,
++    pub id: u32,
++}
++
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/message.h#L585-L588>
++#[repr(C, packed(4))]
++pub struct MachMsgTrailer {
++    pub kind: u32,
++    pub size: u32,
++}
++
++/// This structure can be obtained by running `mig <path to OSX SDK>/usr/include/mach_exc.defs`
++#[repr(C, packed(4))]
++pub struct ExceptionMessage {
++    pub header: MachMsgHeader,
++    /* start of the kernel processed data */
++    pub body: MachMsgBody,
++    pub thread: MachMsgPortDescriptor,
++    pub task: MachMsgPortDescriptor,
++    /* end of the kernel processed data */
++    _ndr: NdrRecord,
++    pub exception: u32,
++    pub code_count: u32,
++    pub code: [u64; 2],
++    _trailer: MachMsgTrailer,
++}
++
++/// Whenever MIG detects an error, it sends back a generic `mig_reply_error_t`
++/// format message.  Clients must accept these in addition to the expected reply
++/// message format.
++///
++/// This structure can be obtained by running `mig <path to OSX SDK>/usr/include/mach_exc.defs`
++#[repr(C, packed(4))]
++pub struct ExceptionRaiseReply {
++    pub header: MachMsgHeader,
++    pub ndr: NdrRecord,
++    pub ret_code: kern_return_t,
++}
++
++unsafe extern "C" {
++    /// Set an exception handler for a thread on one or more exception types.
++    /// At the same time, return the previously defined exception handlers for
++    /// those types.
++    ///
++    /// Atomically (I assume) swaps the currently registered exception ports
++    /// with a new one, returning the previously registered ports so that
++    /// they can be restored later.
++    ///
++    /// Given the order of arguments I'm assuming this function has evolved
++    /// over time, but basically (at least, according to how it is used in
++    /// Breakpad), the output of this function will be 4 distinct arrays,
++    /// which are basically a structure of arrays
++    ///
++    /// <https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/mach/task.defs#L281-L295>
++    pub fn task_swap_exception_ports(
++        task: mt::task_t,                      // The task we want to swap the ports for
++        exception_mask: et::exception_mask_t, // The mask of exceptions, will only swaps ports that match an exception in the mask
++        new_port: mach_port_t,                // The new exception port we want to use
++        behavior: et::exception_behavior_t,   // The exception behavior when sending to the port
++        new_flavor: ts::thread_state_flavor_t, // What CPU context info to retrieve
++        masks: *mut et::exception_mask_t, // Output array of each exception mask that has a registered port
++        masks_count: *mut u32, // The length of the masks array, as well as the following arrays
++        old_handlers: *mut mach_port_t, // Output array of ports that are registered
++        old_behaviors: *mut et::exception_behavior_t, // Output array of behaviors
++        old_flavors: *mut ts::thread_state_flavor_t, // Output array of thread flavors
++    ) -> kern_return_t;
++
++    /// Set an exception handler for a task on one or more exception types.
++    /// These handlers are invoked for all threads in the task if there are
++    /// no thread-specific exception handlers or those handlers returned an
++    /// error.
++    ///
++    /// <https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/mach/task.defs#L249-L260>
++    pub fn task_set_exception_ports(
++        task: mt::task_t,                      // The task we want to set the port for
++        exception_mask: et::exception_mask_t,  // The exception we want to set the port for
++        new_port: mach_port_t,                 // The new port to receive exceptions on
++        behavior: et::exception_behavior_t,    // The exception behavior when send to the port
++        new_flavor: ts::thread_state_flavor_t, // What CPU context info to send with the exception
++    ) -> kern_return_t;
++
++    /// The host? NDR
++    ///
++    /// <https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/mach/arm/ndr_def.h#L36-L45>
++    /// <https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/mach/i386/ndr_def.h#L36-L45>
++    pub static NDR_record: NdrRecord;
++}
+diff --git a/vendor/crash-handler/src/mac/signal.rs b/vendor/crash-handler/src/mac/signal.rs
+new file mode 100644
+index 0000000..af9546b
+--- /dev/null
++++ b/vendor/crash-handler/src/mac/signal.rs
+@@ -0,0 +1,55 @@
++//! Macos doesn't have an exception for process aborts, so we hook `SIGABRT`
++use std::mem;
++
++/// Installs our `SIGABRT` handler, returning any previously registered handler,
++/// which should be restored later
++///
++/// # Safety
++///
++/// Performs syscalls
++pub(crate) unsafe fn install_abort_handler() -> Result<libc::sigaction, std::io::Error> {
++    unsafe {
++        let mut sa: libc::sigaction = mem::zeroed();
++        libc::sigemptyset(&mut sa.sa_mask);
++        libc::sigaddset(&mut sa.sa_mask, libc::SIGABRT);
++        sa.sa_sigaction = signal_handler as usize;
++        sa.sa_flags = libc::SA_SIGINFO;
++
++        let mut old_action = mem::MaybeUninit::uninit();
++
++        if libc::sigaction(libc::SIGABRT, &sa, old_action.as_mut_ptr()) != -1 {
++            Ok(old_action.assume_init())
++        } else {
++            Err(std::io::Error::last_os_error())
++        }
++    }
++}
++
++/// Restores the action for `SIGABRT` to the specified handler
++///
++/// # Safety
++///
++/// Performs syscalls
++#[inline]
++pub(crate) unsafe fn restore_abort_handler(handler: libc::sigaction) {
++    unsafe { libc::sigaction(libc::SIGABRT, &handler, std::ptr::null_mut()) };
++}
++
++/// Our signal handler, transforms the signal into a [`crash_context::ExceptionInfo`]
++/// and sends it to the thread that handles all exceptions
++unsafe extern "C" fn signal_handler(
++    signal: i32,
++    _info: *mut libc::siginfo_t,
++    _uc: *mut std::ffi::c_void,
++) {
++    use super::ffi;
++
++    // Sanity check
++    assert_eq!(signal, libc::SIGABRT);
++
++    super::state::simulate_exception(Some(crash_context::ExceptionInfo {
++        kind: ffi::et::EXC_SOFTWARE,
++        code: ffi::EXC_SOFT_SIGNAL as u64, // Unix signal
++        subcode: Some(signal as _),
++    }));
++}
+diff --git a/vendor/crash-handler/src/mac/state.rs b/vendor/crash-handler/src/mac/state.rs
+new file mode 100644
+index 0000000..ba98bd8
+--- /dev/null
++++ b/vendor/crash-handler/src/mac/state.rs
+@@ -0,0 +1,795 @@
++use super::ffi::*;
++use crate::CrashEventResult;
++use crate::Error;
++use std::mem;
++
++#[repr(u32)]
++enum MessageIds {
++    /// Message ID telling the handler thread to signal a crash w/optional exception information
++    SignalCrash = 0,
++    /// Message ID telling the handler thread to quit.
++    Shutdown = 2,
++    /// Taken from `mach_exc` in `/usr/include/mach/exc.defs`.
++    Exception = 2405,
++    ExceptionStateIdentity = 2407,
++}
++
++impl TryFrom<u32> for MessageIds {
++    type Error = u32;
++
++    fn try_from(val: u32) -> Result<Self, Self::Error> {
++        Ok(match val {
++            0 => Self::SignalCrash,
++            2 => Self::Shutdown,
++            2405 => Self::Exception,
++            2407 => Self::ExceptionStateIdentity,
++            unknown => return Err(unknown),
++        })
++    }
++}
++
++/// The exceptions that we want to handle, we note the ~equivalent signal next to each
++const EXCEPTION_MASK: et::exception_mask_t = et::EXC_MASK_BAD_ACCESS // SIGSEGV/SIGBUS
++    | et::EXC_MASK_BAD_INSTRUCTION // SIGILL
++    | et::EXC_MASK_ARITHMETIC // SIGFPE
++    | et::EXC_MASK_BREAKPOINT // SIGTRAP
++    | et::EXC_MASK_CRASH // technically this is a catch all mask for the previous masks, but no reason not to spell out exactly what we handle
++    | et::EXC_MASK_RESOURCE // exception thrown when a resource limit is exceeded
++    | et::EXC_MASK_GUARD // exception thrown when an action that is guarded on a resource is attempted
++    ;
++
++static HANDLER: parking_lot::RwLock<Option<HandlerInner>> = parking_lot::const_rwlock(None);
++
++#[inline]
++pub(crate) fn kern_ret(func: impl FnOnce() -> kern_return_t) -> Result<(), Error> {
++    let res = func();
++
++    if res == KERN_SUCCESS {
++        Ok(())
++    } else {
++        Err(std::io::Error::from_raw_os_error(res).into())
++    }
++}
++
++struct PreviousPort {
++    /// The exception the port is masking
++    mask: et::exception_mask_t,
++    /// The port that is sent messages when the exception occurs
++    port: mach_port_t,
++    /// The way in which the exception is raised
++    behavior: et::exception_behavior_t,
++    /// The CPU context included with the exception
++    flavor: ts::thread_state_flavor_t,
++}
++
++struct PreviousPorts {
++    count: usize,
++    ports: [PreviousPort; EXC_TYPES_COUNT],
++}
++
++type UserSignal = std::sync::Arc<(parking_lot::Mutex<Option<bool>>, parking_lot::Condvar)>;
++
++struct AllocatedPort {
++    port: mach_port_t,
++}
++
++impl Drop for AllocatedPort {
++    fn drop(&mut self) {
++        unsafe {
++            mp::mach_port_deallocate(mach_task_self(), self.port);
++        }
++    }
++}
++
++pub(super) struct HandlerInner {
++    pub(super) crash_event: Box<dyn crate::CrashEvent>,
++    handler_port: AllocatedPort,
++    user_signal: UserSignal,
++    handler_thread: std::thread::JoinHandle<()>,
++    previous_abort_action: libc::sigaction,
++    previous: PreviousPorts,
++}
++
++impl HandlerInner {
++    /// Restores the previously registered signal handler and exception ports
++    ///
++    /// SAFETY: syscalls
++    unsafe fn uninstall(&self) -> Result<(), Error> {
++        unsafe {
++            super::signal::restore_abort_handler(self.previous_abort_action);
++
++            let current_task = mach_task_self();
++
++            // Restore the previous ports
++            for pp in &self.previous.ports[..self.previous.count] {
++                kern_ret(|| {
++                    task_set_exception_ports(current_task, pp.mask, pp.port, pp.behavior, pp.flavor)
++                })?;
++            }
++        }
++
++        Ok(())
++    }
++
++    /// SAFETY: syscalls
++    unsafe fn shutdown(self, is_handler_thread: bool) -> Result<(), Error> {
++        unsafe {
++            self.uninstall()?;
++
++            let mut exc_msg: UserException = mem::zeroed();
++            exc_msg.header.msgh_id = MessageIds::Shutdown as i32;
++
++            if self.send_message(exc_msg) {
++                // We don't really care if there was some error in the thread, note
++                // that we check the thread in case we're being uninstalled from
++                // the handler thread itself
++                if !is_handler_thread {
++                    let _res = self.handler_thread.join();
++                }
++            }
++        }
++
++        Ok(())
++    }
++
++    /// SAFETY: syscalls
++    unsafe fn send_message(&self, mut msg: UserException) -> bool {
++        unsafe {
++            msg.header.msgh_size = mem::size_of_val(&msg) as u32;
++            msg.header.msgh_remote_port = self.handler_port.port;
++
++            // Reset the condition variable in case a user signal was already raised
++            {
++                let (lock, _cvar) = &*self.user_signal;
++                *lock.lock() = None;
++            }
++
++            if msg::mach_msg(
++                (&mut msg.header) as *mut _,
++                msg::MACH_SEND_MSG,
++                msg.header.msgh_size,
++                0,
++                0,
++                msg::MACH_MSG_TIMEOUT_NONE,
++                MACH_PORT_NULL,
++            ) != KERN_SUCCESS
++            {
++                return false;
++            }
++
++            if msg.header.msgh_id != MessageIds::SignalCrash as i32 {
++                true
++            } else {
++                // Wait on the handler thread to signal the user callback has finished
++                // with the exception
++                let (lock, cvar) = &*self.user_signal;
++                let mut processed = lock.lock();
++                if processed.is_none() {
++                    cvar.wait(&mut processed);
++                }
++
++                processed.unwrap_or(false)
++            }
++        }
++    }
++}
++
++/// The thread that is actually handling the exception port.
++static HANDLER_THREAD: parking_lot::Mutex<Option<mach_port_t>> = parking_lot::const_mutex(None);
++
++/// Creates a new `mach_port` and installs it as the new task (process) exception
++/// port so that any exceptions not handled by a thread specific exception port
++/// are sent to it, as well as a signal handler for `SIGABRT` as it is not an
++/// exception on macos.
++///
++/// This spawns a message loop thread that waits on messages to the exception port.
++///
++/// # Errors
++///
++/// - A handler has already been installed, we only allow one
++/// - Any of the various syscalls that are made fail
++pub(super) fn attach(crash_event: Box<dyn crate::CrashEvent>) -> Result<(), Error> {
++    let mut lock = HANDLER.write();
++
++    if lock.is_some() {
++        return Err(Error::HandlerAlreadyInstalled);
++    }
++
++    // SAFETY: this is basically just a lot of syscalls we're doing
++    unsafe {
++        let current_task = mach_task_self();
++
++        let mut handler_port = MACH_PORT_NULL;
++
++        // Create a receive right so that we can actually receive exception messages on the port
++        kern_ret(|| {
++            mp::mach_port_allocate(
++                current_task,
++                port::MACH_PORT_RIGHT_RECEIVE,
++                &mut handler_port,
++            )
++        })?;
++
++        let handler_port = AllocatedPort { port: handler_port };
++
++        // Add send right
++        kern_ret(|| {
++            mp::mach_port_insert_right(
++                current_task,
++                handler_port.port,
++                handler_port.port,
++                msg::MACH_MSG_TYPE_MAKE_SEND,
++            )
++        })?;
++
++        let previous_abort_action = super::signal::install_abort_handler()?;
++
++        let mut count = EXC_TYPES_COUNT as u32;
++        let mut masks = [0; EXC_TYPES_COUNT];
++        let mut ports = [0; EXC_TYPES_COUNT];
++        let mut behaviors = [0; EXC_TYPES_COUNT];
++        let mut flavors = [0; EXC_TYPES_COUNT];
++
++        let behavior =
++            // Send a catch_exception_raise message including the identity.
++            et::EXCEPTION_DEFAULT |
++            // Send 64-bit code and subcode in the exception header.
++            //
++            // Without this flag the code and subcode in the exception will be
++            // 32-bits, losing information for several types of exception
++            // * `EXC_BAD_ACCESS` - the address of the bad access is stored in the subcode
++            // * `EXC_RESOURCE` - the details of the resource exception are stored
++            // using the full 64-bits of the code
++            // * `EXC_GUARD` - the details of the guard exception are stored
++            // in the full 64-bits of the code, and the full 64-bits of the subcode
++            // _can_ be used depending on the guard type
++            et::MACH_EXCEPTION_CODES;
++
++        // Swap the exception ports so that we use our own
++        kern_ret(|| {
++            task_swap_exception_ports(
++                current_task,
++                EXCEPTION_MASK,
++                handler_port.port,
++                behavior as _,
++                THREAD_STATE_NONE,
++                masks.as_mut_ptr(),
++                &mut count,
++                ports.as_mut_ptr(),
++                behaviors.as_mut_ptr(),
++                flavors.as_mut_ptr(),
++            )
++        })?;
++
++        let mut previous: PreviousPorts = std::mem::zeroed();
++        previous.count = count as usize;
++        for i in 0..previous.count {
++            previous.ports[i] = PreviousPort {
++                mask: masks[i],
++                port: ports[i],
++                behavior: behaviors[i],
++                flavor: flavors[i],
++            };
++        }
++
++        let user_signal =
++            std::sync::Arc::new((parking_lot::Mutex::new(None), parking_lot::Condvar::new()));
++        let us = user_signal.clone();
++
++        let port = handler_port.port;
++
++        // Spawn a thread that will handle the actual exception/user messages sent
++        // to the exception port we've just created
++        let handler_thread = std::thread::spawn(move || {
++            *HANDLER_THREAD.lock() = Some(mach_thread_self());
++
++            exception_handler(port, us);
++
++            *HANDLER_THREAD.lock() = None;
++        });
++
++        *lock = Some(HandlerInner {
++            crash_event,
++            handler_port,
++            user_signal,
++            handler_thread,
++            previous_abort_action,
++            previous,
++        });
++    }
++
++    Ok(())
++}
++
++pub(super) fn detach(is_handler_thread: bool) {
++    let mut lock = HANDLER.write();
++    if let Some(handler) = lock.take() {
++        // user can't really do anything if something fails at this point, but
++        // should have a clean way of surfacing the error happened
++        // SAFETY: syscalls
++        let _result = unsafe { handler.shutdown(is_handler_thread) };
++    }
++}
++
++#[repr(C)]
++struct UserException {
++    header: msg::mach_msg_header_t,
++    body: msg::mach_msg_body_t,
++    crash_thread: msg::mach_msg_port_descriptor_t,
++    flags: u32,
++    exception_kind: u32,
++    exception_code: u64,
++    exception_subcode: u64,
++}
++
++const FLAG_HAS_EXCEPTION: u32 = 0x1;
++const FLAG_HAS_SUBCODE: u32 = 0x2;
++
++pub(super) fn simulate_exception(info: Option<crash_context::ExceptionInfo>) -> bool {
++    let lock = HANDLER.read();
++    if let Some(handler) = &*lock {
++        // SAFETY: ExceptionMessage is POD and send_message is syscalls
++        unsafe {
++            let (flags, exception_kind, exception_code, exception_subcode) = if let Some(exc) = info
++            {
++                (
++                    FLAG_HAS_EXCEPTION
++                        | if exc.subcode.is_some() {
++                            FLAG_HAS_SUBCODE
++                        } else {
++                            0
++                        },
++                    exc.kind,
++                    exc.code,
++                    exc.subcode.unwrap_or_default(),
++                )
++            } else {
++                (0, 0, 0, 0)
++            };
++
++            let exc_msg = UserException {
++                header: msg::mach_msg_header_t {
++                    msgh_bits: msg::MACH_MSG_TYPE_COPY_SEND | msg::MACH_MSGH_BITS_COMPLEX,
++                    msgh_size: std::mem::size_of::<UserException>() as u32,
++                    msgh_remote_port: port::MACH_PORT_NULL,
++                    msgh_local_port: port::MACH_PORT_NULL,
++                    msgh_voucher_port: port::MACH_PORT_NULL,
++                    msgh_id: 0,
++                },
++                body: msg::mach_msg_body_t {
++                    msgh_descriptor_count: 1,
++                },
++                crash_thread: msg::mach_msg_port_descriptor_t::new(
++                    mach_thread_self(),
++                    msg::MACH_MSG_TYPE_COPY_SEND,
++                ),
++                flags,
++                exception_kind,
++                exception_code,
++                exception_subcode,
++            };
++
++            handler.send_message(exc_msg)
++        }
++    } else {
++        false
++    }
++}
++
++#[inline]
++fn call_user_callback(cc: &crash_context::CrashContext) -> CrashEventResult {
++    let lock = HANDLER.read();
++    if let Some(handler) = &*lock {
++        handler.crash_event.on_crash(cc)
++    } else {
++        CrashEventResult::Handled(false)
++    }
++}
++
++/// Message loop thread. Simply waits for messages to the port, which will either
++/// be exceptions sent by the kernel, or messages sent by the exception handler
++/// that this message loop is servicing.
++unsafe fn exception_handler(port: mach_port_t, us: UserSignal) {
++    unsafe {
++        let mut request: ExceptionMessage = mem::zeroed();
++
++        loop {
++            request.header.local_port = port;
++            request.header.size = mem::size_of_val(&request) as _;
++
++            let kret = msg::mach_msg(
++                ((&mut request.header) as *mut MachMsgHeader).cast(),
++                msg::MACH_RCV_MSG | msg::MACH_RCV_LARGE,
++                0,
++                mem::size_of_val(&request) as u32,
++                port,
++                msg::MACH_MSG_TIMEOUT_NONE,
++                MACH_PORT_NULL,
++            );
++
++            if kret != KERN_SUCCESS {
++                eprintln!("mach_msg failed with {} ({0:x})", kret);
++                libc::abort();
++            }
++
++            match MessageIds::try_from(request.header.id) {
++                Ok(MessageIds::Exception | MessageIds::ExceptionStateIdentity) => {
++                    // When forking a child process with the exception handler installed,
++                    // if the child crashes, it will send the exception back to the parent
++                    // process.  The check for task == self_task() ensures that only
++                    // exceptions that occur in the parent process are caught and
++                    // processed.  If the exception was not caused by this task, we
++                    // still need to call into the exception server and have it return
++                    // KERN_FAILURE (see catch_exception_raise) in order for the kernel
++                    // to move onto the host exception handler for the child task
++                    let ret_code = if request.task.name == mach_task_self() {
++                        let _ss = ScopedSuspend::new();
++
++                        let subcode = (request.code_count > 1).then_some(request.code[1]);
++
++                        let exc_info = crash_context::ExceptionInfo {
++                            kind: request.exception,
++                            code: request.code[0],
++                            subcode,
++                        };
++
++                        // Check if the exception is non-fatal, if it is we don't report it
++                        // and importantly _don't_ detach the exception handler like we
++                        // do for fatal exceptions
++                        if !is_exception_non_fatal(exc_info, request.task.name) {
++                            let cc = crash_context::CrashContext {
++                                thread: request.thread.name,
++                                task: request.task.name,
++                                handler_thread: mach_thread_self(),
++                                exception: Some(exc_info),
++                            };
++
++                            let ret_code =
++                                if let CrashEventResult::Handled(true) = call_user_callback(&cc) {
++                                    KERN_SUCCESS
++                                } else {
++                                    mach2::kern_return::KERN_FAILURE
++                                };
++
++                            // Restores the previous exception ports, in most cases
++                            // this will be the default for the OS, which will kill this
++                            // process when we reply that we've handled the exception
++                            detach(true);
++
++                            ret_code
++                        } else {
++                            KERN_SUCCESS
++                        }
++                    } else {
++                        KERN_SUCCESS
++                    };
++
++                    // This magic incantation to send a reply back to the kernel was
++                    // derived from the exc_server generated by
++                    // 'mig -v /usr/include/mach/mach_exc.defs', or you can look at
++                    // https://github.com/doadam/xnu-4570.1.46/blob/2ad7fbf85ff567495a572cd4583961ffd8525083/BUILD/obj/RELEASE_X86_64/osfmk/RELEASE/mach/exc_server.c#L491-L520
++                    let mut reply: ExceptionRaiseReply = mem::zeroed();
++                    reply.header.bits = msg::MACH_MSGH_BITS(
++                        request.header.bits & msg::MACH_MSGH_BITS_REMOTE_MASK,
++                        0,
++                    );
++                    reply.header.size = mem::size_of_val(&reply) as u32;
++                    reply.header.remote_port = request.header.remote_port;
++                    reply.header.local_port = MACH_PORT_NULL;
++                    reply.header.id = request.header.id + 100;
++                    reply.ndr = NDR_record;
++                    reply.ret_code = ret_code;
++
++                    msg::mach_msg(
++                        ((&mut reply.header) as *mut MachMsgHeader).cast(),
++                        msg::MACH_SEND_MSG,
++                        mem::size_of_val(&reply) as u32,
++                        0,
++                        MACH_PORT_NULL,
++                        msg::MACH_MSG_TIMEOUT_NONE,
++                        MACH_PORT_NULL,
++                    );
++                }
++                Ok(MessageIds::Shutdown) => return,
++                Ok(MessageIds::SignalCrash) => {
++                    let res = {
++                        let _ss = ScopedSuspend::new();
++
++                        let user_exception: &UserException = std::mem::transmute(&request);
++
++                        let exception = if user_exception.flags & FLAG_HAS_EXCEPTION != 0 {
++                            Some(crash_context::ExceptionInfo {
++                                kind: user_exception.exception_kind,
++                                code: user_exception.exception_code,
++                                subcode: (user_exception.flags & FLAG_HAS_SUBCODE != 0)
++                                    .then_some(user_exception.exception_subcode),
++                            })
++                        } else {
++                            None
++                        };
++
++                        // Reconstruct a crash context from the message we received
++                        let cc = crash_context::CrashContext {
++                            task: mach_task_self(),
++                            thread: user_exception.crash_thread.name,
++                            handler_thread: mach_thread_self(),
++                            exception,
++                        };
++
++                        call_user_callback(&cc)
++                    };
++
++                    {
++                        let (lock, cvar) = &*us;
++                        let mut processed = lock.lock();
++                        *processed = Some(matches!(res, CrashEventResult::Handled(true)));
++                        cvar.notify_one();
++                    }
++                }
++                Err(unknown) => unreachable!("received unknown message {unknown}"),
++            }
++        }
++    }
++}
++
++struct ScopedSuspend;
++
++impl ScopedSuspend {
++    fn new() -> Self {
++        // SAFETY: syscalls
++        unsafe {
++            let mut threads_for_task = std::ptr::null_mut();
++            let mut thread_count = 0;
++
++            if task::task_threads(mach_task_self(), &mut threads_for_task, &mut thread_count)
++                != KERN_SUCCESS
++            {
++                return Self;
++            }
++
++            let this_thread = mach_thread_self();
++            let threads = std::slice::from_raw_parts(threads_for_task, thread_count as usize);
++
++            // suspend all of the threads except for this one
++            for thread in threads {
++                if *thread != this_thread {
++                    // We try to suspend all threads as a best effort, it's not fatal
++                    // if we can't
++                    mach2::thread_act::thread_suspend(*thread);
++                }
++            }
++        }
++
++        Self
++    }
++}
++
++impl Drop for ScopedSuspend {
++    fn drop(&mut self) {
++        // SAFETY: syscalls
++        unsafe {
++            let mut threads_for_task = std::ptr::null_mut();
++            let mut thread_count = 0;
++
++            if task::task_threads(mach_task_self(), &mut threads_for_task, &mut thread_count)
++                != KERN_SUCCESS
++            {
++                return;
++            }
++
++            let this_thread = mach_thread_self();
++            let threads = std::slice::from_raw_parts(threads_for_task, thread_count as usize);
++
++            // resume all of the threads except for this one
++            for thread in threads {
++                if *thread != this_thread {
++                    mach2::thread_act::thread_resume(*thread);
++                }
++            }
++        }
++    }
++}
++
++/// Determines if the specified exception is non-fatal.
++///
++/// `EXC_RESOURCE` exceptions are thrown when a resource limit (hard or soft)
++/// is surpassed, and importantly for our scenario, are often non-fatal, meaning
++/// we should _not_ notify the user callback that a crash has occurred
++fn is_exception_non_fatal(exc_info: crash_context::ExceptionInfo, task: mt::task_t) -> bool {
++    use crash_context::{
++        ipc::pid_for_task,
++        resource::{self as res, ResourceException as Re},
++    };
++
++    // We want to clearly see the different variants, even if they end up with
++    // the same result
++    #[allow(clippy::match_same_arms)]
++    match exc_info.resource_exception() {
++        // CPU exceptions have, currently 2 flavors, fata and non-fatal
++        Some(Re::Cpu(cpu_exc)) => !cpu_exc.is_fatal,
++        // Wakeups exceptions
++        Some(Re::Wakeups(wu_exc)) if wu_exc.flavor == res::WakeupsFlavor::Monitor => {
++            // Unlike the other resource exceptions kinds, we need to call into
++            // the task to determine if this exception is actually fatal. Since
++            // it is by default not fatal, failure to retrieve the task's pid
++            // or calling proc_get_wakemon_params will consider the exception
++            // non-fatal
++            let mut pid = 0;
++            // SAFETY: syscall
++            if unsafe { pid_for_task(task, &mut pid) } != KERN_SUCCESS {
++                return true;
++            }
++
++            // The SDK doesn’t have `proc_get_wakemon_params` to link against,
++            // even with weak import, so we need need to look it up by name
++            // before invoking it
++            // SAFETY: syscalls
++            unsafe {
++                let mut dl_info = std::mem::MaybeUninit::uninit();
++                if libc::dladdr(libc::proc_pidinfo as *const _, dl_info.as_mut_ptr()) == 0 {
++                    // We failed to find the lib that contains proc_pidinfo, which
++                    // is the same lib that contains proc_get_wakemon_params
++                    return true;
++                }
++
++                let dl_info = dl_info.assume_init();
++
++                let dl_handle = libc::dlopen(
++                    dl_info.dli_fname,
++                    libc::RTLD_LAZY | libc::RTLD_LOCAL | libc::RTLD_NOLOAD,
++                );
++                if dl_handle.is_null() {
++                    return true;
++                }
++
++                type ProcGetWakemonParams = unsafe extern "C" fn(
++                    pid: libc::pid_t,
++                    rate_hz: *mut i32,
++                    flags: *mut i32,
++                ) -> i32;
++
++                let proc_get_wakemon_params =
++                    libc::dlsym(dl_handle, c"proc_get_wakemon_params".as_ptr().cast());
++                if proc_get_wakemon_params.is_null() {
++                    return true;
++                }
++
++                let proc_get_wakemon_params: ProcGetWakemonParams =
++                    std::mem::transmute(proc_get_wakemon_params);
++
++                let mut rate = 0;
++                let mut flags = 0;
++                if proc_get_wakemon_params(pid, &mut rate, &mut flags) < 0 {
++                    return true;
++                }
++
++                // Configure the task so that violations are fatal. <include/sys/resource.h>
++                const WAKEMON_MAKE_FATAL: i32 = 0x10;
++
++                (flags & WAKEMON_MAKE_FATAL) == 0
++            }
++        }
++        // Memory resource exceptions are never fatal
++        Some(Re::Memory(mem_exc)) if mem_exc.flavor == res::MemoryFlavor::HighWatermark => true,
++        // I/O resource exeptions are never fatal
++        Some(Re::Io(_)) => true,
++        // Thread resource exceptions are not possible (at least currently) in production kernels
++        Some(Re::Threads(_)) => false,
++        // Port resource exceptions are always fatal
++        Some(Re::Ports(_)) => false,
++        // non resource exceptions are always fatal
++        None => false,
++        // TODO: print out details on the unknown exception?
++        _ => false,
++    }
++}
++
++#[cfg(test)]
++mod test {
++    use super::*;
++    use crash_context::{resource::*, *};
++
++    #[inline]
++    fn res_exc(kind: ResourceKind, flavor: u8) -> ExceptionInfo {
++        ExceptionInfo {
++            kind: et::EXC_RESOURCE as _,
++            code: (((kind as u64 & 0x7) << 61) | ((flavor as u64 & 0x7) << 58)),
++            subcode: None,
++        }
++    }
++
++    /// Ensures that the resource exceptions can be non-fatal and all other
++    /// exceptions we handle are always fatal
++    #[test]
++    fn check_resource_non_fatal() {
++        // SAFETY: syscall
++        let task = unsafe { mach_task_self() };
++
++        assert!(is_exception_non_fatal(
++            res_exc(ResourceKind::Cpu, CpuFlavor::Monitor as u8),
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            res_exc(ResourceKind::Cpu, CpuFlavor::MonitorFatal as u8),
++            task
++        ));
++
++        // This assumes that WAKEMON_MAKE_FATAL is not set for this process. The
++        // default is for WAKEMON_MAKE_FATAL to not be set, there’s no public API to
++        // enable it, and nothing in this process should have enabled it.
++        assert!(is_exception_non_fatal(
++            res_exc(ResourceKind::Wakeups, WakeupsFlavor::Monitor as u8),
++            task
++        ));
++
++        assert!(is_exception_non_fatal(
++            res_exc(ResourceKind::Memory, MemoryFlavor::HighWatermark as u8),
++            task
++        ));
++
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_CRASH as _,
++                code: 0xb100001,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_CRASH as _,
++                code: 0x0b00000,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_CRASH as _,
++                code: 0x6000000,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_BAD_ACCESS as _,
++                code: mach2::kern_return::KERN_INVALID_ADDRESS as _,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_BAD_INSTRUCTION as _,
++                code: 1,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_ARITHMETIC as _,
++                code: 1,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: et::EXC_BREAKPOINT as _,
++                code: 2,
++                subcode: None,
++            },
++            task
++        ));
++        assert!(!is_exception_non_fatal(
++            ExceptionInfo {
++                kind: 0,
++                code: 0,
++                subcode: None,
++            },
++            task
++        ));
++    }
++}
+diff --git a/vendor/crash-handler/src/unix.rs b/vendor/crash-handler/src/unix.rs
+new file mode 100644
+index 0000000..b304289
+--- /dev/null
++++ b/vendor/crash-handler/src/unix.rs
+@@ -0,0 +1,7 @@
++mod pthread_interpose;
++
++// Force this function to be linked, but it shouldn't actually be called by
++// users directly as it interposes the libc `pthread_create`
++#[doc(hidden)]
++#[cfg(not(miri))]
++pub use pthread_interpose::pthread_create;
+diff --git a/vendor/crash-handler/src/unix/pthread_interpose.rs b/vendor/crash-handler/src/unix/pthread_interpose.rs
+new file mode 100644
+index 0000000..8dc9f86
+--- /dev/null
++++ b/vendor/crash-handler/src/unix/pthread_interpose.rs
+@@ -0,0 +1,238 @@
++//! Interposes calls to `pthread_create` so that we always install an alternate
++//! signal stack.
++//!
++//! Original code from <https://hg.mozilla.org/mozilla-central/file/3cf2b111807aec49c54bc958771177d33925aace/toolkit/crashreporter/pthread_create_interposer/pthread_create_interposer.cpp>
++
++#![allow(non_camel_case_types)]
++
++use libc::c_void;
++use std::ptr;
++
++pub type pthread_main_t = unsafe extern "C" fn(_: *mut c_void) -> *mut c_void;
++
++#[cfg(not(miri))]
++type pthread_create_t = unsafe extern "C" fn(
++    thread: *mut libc::pthread_t,
++    attr: *const libc::pthread_attr_t,
++    f: pthread_main_t,
++    arg: *mut c_void,
++) -> i32;
++
++struct PthreadCreateParams {
++    main: pthread_main_t,
++    arg: *mut c_void,
++}
++
++/// Key created at first thread creation so that we can set the thread specific
++/// alternate stack memory as per-thread data that is uninstalled and unmapped
++/// in the `pthread_key` destructor
++static mut THREAD_DESTRUCTOR_KEY: libc::pthread_key_t = 0;
++
++#[cfg(all(target_env = "musl", target_feature = "crt-static", not(miri)))]
++unsafe extern "C" {
++    /// This is the weak alias for `pthread_create`. We declare this so we can
++    /// use its address when targeting musl, as we can't lookup the actual
++    /// `pthread_create` symbol at runtime since we've interposed it.
++    pub fn __pthread_create(
++        thread: *mut libc::pthread_t,
++        attr: *const libc::pthread_attr_t,
++        main: pthread_main_t,
++        arg: *mut c_void,
++    ) -> i32;
++}
++
++/// This interposer replaces `pthread_create` so that we can inject an
++/// alternate signal stack in every new thread, regardless of whether the
++/// thread is created directly in Rust's std library or not
++///
++/// # Errors
++///
++/// This will fail if we're unable to retrieve the address of the actual
++/// libc `pthread_create`, or if we do find the address but it's actually the
++/// address of this interpose function which would result in infinte recursion
++#[cfg(not(miri))]
++#[unsafe(no_mangle)]
++pub extern "C" fn pthread_create(
++    thread: *mut libc::pthread_t,
++    attr: *const libc::pthread_attr_t,
++    main: pthread_main_t,
++    arg: *mut c_void,
++) -> i32 {
++    /// Get the address of the _real_ `pthread_create`
++    static mut REAL_PTHREAD_CREATE: Option<pthread_create_t> = None;
++    static INIT: parking_lot::Once = parking_lot::Once::new();
++
++    // Finds the real pthread_create and specifies the pthread_key that is
++    // used to uninstall and unmap the alternate stack
++    INIT.call_once(|| unsafe {
++        cfg_if::cfg_if! {
++            if #[cfg(all(target_env = "musl", target_feature = "crt-static"))] {
++                let ptr = __pthread_create as *mut c_void;
++            } else {
++                const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
++                let ptr = libc::dlsym(RTLD_NEXT, c"pthread_create".as_ptr().cast());
++            }
++        }
++
++        if !ptr.is_null() {
++            REAL_PTHREAD_CREATE = Some(std::mem::transmute::<*mut libc::c_void, pthread_create_t>(
++                ptr,
++            ));
++        }
++
++        libc::pthread_key_create(
++            std::ptr::addr_of_mut!(THREAD_DESTRUCTOR_KEY),
++            Some(uninstall_sig_alt_stack),
++        );
++    });
++
++    #[allow(static_mut_refs)]
++    let real_pthread_create = unsafe {
++        let real_pthread_create = REAL_PTHREAD_CREATE.as_ref().expect("pthread_create() intercept failed but the intercept function is still being called, this won't work");
++        assert!(
++            !std::ptr::fn_addr_eq(*real_pthread_create, pthread_create as pthread_create_t),
++            "We could not obtain the real pthread_create(). Calling the symbol we got would make us enter an infinte loop so stop here instead."
++        );
++        real_pthread_create
++    };
++
++    let create_params = Box::new(PthreadCreateParams { main, arg });
++    let create_params = Box::into_raw(create_params);
++
++    let result = unsafe {
++        real_pthread_create(
++            thread,
++            attr,
++            set_alt_signal_stack_and_start,
++            create_params.cast(),
++        )
++    };
++
++    if result != 0 {
++        // Only deallocate if the thread fails to spawn, if it succeeds it
++        // will deallocate the box itself
++        unsafe {
++            drop(Box::from_raw(create_params));
++        }
++    }
++
++    result
++}
++
++// std::cmp::max is not const :(
++const fn get_stack_size() -> usize {
++    if libc::SIGSTKSZ > 16 * 1024 {
++        libc::SIGSTKSZ
++    } else {
++        16 * 1024
++    }
++}
++
++/// The size of the alternate stack that is mapped for every thread.
++///
++/// This has a minimum size of 16k, which might seem a bit large, but this
++/// memory will only ever be committed in case we actually get a stack overflow,
++/// which is (hopefully) exceedingly rare
++const SIG_STACK_SIZE: usize = get_stack_size();
++
++/// This is the replacment function for the user's thread entry, it installs
++/// the alternate stack before invoking the original thread entry, then cleans
++/// it up after the user's thread entry exits.
++#[unsafe(no_mangle)]
++unsafe extern "C" fn set_alt_signal_stack_and_start(params: *mut c_void) -> *mut libc::c_void {
++    let (user_main, user_arg) = {
++        let params = unsafe { Box::from_raw(params.cast::<PthreadCreateParams>()) };
++
++        (params.main, params.arg)
++    };
++
++    let alt_stack_mem = unsafe { install_sig_alt_stack() };
++
++    // The original code was using pthread_cleanup_push/pop, however those are
++    // macros in glibc/musl, so we instead use pthread_key_create as it works
++    // functionally the same and can call a cleanup function/destructor on both
++    // thread exit and cancel
++    unsafe {
++        libc::pthread_setspecific(THREAD_DESTRUCTOR_KEY, alt_stack_mem);
++        user_main(user_arg)
++    }
++}
++
++/// Install the alternate signal stack
++///
++/// Returns a pointer to the memory area we mapped to store the stack only if it
++/// was installed successfully, otherwise returns `null`.
++///
++/// # Errors
++///
++/// If we're able to map memory, but unable to install the alternate stack, we
++/// expect that we can unmap the memory
++unsafe fn install_sig_alt_stack() -> *mut libc::c_void {
++    let alt_stack_mem = unsafe {
++        libc::mmap(
++            ptr::null_mut(),
++            SIG_STACK_SIZE,
++            libc::PROT_READ | libc::PROT_WRITE,
++            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
++            -1,
++            0,
++        )
++    };
++
++    // Check that we successfully mapped some memory
++    if alt_stack_mem.is_null() {
++        return alt_stack_mem;
++    }
++
++    let alt_stack = libc::stack_t {
++        ss_sp: alt_stack_mem,
++        ss_flags: 0,
++        ss_size: SIG_STACK_SIZE,
++    };
++
++    // Attempt to install the alternate stack
++    let rv = unsafe { libc::sigaltstack(&alt_stack, ptr::null_mut()) };
++
++    // Attempt to cleanup the mapping if we failed to install the alternate stack
++    if rv != 0 {
++        assert_eq!(
++            unsafe { libc::munmap(alt_stack_mem, SIG_STACK_SIZE) },
++            0,
++            "failed to install an alternate signal stack, and failed to unmap the alternate stack memory"
++        );
++        ptr::null_mut()
++    } else {
++        alt_stack_mem
++    }
++}
++
++/// Uninstall the alternate signal stack and unmaps the memory.
++///
++/// # Errors
++///
++/// If the alternate stack is not `null`, it is expected that uninstalling and
++/// unmapping will not error
++#[unsafe(no_mangle)]
++unsafe extern "C" fn uninstall_sig_alt_stack(alt_stack_mem: *mut libc::c_void) {
++    if alt_stack_mem.is_null() {
++        return;
++    }
++
++    let disable_stack = libc::stack_t {
++        ss_sp: ptr::null_mut(),
++        ss_flags: libc::SS_DISABLE,
++        ss_size: 0,
++    };
++
++    // Attempt to uninstall the alternate stack
++    assert_eq!(
++        unsafe { libc::sigaltstack(&disable_stack, ptr::null_mut()) },
++        0,
++        "failed to uninstall alternate signal stack"
++    );
++    assert_eq!(
++        unsafe { libc::munmap(alt_stack_mem, SIG_STACK_SIZE) },
++        0,
++        "failed to unmap alternate stack memory"
++    );
++}
+diff --git a/vendor/crash-handler/src/windows.rs b/vendor/crash-handler/src/windows.rs
+new file mode 100644
+index 0000000..374f656
+--- /dev/null
++++ b/vendor/crash-handler/src/windows.rs
+@@ -0,0 +1,67 @@
++pub mod jmp;
++mod signal;
++mod state;
++
++use crate::Error;
++
++/// Possible exception codes values for the the `exception_code` field
++/// in the crash context.
++///
++/// This is mainly for testing purposes, and is not exhaustive nor really accurate,
++/// as eg. a distinction is made between a divide by zero between integers and
++/// floats.
++#[derive(Copy, Clone)]
++#[repr(i32)]
++#[allow(overflowing_literals)]
++pub enum ExceptionCode {
++    Abort = 0x40000015,             // STATUS_FATAL_APP_EXIT
++    Fpe = -1073741676,              // EXCEPTION_INT_DIVIDE_BY_ZERO
++    Illegal = -1073741795,          // EXCEPTION_ILLEGAL_INSTRUCTION
++    Segv = -1073741819,             // EXCEPTION_ACCESS_VIOLATION
++    StackOverflow = -1073741571,    // EXCEPTION_STACK_OVERFLOW
++    Trap = -2147483645,             // EXCEPTION_BREAKPOINT
++    InvalidParameter = -1073741811, // STATUS_INVALID_PARAMETER
++    Purecall = -1073741787,         // STATUS_NONCONTINUABLE_EXCEPTION
++    User = 0xcca11ed, // https://github.com/chromium/crashpad/blob/fca8871ca3fb721d3afab370ca790122f9333bfd/util/win/exception_codes.h#L32
++    HeapCorruption = 0xc0000374, // STATUS_HEAP_CORRUPTION
++}
++
++/// A Windows exception handler
++pub struct CrashHandler;
++
++#[allow(clippy::unused_self)]
++impl CrashHandler {
++    /// Attaches the crash handler.
++    ///
++    /// The provided callback will be invoked if an exception is caught,
++    /// providing a [`crate::CrashContext`] with the details of the thread where
++    /// the exception was thrown.
++    pub fn attach(on_crash: Box<dyn crate::CrashEvent>) -> Result<Self, Error> {
++        state::attach(on_crash)?;
++        Ok(Self)
++    }
++
++    /// Detaches this handler, removing it from the handler stack.
++    ///
++    /// This is done automatically when this [`CrashHandler`] is dropped.
++    #[inline]
++    pub fn detach(self) {
++        state::detach();
++    }
++
++    /// Creates an exception with the specified exception code that is passed
++    /// through the user provided callback.
++    pub fn simulate_exception(&self, exception_code: Option<i32>) -> crate::CrashEventResult {
++        // Normally this would be an unsafe function, since this unsafe encompasses
++        // the entirety of the body, however the user is really not required to
++        // uphold any guarantees on their end, so no real need to declare the
++        // function itself unsafe.
++        unsafe { state::simulate_exception(exception_code) }
++    }
++}
++
++impl Drop for CrashHandler {
++    fn drop(&mut self) {
++        state::detach();
++    }
++}
+diff --git a/vendor/crash-handler/src/windows/jmp.rs b/vendor/crash-handler/src/windows/jmp.rs
+new file mode 100644
+index 0000000..c00a690
+--- /dev/null
++++ b/vendor/crash-handler/src/windows/jmp.rs
+@@ -0,0 +1,87 @@
++// The MIT License (MIT)
++//
++// Copyright © 2016 Franklin "Snaipe" Mathieu <http://snai.pe/>
++//
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files (the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions:
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++//! Provides an implementation of [`setjmp`] and [`longjmp`], as unfortunately the
++//! implementation in MSVCRT actually unwinds the stack
++
++#![cfg(target_arch = "x86_64")]
++
++std::arch::global_asm! {
++    ".text",
++    ".global ehsetjmp",
++    ".align 4",
++    ".cfi_startproc",
++"ehsetjmp:",
++    "mov %rbx, 8(%rcx)",
++    "mov %rsp, 16(%rcx)",
++    "mov %rbp, 24(%rcx)",
++    "mov %rsi, 32(%rcx)",
++    "mov %rdi, 40(%rcx)",
++    "mov %r12, 48(%rcx)",
++    "mov %r13, 56(%rcx)",
++    "mov %r14, 64(%rcx)",
++    "mov %r15, 72(%rcx)",
++    "pop 80(%rcx)", // rip
++    "push 80(%rcx)",
++
++    "xor %rax, %rax",
++    "ret",
++    ".cfi_endproc",
++    options(att_syntax)
++}
++
++std::arch::global_asm! {
++    ".text",
++    ".global ehlongjmp",
++    ".align 4",
++    ".cfi_startproc",
++"ehlongjmp:",
++    "mov 8(%rcx), %rbx",
++    "mov 16(%rcx), %rsp",
++    "mov 24(%rcx), %rbp",
++    "mov 32(%rcx), %rsi",
++    "mov 40(%rcx), %rdi",
++    "mov 48(%rcx), %r12",
++    "mov 56(%rcx), %r13",
++    "mov 64(%rcx), %r14",
++    "mov 72(%rcx), %r15",
++    "pop %rax",
++    "push 80(%rcx)",
++
++    "mov %rdx, %rax", // return value
++    "ret",
++    ".cfi_endproc",
++    options(att_syntax)
++}
++
++#[repr(C)]
++pub struct JmpBuf {
++    __jmp_buf: [u128; 16],
++}
++
++#[allow(improper_ctypes)] // u128 is actually ok on x86_64 :)
++unsafe extern "C" {
++    #[link_name = "ehsetjmp"]
++    pub fn setjmp(jb: *mut JmpBuf) -> i32;
++    #[link_name = "ehlongjmp"]
++    pub fn longjmp(jb: *mut JmpBuf, val: i32) -> !;
++}
+diff --git a/vendor/crash-handler/src/windows/signal.rs b/vendor/crash-handler/src/windows/signal.rs
+new file mode 100644
+index 0000000..55b1344
+--- /dev/null
++++ b/vendor/crash-handler/src/windows/signal.rs
+@@ -0,0 +1,38 @@
++//! Windows doesn't have an exception for process aborts, so we hook `SIGABRT`
++
++/// Installs our `SIGABRT` handler, returning any previously registered handler,
++/// which should be restored later
++///
++/// # Safety
++///
++/// Performs syscalls
++pub(crate) unsafe fn install_abort_handler() -> Result<libc::sighandler_t, std::io::Error> {
++    // It would be nice to use sigaction here since it's better, but it isn't
++    // supported on Windows :p
++    unsafe {
++        let old_handler = libc::signal(libc::SIGABRT, signal_handler as usize);
++        if old_handler != usize::MAX {
++            Ok(old_handler)
++        } else {
++            Err(std::io::Error::last_os_error())
++        }
++    }
++}
++
++/// Restores the action for `SIGABRT` to the specified handler
++///
++/// # Safety
++///
++/// Performs syscalls
++#[inline]
++pub(crate) unsafe fn restore_abort_handler(handler: libc::sighandler_t) {
++    unsafe { libc::signal(libc::SIGABRT, handler) };
++}
++
++unsafe extern "C" fn signal_handler(signal: i32, _subcode: i32) {
++    // Sanity check
++    assert_eq!(signal, libc::SIGABRT);
++
++    // https://github.com/chromium/crashpad/blob/fca8871ca3fb721d3afab370ca790122f9333bfd/client/crashpad_client_win.cc#L197
++    unsafe { super::state::simulate_exception(Some(super::ExceptionCode::Abort as _)) };
++}
+diff --git a/vendor/crash-handler/src/windows/state.rs b/vendor/crash-handler/src/windows/state.rs
+new file mode 100644
+index 0000000..b2bd6de
+--- /dev/null
++++ b/vendor/crash-handler/src/windows/state.rs
+@@ -0,0 +1,462 @@
++#![allow(non_camel_case_types, clippy::exit)]
++
++use super::ExceptionCode;
++use crate::Error;
++
++type LPTOP_LEVEL_EXCEPTION_FILTER = Option<
++    unsafe extern "system" fn(exceptioninfo: *const crash_context::EXCEPTION_POINTERS) -> i32,
++>;
++
++type PVECTORED_EXCEPTION_HANDLER = Option<
++    unsafe extern "system" fn(exceptioninfo: *const crash_context::EXCEPTION_POINTERS) -> i32,
++>;
++
++unsafe extern "system" {
++    fn GetCurrentThreadId() -> u32;
++    fn SetUnhandledExceptionFilter(
++        filter: LPTOP_LEVEL_EXCEPTION_FILTER,
++    ) -> LPTOP_LEVEL_EXCEPTION_FILTER;
++    fn AddVectoredExceptionHandler(
++        first_handler: u32,
++        handler: PVECTORED_EXCEPTION_HANDLER,
++    ) -> *mut core::ffi::c_void;
++    fn RemoveVectoredExceptionHandler(handle: *mut core::ffi::c_void) -> u32;
++}
++
++struct VehHandler(std::ptr::NonNull<libc::c_void>);
++unsafe impl Send for VehHandler {}
++unsafe impl Sync for VehHandler {}
++
++unsafe extern "C" {
++    /// MSVCRT has its own error handling function for invalid parameters to crt functions
++    /// (eg printf) which instead of returning error codes from the function itself,
++    /// like one would want, call a handler if specified, or, worse, throw up a dialog
++    /// if in a GUI!
++    ///
++    /// [Invalid Parameter Handler](https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/set-invalid-parameter-handler-set-thread-local-invalid-parameter-handler?view=msvc-170)
++    fn _set_invalid_parameter_handler(
++        new_handler: Option<_invalid_parameter_handler>,
++    ) -> Option<_invalid_parameter_handler>;
++    /// It also has a separate error handling function when calling pure virtuals
++    /// because why not?
++    ///
++    /// [Purecall Handler](https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/get-purecall-handler-set-purecall-handler?view=msvc-170)
++    fn _set_purecall_handler(new_handler: Option<_purecall_handler>) -> Option<_purecall_handler>;
++    // This is only available in the debug CRT
++    // fn _invalid_parameter(
++    //     expression: *const u16,
++    //     function: *const u16,
++    //     file: *const u16,
++    //     line: u32,
++    //     reserved: usize,
++    // );
++    fn _invalid_parameter_noinfo_noreturn() -> !;
++    fn _invoke_watson() -> !;
++}
++
++type _invalid_parameter_handler = unsafe extern "C" fn(
++    expression: *const u16,
++    function: *const u16,
++    file: *const u16,
++    line: u32,
++    _reserved: usize,
++);
++type _purecall_handler = unsafe extern "C" fn();
++
++pub(super) static HANDLER: parking_lot::Mutex<Option<HandlerInner>> =
++    parking_lot::const_mutex(None);
++
++pub(super) struct HandlerInner {
++    pub(super) user_handler: Box<dyn crate::CrashEvent>,
++    /// The previously installed filter before this handler installed its own
++    previous_filter: LPTOP_LEVEL_EXCEPTION_FILTER,
++    /// The previously installed invalid parameter handler
++    previous_iph: Option<_invalid_parameter_handler>,
++    /// The previously installed purecall handler
++    previous_pch: Option<_purecall_handler>,
++    /// The previously installed SIGABRT handler
++    previous_abort_handler: Option<libc::sighandler_t>,
++    /// The handle of our own vectored exception handler
++    veh_handle: Option<VehHandler>,
++}
++
++impl HandlerInner {
++    pub(crate) fn new(user_handler: Box<dyn crate::CrashEvent>) -> Self {
++        // Note that breakpad has flags so the user can choose which error handlers
++        // to install, but for now we just install all of them
++
++        // SAFETY: syscalls
++        unsafe {
++            let previous_filter = SetUnhandledExceptionFilter(Some(handle_exception));
++            let previous_iph = _set_invalid_parameter_handler(Some(handle_invalid_parameter));
++            let previous_pch = _set_purecall_handler(Some(handle_pure_virtual_call));
++            let previous_abort_handler = super::signal::install_abort_handler().ok();
++            let veh_handle = AddVectoredExceptionHandler(1, Some(vectored_handle_exception));
++            let veh_handle = std::ptr::NonNull::new(veh_handle).map(VehHandler);
++
++            Self {
++                user_handler,
++                previous_filter,
++                previous_iph,
++                previous_pch,
++                previous_abort_handler,
++                veh_handle,
++            }
++        }
++    }
++
++    /// Sets the handlers to the previous handlers that were registered when the
++    /// specified handler was attached
++    pub(crate) fn restore_previous_handlers(&mut self) {
++        // SAFETY: syscalls
++        unsafe {
++            if let Some(ah) = self.previous_abort_handler {
++                super::signal::restore_abort_handler(ah);
++            }
++            SetUnhandledExceptionFilter(self.previous_filter);
++            _set_invalid_parameter_handler(self.previous_iph);
++            _set_purecall_handler(self.previous_pch);
++            if let Some(handler) = self.veh_handle.take() {
++                RemoveVectoredExceptionHandler(handler.0.as_ptr());
++            }
++        }
++    }
++}
++
++impl Drop for HandlerInner {
++    fn drop(&mut self) {
++        self.restore_previous_handlers();
++    }
++}
++
++pub(super) fn attach(on_crash: Box<dyn crate::CrashEvent>) -> Result<(), Error> {
++    let mut lock = HANDLER.lock();
++
++    if lock.is_some() {
++        return Err(Error::HandlerAlreadyInstalled);
++    }
++
++    *lock = Some(HandlerInner::new(on_crash));
++    Ok(())
++}
++
++pub(super) fn detach() {
++    let mut lock = HANDLER.lock();
++    // The previous handlers are restored on drop
++    lock.take();
++}
++
++pub(super) unsafe fn simulate_exception(exception_code: Option<i32>) -> crate::CrashEventResult {
++    let lock = HANDLER.lock();
++    if let Some(handler) = &*lock {
++        unsafe {
++            // https://github.com/chromium/crashpad/blob/fca8871ca3fb721d3afab370ca790122f9333bfd/util/win/exception_codes.h#L32
++            let exception_code = exception_code.unwrap_or(ExceptionCode::User as i32);
++            let mut exception_record = crash_context::EXCEPTION_RECORD {
++                ExceptionCode: exception_code,
++                ..std::mem::zeroed()
++            };
++            let mut exception_context = std::mem::MaybeUninit::zeroed();
++
++            crash_context::capture_context(exception_context.as_mut_ptr());
++
++            let mut exception_context = exception_context.assume_init();
++
++            let exception_ptrs = crash_context::EXCEPTION_POINTERS {
++                ExceptionRecord: &mut exception_record,
++                ContextRecord: &mut exception_context,
++            };
++
++            let cc = crash_context::CrashContext {
++                exception_pointers: (&exception_ptrs as *const crash_context::EXCEPTION_POINTERS)
++                    .cast(),
++                process_id: std::process::id(),
++                thread_id: GetCurrentThreadId(),
++                exception_code,
++            };
++
++            handler.user_handler.on_crash(&cc)
++        }
++    } else {
++        crate::CrashEventResult::Handled(false)
++    }
++}
++
++/// While handling any exceptions, especially when calling user code, we restore
++/// and previously registered handlers
++/// Note this keeps the `HANDLER` lock for the duration of the scope
++struct AutoHandler<'scope> {
++    lock: parking_lot::MutexGuard<'scope, Option<HandlerInner>>,
++}
++
++impl<'scope> AutoHandler<'scope> {
++    fn new(mut lock: parking_lot::MutexGuard<'scope, Option<HandlerInner>>) -> Option<Self> {
++        if let Some(hi) = &mut *lock {
++            // In case another exception occurs while this handler is doing its thing,
++            // it should be delivered to the previous filter.
++            hi.restore_previous_handlers();
++        }
++
++        if lock.is_some() {
++            Some(Self { lock })
++        } else {
++            None
++        }
++    }
++}
++
++/// Sets the handlers back to our internal ones
++fn set_handlers() {
++    unsafe {
++        SetUnhandledExceptionFilter(Some(handle_exception));
++        _set_invalid_parameter_handler(Some(handle_invalid_parameter));
++        _set_purecall_handler(Some(handle_pure_virtual_call));
++    }
++}
++
++impl std::ops::Deref for AutoHandler<'_> {
++    type Target = HandlerInner;
++
++    fn deref(&self) -> &Self::Target {
++        self.lock.as_ref().unwrap()
++    }
++}
++
++impl Drop for AutoHandler<'_> {
++    fn drop(&mut self) {
++        // Restore our handlers
++        set_handlers();
++    }
++}
++
++/// The handler is not entered, and the OS continues searching for an exception handler.
++const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
++/// Enter the exception handler.
++pub(super) const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
++
++use crate::CrashEventResult;
++
++/// Called on the exception thread when an unhandled exception occurs.
++/// Signals the exception handler thread to handle the exception.
++pub(super) unsafe extern "system" fn handle_exception(
++    except_info: *const crash_context::EXCEPTION_POINTERS,
++) -> i32 {
++    let _jump = unsafe {
++        let lock = HANDLER.lock();
++        if let Some(current_handler) = AutoHandler::new(lock) {
++            let code = (*(*except_info).ExceptionRecord).ExceptionCode;
++
++            match current_handler.user_handler.on_crash(&crate::CrashContext {
++                exception_pointers: except_info.cast(),
++                process_id: std::process::id(),
++                thread_id: GetCurrentThreadId(),
++                exception_code: code as _,
++            }) {
++                CrashEventResult::Handled(true) => {
++                    // The handler fully handled the exception.  Returning
++                    // EXCEPTION_EXECUTE_HANDLER indicates this to the system, and usually
++                    // results in the application being terminated.
++                    //
++                    // Note: If the application was launched from within the Cygwin
++                    // environment, returning EXCEPTION_EXECUTE_HANDLER seems to cause the
++                    // application to be restarted.
++                    return EXCEPTION_EXECUTE_HANDLER;
++                }
++                CrashEventResult::Handled(false) => {
++                    // There was an exception, it was a breakpoint or something else ignored
++                    // above, or it was passed to the handler, which decided not to handle it.
++                    // Give the previous handler a chance to do something with the exception.
++                    // If there is no previous handler, return EXCEPTION_CONTINUE_SEARCH,
++                    // which will allow a debugger or native "crashed" dialog to handle the
++                    // exception.
++                    return if let Some(previous) = current_handler.previous_filter {
++                        previous(except_info)
++                    } else {
++                        EXCEPTION_CONTINUE_SEARCH
++                    };
++                }
++                #[cfg(target_arch = "x86_64")]
++                CrashEventResult::Jump { jmp_buf, value } => (jmp_buf, value),
++            }
++        } else {
++            return EXCEPTION_CONTINUE_SEARCH;
++        }
++    };
++
++    #[cfg(target_arch = "x86_64")]
++    unsafe {
++        super::jmp::longjmp(_jump.0, _jump.1)
++    };
++}
++
++const STATUS_HEAP_CORRUPTION: u32 = 0xc0000374;
++
++/// Called on the exception thread when an exception occurs.
++/// Gets to act before other exception handlers.
++pub(super) unsafe extern "system" fn vectored_handle_exception(
++    except_info: *const crash_context::EXCEPTION_POINTERS,
++) -> i32 {
++    unsafe {
++        let exception_code = (*(*except_info).ExceptionRecord).ExceptionCode as u32;
++        if exception_code == STATUS_HEAP_CORRUPTION {
++            handle_exception(except_info)
++        } else {
++            EXCEPTION_CONTINUE_SEARCH
++        }
++    }
++}
++
++/// Handler for invalid parameters to CRT functions, this is not an exception so
++/// the context (shouldn't be) isn't compromised
++///
++/// As noted [here](https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/set-invalid-parameter-handler-set-thread-local-invalid-parameter-handler?view=msvc-170#remarks)
++/// the parameters to this function are useless when not linked against the debug
++/// CRT, and rust std itself is only ever linked aginst the [non-debug CRT](https://github.com/rust-lang/rust/issues/39016)
++/// and you can't really link both the regular and debug CRT in the same application
++/// as that results in sadness, so this function just ignores the parameters,
++/// unlike the original Breakpad code.
++#[unsafe(no_mangle)]
++unsafe extern "C" fn handle_invalid_parameter(
++    expression: *const u16,
++    function: *const u16,
++    file: *const u16,
++    line: u32,
++    reserved: usize,
++) {
++    let _jump = unsafe {
++        let lock = HANDLER.lock();
++        if let Some(current_handler) = AutoHandler::new(lock) {
++            // Make up an exception record for the current thread and CPU context
++            // to make it possible for the crash processor to classify these
++            // as do regular crashes, and to make it humane for developers to
++            // analyze them.
++            let exception_code = ExceptionCode::InvalidParameter as i32;
++            let mut exception_record = crash_context::EXCEPTION_RECORD {
++                ExceptionCode: exception_code,
++                ..std::mem::zeroed()
++            };
++            let mut exception_context = std::mem::MaybeUninit::zeroed();
++
++            crash_context::capture_context(exception_context.as_mut_ptr());
++
++            let mut exception_context = exception_context.assume_init();
++
++            let exception_ptrs = crash_context::EXCEPTION_POINTERS {
++                ExceptionRecord: &mut exception_record,
++                ContextRecord: &mut exception_context,
++            };
++
++            match current_handler.user_handler.on_crash(&crate::CrashContext {
++                exception_pointers: (&exception_ptrs as *const crash_context::EXCEPTION_POINTERS)
++                    .cast(),
++                process_id: std::process::id(),
++                thread_id: GetCurrentThreadId(),
++                exception_code,
++            }) {
++                CrashEventResult::Handled(true) => return,
++                CrashEventResult::Handled(false) => {
++                    if let Some(prev_iph) = current_handler.previous_iph {
++                        prev_iph(expression, function, file, line, reserved);
++                    } else {
++                        // If there's no previous handler, pass the exception back in to the
++                        // invalid parameter handler's core.  That's the routine that called this
++                        // function, but now, since this function is no longer registered (and in
++                        // fact, no function at all is registered), this will result in the
++                        // default code path being taken: _CRT_DEBUGGER_HOOK and _invoke_watson.
++                        // Use _invalid_parameter where it exists (in _DEBUG builds) as it passes
++                        // more information through.  In non-debug builds, it is not available,
++                        // so fall back to using _invalid_parameter_noinfo.  See invarg.c in the
++                        // CRT source.
++
++                        // _invalid_parameter is only available in the debug CRT
++                        _invoke_watson();
++                        // if expression.is_null() && function.is_null() && file.is_null() {
++                        //     _invalid_parameter_noinfo();
++                        // } else {
++                        //     _invalid_parameter(expression, function, file, line, reserved);
++                        // }
++                    }
++
++                    // The handler either took care of the invalid parameter problem itself,
++                    // or passed it on to another handler.  "Swallow" it by exiting, paralleling
++                    // the behavior of "swallowing" exceptions.
++                    std::process::exit(0);
++                }
++                #[cfg(target_arch = "x86_64")]
++                CrashEventResult::Jump { jmp_buf, value } => (jmp_buf, value),
++            }
++        } else {
++            _invoke_watson();
++        }
++    };
++
++    #[cfg(target_arch = "x86_64")]
++    unsafe {
++        super::jmp::longjmp(_jump.0, _jump.1)
++    };
++}
++
++/// Handler for pure virtual function calls, this is not an exception so the
++/// context (shouldn't be) isn't compromised
++#[unsafe(no_mangle)]
++unsafe extern "C" fn handle_pure_virtual_call() {
++    let _jump = unsafe {
++        let lock = HANDLER.lock();
++        if let Some(current_handler) = AutoHandler::new(lock) {
++            // Make up an exception record for the current thread and CPU context
++            // to make it possible for the crash processor to classify these
++            // as do regular crashes, and to make it humane for developers to
++            // analyze them.
++            let exception_code = ExceptionCode::Purecall as i32;
++            let mut exception_record = crash_context::EXCEPTION_RECORD {
++                ExceptionCode: exception_code,
++                ..std::mem::zeroed()
++            };
++            let mut exception_context = std::mem::MaybeUninit::zeroed();
++
++            crash_context::capture_context(exception_context.as_mut_ptr());
++
++            let mut exception_context = exception_context.assume_init();
++
++            let exception_ptrs = crash_context::EXCEPTION_POINTERS {
++                ExceptionRecord: &mut exception_record,
++                ContextRecord: &mut exception_context,
++            };
++
++            match current_handler.user_handler.on_crash(&crate::CrashContext {
++                exception_pointers: (&exception_ptrs as *const crash_context::EXCEPTION_POINTERS)
++                    .cast(),
++                process_id: std::process::id(),
++                thread_id: GetCurrentThreadId(),
++                exception_code,
++            }) {
++                CrashEventResult::Handled(true) => {
++                    // The handler either took care of the invalid parameter problem itself,
++                    // or passed it on to another handler. "Swallow" it by exiting, paralleling
++                    // the behavior of "swallowing" exceptions.
++                    std::process::exit(0);
++                }
++                CrashEventResult::Handled(false) => {
++                    if let Some(pch) = current_handler.previous_pch {
++                        // The handler didn't fully handle the exception.  Give it to the
++                        // previous purecall handler.
++                        pch();
++                    }
++
++                    // If there's no previous handler, return and let _purecall handle it.
++                    // This will just throw up an assertion dialog.
++                    return;
++                }
++                #[cfg(target_arch = "x86_64")]
++                CrashEventResult::Jump { jmp_buf, value } => (jmp_buf, value),
++            }
++        } else {
++            return;
++        }
++    };
++
++    #[cfg(target_arch = "x86_64")]
++    unsafe {
++        super::jmp::longjmp(_jump.0, _jump.1)
++    };
++}
+diff --git a/vendor/crash-handler/tests/abort.rs b/vendor/crash-handler/tests/abort.rs
+new file mode 100644
+index 0000000..7b93fcb
+--- /dev/null
++++ b/vendor/crash-handler/tests/abort.rs
+@@ -0,0 +1,6 @@
++mod shared;
++
++#[test]
++fn handles_abort() {
++    shared::handles_crash(shared::SadnessFlavor::Abort);
++}
+diff --git a/vendor/crash-handler/tests/bus.rs b/vendor/crash-handler/tests/bus.rs
+new file mode 100644
+index 0000000..495fbf8
+--- /dev/null
++++ b/vendor/crash-handler/tests/bus.rs
+@@ -0,0 +1,8 @@
++#![cfg(unix)]
++
++mod shared;
++
++#[test]
++fn handles_bus() {
++    shared::handles_crash(shared::SadnessFlavor::Bus);
++}
+diff --git a/vendor/crash-handler/tests/fpe.rs b/vendor/crash-handler/tests/fpe.rs
+new file mode 100644
+index 0000000..78dc32f
+--- /dev/null
++++ b/vendor/crash-handler/tests/fpe.rs
+@@ -0,0 +1,11 @@
++//! This is ignored on mac when targeting arm as the way sadness-generator does
++//! this on that arch is to explicitly raise SIGFPE, however we don't actually
++//! handle that signal and rely on the exception port instead
++#![cfg(not(all(target_os = "macos", any(target_arch = "arm", target_arch = "aarch64"))))]
++
++mod shared;
++
++#[test]
++fn handles_fpe() {
++    shared::handles_crash(shared::SadnessFlavor::DivideByZero);
++}
+diff --git a/vendor/crash-handler/tests/guard.rs b/vendor/crash-handler/tests/guard.rs
+new file mode 100644
+index 0000000..ac5102d
+--- /dev/null
++++ b/vendor/crash-handler/tests/guard.rs
+@@ -0,0 +1,8 @@
++#![cfg(target_os = "macos")]
++
++mod shared;
++
++#[test]
++fn handles_guard() {
++    shared::handles_crash(shared::SadnessFlavor::Guard);
++}
+diff --git a/vendor/crash-handler/tests/heap_corruption.rs b/vendor/crash-handler/tests/heap_corruption.rs
+new file mode 100644
+index 0000000..d456cfe
+--- /dev/null
++++ b/vendor/crash-handler/tests/heap_corruption.rs
+@@ -0,0 +1,8 @@
++#![cfg(windows)]
++
++mod shared;
++
++#[test]
++fn handles_heap_corruption() {
++    shared::handles_crash(shared::SadnessFlavor::HeapCorruption);
++}
+diff --git a/vendor/crash-handler/tests/illegal.rs b/vendor/crash-handler/tests/illegal.rs
+new file mode 100644
+index 0000000..9178551
+--- /dev/null
++++ b/vendor/crash-handler/tests/illegal.rs
+@@ -0,0 +1,6 @@
++mod shared;
++
++#[test]
++fn handles_illegal_instruction() {
++    shared::handles_crash(shared::SadnessFlavor::Illegal);
++}
+diff --git a/vendor/crash-handler/tests/invalid_param.rs b/vendor/crash-handler/tests/invalid_param.rs
+new file mode 100644
+index 0000000..67839b2
+--- /dev/null
++++ b/vendor/crash-handler/tests/invalid_param.rs
+@@ -0,0 +1,8 @@
++#![cfg(windows)]
++
++mod shared;
++
++#[test]
++fn handles_invalid_param() {
++    shared::handles_crash(shared::SadnessFlavor::InvalidParameter);
++}
+diff --git a/vendor/crash-handler/tests/purecall.rs b/vendor/crash-handler/tests/purecall.rs
+new file mode 100644
+index 0000000..7556b92
+--- /dev/null
++++ b/vendor/crash-handler/tests/purecall.rs
+@@ -0,0 +1,8 @@
++#![cfg(windows)]
++
++mod shared;
++
++#[test]
++fn handles_purecall() {
++    shared::handles_crash(shared::SadnessFlavor::Purecall);
++}
+diff --git a/vendor/crash-handler/tests/segv.rs b/vendor/crash-handler/tests/segv.rs
+new file mode 100644
+index 0000000..f8152cf
+--- /dev/null
++++ b/vendor/crash-handler/tests/segv.rs
+@@ -0,0 +1,6 @@
++mod shared;
++
++#[test]
++fn handles_segv() {
++    shared::handles_crash(shared::SadnessFlavor::Segfault);
++}
+diff --git a/vendor/crash-handler/tests/shared.rs b/vendor/crash-handler/tests/shared.rs
+new file mode 100644
+index 0000000..84bda11
+--- /dev/null
++++ b/vendor/crash-handler/tests/shared.rs
+@@ -0,0 +1,110 @@
++#![allow(unsafe_code)]
++
++use crash_handler as ch;
++
++pub use sadness_generator::SadnessFlavor;
++
++pub fn handles_crash(flavor: SadnessFlavor) {
++    let mut _handler = None;
++
++    unsafe {
++        _handler = Some(
++            ch::CrashHandler::attach(ch::make_crash_event(move |cc: &ch::CrashContext| {
++                cfg_if::cfg_if! {
++                    if #[cfg(any(target_os = "linux", target_os = "android"))] {
++                        use ch::Signal;
++
++                        assert_eq!(
++                            cc.siginfo.ssi_signo,
++                            match flavor {
++                                SadnessFlavor::Abort => Signal::Abort,
++                                SadnessFlavor::Bus => Signal::Bus,
++                                SadnessFlavor::DivideByZero => Signal::Fpe,
++                                SadnessFlavor::Illegal => Signal::Illegal,
++                                SadnessFlavor::Segfault | SadnessFlavor::StackOverflow { .. } => {
++                                    Signal::Segv
++                                }
++                                SadnessFlavor::Trap => Signal::Trap,
++                            } as u32,
++                        );
++
++                        //assert_eq!(cc.tid, tid);
++
++                        // At least on linux these...aren't set. Which is weird
++                        //assert_eq!(cc.siginfo.ssi_pid, std::process::id());
++                        //assert_eq!(cc.siginfo.ssi_tid, tid as u32);
++                    } else if #[cfg(target_os = "macos")] {
++                        use ch::ExceptionType;
++
++                        let exc = cc.exception.expect("we should have an exception");
++
++                        let expected = match flavor {
++                            SadnessFlavor::Abort => {
++                                assert_eq!(exc.code, 0x10003); // EXC_SOFT_SIGNAL
++                                assert_eq!(exc.subcode.unwrap(), libc::SIGABRT as _);
++
++                                ExceptionType::Software
++                            }
++                            SadnessFlavor::Bus
++                            | SadnessFlavor::Segfault
++                            | SadnessFlavor::StackOverflow { .. } => {
++                                if flavor == SadnessFlavor::Segfault {
++                                    // For EXC_BAD_ACCESS exceptions, the subcode will be the
++                                    // bad address we tried to access
++                                    assert_eq!(cc.exception.unwrap().subcode.unwrap(), sadness_generator::SEGFAULT_ADDRESS as _);
++                                }
++
++                                ExceptionType::BadAccess
++                            },
++                            SadnessFlavor::DivideByZero => ExceptionType::Arithmetic,
++                            SadnessFlavor::Illegal => ExceptionType::BadInstruction,
++                            SadnessFlavor::Trap => ExceptionType::Breakpoint,
++                            SadnessFlavor::Guard => ExceptionType::Guard,
++                        };
++
++                        assert_eq!(exc.kind, expected as _);
++                    } else if #[cfg(target_os = "windows")] {
++                        use ch::ExceptionCode;
++
++                        let ec = match flavor {
++                            SadnessFlavor::Abort => ExceptionCode::Abort,
++                            SadnessFlavor::DivideByZero => ExceptionCode::Fpe,
++                            SadnessFlavor::Illegal => ExceptionCode::Illegal,
++                            SadnessFlavor::InvalidParameter => ExceptionCode::InvalidParameter,
++                            SadnessFlavor::Purecall => ExceptionCode::Purecall,
++                            SadnessFlavor::Segfault => ExceptionCode::Segv,
++                            SadnessFlavor::StackOverflow { .. }=> ExceptionCode::StackOverflow,
++                            SadnessFlavor::Trap => ExceptionCode::Trap,
++                            SadnessFlavor::HeapCorruption => ExceptionCode::HeapCorruption,
++                        };
++
++                        assert_eq!(
++                            cc.exception_code, ec as i32,
++                            "0x{:x} != 0x{:x}",
++                            cc.exception_code, ec as i32
++                        );
++                    }
++                }
++
++                // Once we've verified we've received the exception we expected,
++                // we exit with a success code to satisfy cargo test. While
++                // we _could_ jump back on non-mac platforms (Mac can't since
++                // exceptions are handled on a different thread) this is a
++                // simpler approach that is consistent across platforms since
++                // we only have 1 test per binary
++                #[allow(clippy::exit)]
++                std::process::exit(0);
++            }))
++            .unwrap(),
++        );
++
++        #[inline(never)]
++        unsafe fn indirect(flavor: SadnessFlavor) {
++            unsafe { flavor.make_sad() };
++        }
++
++        indirect(flavor);
++
++        panic!("this should be impossible");
++    }
++}
+diff --git a/vendor/crash-handler/tests/stack_overflow.rs b/vendor/crash-handler/tests/stack_overflow.rs
+new file mode 100644
+index 0000000..9e902c6
+--- /dev/null
++++ b/vendor/crash-handler/tests/stack_overflow.rs
+@@ -0,0 +1,9 @@
++mod shared;
++
++#[test]
++fn handles_stack_overflow() {
++    shared::handles_crash(shared::SadnessFlavor::StackOverflow {
++        non_rust_thread: false,
++        long_jumps: false,
++    });
++}
+diff --git a/vendor/crash-handler/tests/stack_overflow_pthread.rs b/vendor/crash-handler/tests/stack_overflow_pthread.rs
+new file mode 100644
+index 0000000..4bd29c4
+--- /dev/null
++++ b/vendor/crash-handler/tests/stack_overflow_pthread.rs
+@@ -0,0 +1,16 @@
++//! Not tested for windows/macos since the point of testing this is to ensure
++//! an alternate stack is always installed when anything Rust or otherwise does
++//! a `pthread_create`. Windows doesn't use pthreads, and macos sends stack overflow
++//! exceptions to a completely separate thread from the one that overflowed,
++//! avoiding the problem altogether
++#![cfg(all(unix, not(target_os = "macos")))]
++
++mod shared;
++
++#[test]
++fn handles_stack_overflow_in_c_thread() {
++    shared::handles_crash(shared::SadnessFlavor::StackOverflow {
++        non_rust_thread: true,
++        long_jumps: false,
++    });
++}
+diff --git a/vendor/crash-handler/tests/trap.rs b/vendor/crash-handler/tests/trap.rs
+new file mode 100644
+index 0000000..921533e
+--- /dev/null
++++ b/vendor/crash-handler/tests/trap.rs
+@@ -0,0 +1,6 @@
++mod shared;
++
++#[test]
++fn handles_trap() {
++    shared::handles_crash(shared::SadnessFlavor::Trap);
++}

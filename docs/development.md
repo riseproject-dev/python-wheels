@@ -82,8 +82,10 @@ declared is a bug in the build, not something to document.
 To **upgrade** an existing package, append a `- version: <new version>` line to
 its YAML and open a PR; no workflow change is needed unless the new version
 needs one. The nightly `check_versions.py --declare` run opens one draft PR
-per package (`github-actions/nightly-upgrade/<package>`), so each upgrade is
-built, reviewed and merged on its own.
+per package from `package/<package>`, so each upgrade is built, reviewed and merged on its
+own. Publication uses the same package-specific branch, allowing a nightly
+version declaration and its release metadata to share one PR without mixing
+unrelated packages.
 
 ## Workflow Customizations for riscv64
 
@@ -328,19 +330,19 @@ run:
 3. uploads all selected wheels and any required `gpl-sources.tar` asset;
 4. publishes the release, at which point repository-level immutable releases
    freeze its tag and assets; and
-5. opens or updates the shared documentation pull request, filling in the
-   version's entry with the release tag, wheel filenames, SHA-256 hashes, and
-   `Requires-Python` metadata.
+5. opens or updates the package-specific `package/<package>` pull request,
+   titled `<package>: update packages`, filling in the version's entry with the
+   release tag, wheel filenames, SHA-256 hashes, and `Requires-Python` metadata.
 
 Every `main` run creates a new release; existing releases are never reused or
 modified. Its description links back to the workflow run that produced it.
 Publishing fails if immutable releases are disabled, or if the wheel's version
 is not declared in the package YAML.
 
-Merging the documentation pull request pushes the now-released entry to `main`
-and triggers the workflow once more; with nothing left pending, that run skips
-every job. Until then the version is still pending, so any other push touching
-the workflow or its YAML rebuilds and re-releases it.
+Merging the package pull request pushes the now-released entry to `main` and
+triggers the workflow once more; with nothing left pending, that run skips every
+guarded job. Until then the version is still pending on `main`, so any other
+push touching the workflow or its YAML rebuilds and re-releases it.
 
 The generated `/simple/` package index reads only `docs/packages/*.yaml`. The
 new release does not become discoverable through pip until the generated

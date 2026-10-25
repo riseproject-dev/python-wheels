@@ -63,6 +63,22 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # make_ffi.py's find_good_scan() feeds cffi partial, deliberately-incomplete
+      # subsets of the preprocessed VEX headers and relies on undocumented
+      # pycparser error-recovery behaviour to find a clean split. cffi 2.x's
+      # pycparser 3.x rewrote that internals (c_lexer's brace/scope tracking),
+      # so the scan now dies with "Unmatched '}'" on EVERY arch (reproduced the
+      # same failure with a native x86_64 cpp, not just riscv64 -- AVX_512 is an
+      # unrelated, correct, arch-independent VEX guest-lifting define, not the
+      # bug). pip resolves "cffi>=1.0.3" (pyvex's own floor) to the newest
+      # release in the isolated build env, so this started failing the moment
+      # cffi 2.0/pycparser 3.0 shipped; cffi 1.17.1 + pycparser 2.22 run
+      # find_good_scan() to completion. Pin both below their breaking majors.
+      - name: Pin cffi/pycparser below the majors that break make_ffi.py's partial-cdef scan
+        run: |
+          echo 'cffi<2' >> build-constraints.txt
+          echo 'pycparser<3' >> build-constraints.txt
+
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         env:
@@ -71,7 +87,16 @@ jobs:
           CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           CIBW_BUILD: cp312-${{ matrix.libc }}_riscv64 cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libpyvex.so -w {dest_dir} {wheel}"
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # PIP_BUILD_CONSTRAINT (not PIP_CONSTRAINT) on purpose: it only reaches
+          # the isolated build env pip creates for pyvex's own [build-system]
+          # requires (where cffi/make_ffi.py actually run), not the later test
+          # install. Our registry has no cffi<2 wheel for cp314 (gotcha-574's
+          # musllinux leg builds cffi from sdist too, and cp314 in general only
+          # got cffi wheels from 2.0.0 on) -- PIP_CONSTRAINT would reach that
+          # install too and starve the cp314 test leg of a matching cffi.
+          CIBW_ENVIRONMENT: >-
+            PIP_BUILD_CONSTRAINT=build-constraints.txt
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # cffi and bitarray have riscv64 wheels on our registry for manylinux
           # only, so musllinux builds them from sdist; tibs stays binary-only so
           # bitstring resolves to the same 4.3.1 on both legs.

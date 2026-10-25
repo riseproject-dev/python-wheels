@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` and `test` jobs of
+# https://github.com/biscuit-auth/biscuit-python/blob/0.4.0/.github/workflows/test.yml
+name: Build biscuit-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/biscuit-python.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-biscuit-python.yml'
+      - 'docs/packages/biscuit-python.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-biscuit-python.yml'
+      - 'docs/packages/biscuit-python.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: biscuit-python
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build biscuit-python ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3 0.24.1 caps CPython at 3.13 (cp314/cp314t refuse to configure), and the
+        # forward-compat escape hatch sets Py_LIMITED_API, dropping the chrono conversions.
+        python: ["cp312", "cp313"]
+
+    env:
+      BISCUIT_PYTHON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout biscuit-python ${{ env.BISCUIT_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: biscuit-auth/biscuit-python
+          ref: ${{ env.BISCUIT_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest sphinx
+          CIBW_TEST_SOURCES: biscuit_test.py docs
+          CIBW_TEST_COMMAND: >-
+            python -c "import biscuit_auth.biscuit_auth as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v biscuit_test.py &&
+            python -m sphinx -M doctest docs docs/_build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: biscuit-python-${{ env.BISCUIT_PYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish biscuit-python ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: biscuit-python-${{ matrix.version }}-*-manylinux_riscv64

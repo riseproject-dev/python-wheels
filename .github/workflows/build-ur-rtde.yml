@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `.linux-cibuildwheel` job of
+# https://gitlab.com/sdurobotics/ur_rtde/-/blob/master/ci/gitlab-ci-linux.yml
+name: Build ur-rtde wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ur-rtde.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ur-rtde.yml'
+      - 'docs/packages/ur-rtde.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ur-rtde.yml'
+      - 'docs/packages/ur-rtde.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream stopped pushing tags after v1.6.0, so pin the release commit:
+  # "Release [1.6.5]", whose tree is byte-identical to the 1.6.5 PyPI sdist.
+  # Update it alongside UR_RTDE_VERSION.
+  UR_RTDE_REF: 3ce20df094ca9d629875862b8e3c361c4833f7e1
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ur-rtde
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    name: Build ur-rtde ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      UR_RTDE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ur_rtde ${{ env.UR_RTDE_VERSION }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin https://gitlab.com/sdurobotics/ur_rtde.git
+          git fetch -q --depth 1 origin "$UR_RTDE_REF"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --depth 1
+
+      # Upstream ships no Python tests (its doctest suite needs a URSim
+      # container), so drive DashboardClient's Boost.Asio client against a
+      # fake dashboard server and check the RTDE modules load.
+      - name: Write wheel test
+        run: |
+          cat > riscv64_test_ur_rtde.py <<'EOF'
+          import socket
+          import threading
+
+          import dashboard_client
+          import rtde_control
+          import rtde_io
+          import rtde_receive
+          import script_client
+
+          REPLIES = {
+              "PolyscopeVersion": "URSoftware 5.11.1.108318 (Mar 22 2021)",
+              "robotmode": "Robotmode: IDLE",
+              "get robot model": "UR5",
+              "programState": "STOPPED <unnamed>",
+          }
+
+          srv = socket.socket()
+          srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          srv.bind(("127.0.0.1", 0))
+          srv.listen(1)
+          port = srv.getsockname()[1]
+          seen = []
+
+
+          def serve():
+              conn, _ = srv.accept()
+              with conn, conn.makefile("rw", newline="\n") as f:
+                  f.write("Connected: Universal Robots Dashboard Server\n")
+                  f.flush()
+                  for line in f:
+                      cmd = line.rstrip("\n")
+                      seen.append(cmd)
+                      f.write(REPLIES.get(cmd, "could not understand: '%s'" % cmd) + "\n")
+                      f.flush()
+
+
+          t = threading.Thread(target=serve, daemon=True)
+          t.start()
+
+          for mod, cls in [
+              (rtde_control, "RTDEControlInterface"),
+              (rtde_receive, "RTDEReceiveInterface"),
+              (rtde_io, "RTDEIOInterface"),
+              (script_client, "ScriptClient"),
+              (dashboard_client, "DashboardClient"),
+          ]:
+              assert hasattr(mod, cls), (mod, cls)
+
+          dc = dashboard_client.DashboardClient("127.0.0.1", port)
+          assert not dc.isConnected()
+          dc.connect()
+          assert dc.isConnected()
+          assert dc.polyscopeVersion() == "5.11.1.108318", "version"
+          assert dc.robotmode() == "Robotmode: IDLE"
+          assert dc.getRobotModel() == "UR5"
+          assert dc.programState() == "STOPPED <unnamed>"
+          dc.disconnect()
+          assert not dc.isConnected()
+          assert seen == ["PolyscopeVersion", "robotmode", "get robot model", "programState"], seen
+
+          try:
+              dashboard_client.DashboardClient("127.0.0.1", 1).connect(500)
+          except RuntimeError as e:
+              print("refused as expected:", e)
+          else:
+              raise AssertionError("connect to a closed port succeeded")
+          print("ur_rtde OK")
+          EOF
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's ci/build-boost.sh builds Boost 1.68, which ships no
+          # BoostConfig.cmake; with the image's CMake >= 3.30 the project's own
+          # cmake_policy(SET CMP0167 NEW) then requires one, so use the distro Boost.
+          CIBW_BEFORE_ALL_LINUX: yum install -y boost-devel
+          CIBW_TEST_SOURCES: riscv64_test_ur_rtde.py
+          CIBW_TEST_COMMAND: python riscv64_test_ur_rtde.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ur-rtde-${{ env.UR_RTDE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ur-rtde ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ur-rtde-${{ matrix.version }}-*-manylinux_riscv64

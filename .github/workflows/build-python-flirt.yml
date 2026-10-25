@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build pyflirt wheels` step of
+# https://github.com/williballenthin/lancelot/blob/v0.10.0/.github/workflows/python-wheels.yaml
+# and the `test pyflirt` step of
+# https://github.com/williballenthin/lancelot/blob/v0.10.0/.github/workflows/ci.yml
+name: Build python-flirt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/python-flirt.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-flirt.yml'
+      - 'docs/packages/python-flirt.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-flirt.yml'
+      - 'docs/packages/python-flirt.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: python-flirt
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build python-flirt ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      PYTHON_FLIRT_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout lancelot v${{ env.PYTHON_FLIRT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: williballenthin/lancelot
+          ref: v${{ env.PYTHON_FLIRT_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build pyflirt wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: --release --out dist --interpreter ${{ steps.interp.outputs.value }} --manifest-path=./pyflirt/Cargo.toml
+          rust-toolchain: stable
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        working-directory: ./pyflirt
+        run: |
+          uv pip install python-flirt --no-index --find-links ../dist --force-reinstall
+          uv pip install pytest
+          python -c "import flirt.flirt as m; assert m.__file__.endswith('.so'), m.__file__"
+          python -m pytest -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-flirt-${{ env.PYTHON_FLIRT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-flirt ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: python-flirt-${{ matrix.version }}-*-manylinux_riscv64
