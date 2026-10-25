@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 23 Oct 2026 18:00:00 +0000
+Subject: [PATCH] cmake: force-include <cstdint> for fastText
+
+Upstream-Status: Backport [https://github.com/docling-project/docling-nlp/commit/1cb45b43842055bb1bbde0c325b5946b426550a2]
+
+The fastText fork pinned at 9d5b2a2b uses uint64_t in src/args.cc
+without including <cstdint>. gcc 13+ no longer pulls that header in
+transitively, so the ExternalProject build of fastText fails with
+"'uint64_t' was not declared in this scope" on the gcc 14 shipped by
+the manylinux_2_39 image. Upstream's own 1.0.0 Linux wheels built on
+manylinux2014 (gcc 10), which never hit this.
+
+Upstream fixed it in 1cb45b43 ("chore: move from poetry to uv", #99)
+by force-including <cstdint> through the fastText CMAKE_CXX_FLAGS (and
+separately bumping the fork pin). This backports only the force-include,
+keeping the 1.0.0 fork pin and install layout unchanged.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cmake/extlib_fasttext.cmake | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/cmake/extlib_fasttext.cmake b/cmake/extlib_fasttext.cmake
+index 3fd1653..9633078 100644
+--- a/cmake/extlib_fasttext.cmake
++++ b/cmake/extlib_fasttext.cmake
+@@ -15,6 +15,14 @@ else()
+     set(FASTTEXT_URL https://github.com/PeterStaar-IBM/fastText.git)
+     set(FASTTEXT_TAG 9d5b2a2b364f49ed2707ff3be48a0f1ba6d86022)
+ 
++    # args.cc uses uint64_t without including <cstdint>, which gcc 13+ no
++    # longer pulls in transitively. The spelling is compiler specific.
++    if(MSVC)
++        set(FASTTEXT_EXTRA_CXX_FLAGS "/FIcstdint")
++    else()
++        set(FASTTEXT_EXTRA_CXX_FLAGS "-include cstdint")
++    endif()
++
+     ExternalProject_Add(extlib_fasttext
+ 
+         PREFIX extlib_fasttext
+@@ -29,7 +37,7 @@ else()
+ 
+         CMAKE_ARGS \\
+             -DCMAKE_INSTALL_PREFIX=${EXTERNALS_PREFIX_PATH} \\
+-            -DCMAKE_CXX_FLAGS=${CMAKE_LIB_FLAGS} \\
++            "-DCMAKE_CXX_FLAGS=${CMAKE_LIB_FLAGS} ${FASTTEXT_EXTRA_CXX_FLAGS}" \\
+             -DCMAKE_INSTALL_LIBDIR=${EXTERNALS_PREFIX_PATH}/lib \\
+             -DCMAKE_INSTALL_BINDIR=${EXTERNALS_PREFIX_PATH}/bin \\
+             -DCMAKE_INSTALL_INCLUDEDIR=${EXTERNALS_PREFIX_PATH}/include
