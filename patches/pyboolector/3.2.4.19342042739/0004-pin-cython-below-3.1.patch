@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 25 Oct 2026 00:00:00 +0000
+Subject: [PATCH] pypi/build.sh: pin Cython below 3.1
+
+All three riscv64 legs (cp312/cp313/cp314) built and installed the wheel
+clean, then failed identically in the smoke test with:
+
+  AttributeError: module 'pyboolector' has no attribute 'BTOR_OPT_MODEL_GEN'
+
+build.sh installs `cython` unpinned, so it resolves to whatever is newest
+today (3.3.0 as of this build). `src/pyboolector.pyx` textually
+`include`s a generated `pyboolector_enums.pxd` (via `mkenums.py`) that
+declares each Boolector option set as a *named* `cpdef enum BtorOption:
+... BTOR_OPT_MODEL_GEN, ...`, and the bare `pyboolector.BTOR_OPT_MODEL_GEN`
+spelling (not `pyboolector.BtorOption.BTOR_OPT_MODEL_GEN`) is what every
+example and every piece of real-world pyboolector code uses, including
+this project's own examples/api/python/quickstart.py.
+
+Reproduced natively, independent of riscv64 and of this project's source:
+cythonizing a two-line named `cpdef enum` (`cdef extern from "h.h": cpdef
+enum E: A, B` + `include`d into a .pyx) under Cython 3.0.12 exports `A`/`B`
+straight into the compiled module's `__dict__`; the identical source under
+Cython 3.1.0 does not (only the `E` enum type is importable, so the
+members become reachable as `E.A`/`E.B`). Cythonizing the real
+`pyboolector.pyx` (after `mkenums.py` ran against the real `btortypes.h`,
+same as build.sh) confirms the same boundary: the 3.0.12 output is ~26%
+larger and emits 45 `PyDict_SetItemString` calls against 3.1.0's 7 for
+otherwise-identical source. This is CLAUDE.md gotcha 23 (a floating build
+tool changing codegen semantics for unchanged source), not a port-specific
+bug and not an interpreter-specific one — it explains why cp312, cp313 and
+cp314 all failed the same way.
+
+Pin Cython below the breaking release, matching gotcha 23's shape. No
+`--no-build-isolation` is needed here (unlike the cibuildwheel cases
+gotcha 23 usually covers): build.sh calls `setup.py sdist bdist_wheel`
+directly in the same environment it just `pip install`ed into, so the
+pinned Cython is simply the one `setup.py`'s auto-cythonize step finds.
+
+Upstream-Status: Inappropriate [upstream's own unpinned `pip install cython` floats onto the same break on any architecture once Cython 3.1+ is current]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/pypi/build.sh b/pypi/build.sh
+index 0000000..0000000 100644
+--- a/pypi/build.sh
++++ b/pypi/build.sh
+@@ -58,7 +58,7 @@
+ for py in $PYTHON_VERSIONS; do
+   python=/opt/python/${py}-${py}/bin/python
+   echo "Python: ${python}"
+-  ${python} -m pip install cython wheel setuptools setuptools_scm
++  ${python} -m pip install "cython<3.1" wheel setuptools setuptools_scm
+   cd ${BUILD_DIR}/pyboolector
+   rm -rf src
+   cp -r ${BUILD_DIR}/boolector/src/api/python src
