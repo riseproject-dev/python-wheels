@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/Genesis-Embodied-AI/quadrants/blob/v1.3.3/.github/workflows/manylinux_wheel.yml
+name: Build quadrants wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/quadrants.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-quadrants.yml'
+      - 'docs/packages/quadrants.yaml'
+      - 'patches/quadrants/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-quadrants.yml'
+      - 'docs/packages/quadrants.yaml'
+      - 'patches/quadrants/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 22.1.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: quadrants
+      version: ${{ inputs.version }}
+
+  build_llvm:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build LLVM 22.1.0 for quadrants (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    timeout-minutes: 1440  # full LLVM+clang compile from source
+
+    steps:
+      # quadrants-sdk-builds (download_llvm.py's own release bucket) ships no riscv64 LLVM;
+      # build LLVM+clang 22.1.0 ourselves with only the RISCV target and the components
+      # quadrants's QuadrantsCore.cmake links (Core/ExecutionEngine/OrcJIT/RuntimeDyld/...).
+      # No CUDA/AMDGPU/Vulkan backend exists for riscv64 (patches/quadrants disables them), so
+      # NVPTX/AMDGPU targets are left out too.
+      - name: Build and install LLVM+clang
+        run: |
+          set -euxo pipefail
+          dnf -y install ninja-build lld
+          curl -fsSL -o llvm-project.src.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz"
+          tar xf llvm-project.src.tar.xz
+          cmake -S "llvm-project-${LLVM_VERSION}.src/llvm" -B build -G Ninja \
+            -DLLVM_ENABLE_PROJECTS=clang \
+            -DLLVM_TARGETS_TO_BUILD=RISCV \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_USE_LINKER=lld \
+            -DLLVM_PARALLEL_LINK_JOBS=1 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$(pwd)/llvm-install"
+          cmake --build build --target install -j"$(nproc)"
+          tar czf llvm-install.tar.gz llvm-install
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quadrants-llvm-${{ env.LLVM_VERSION }}-riscv64
+          path: llvm-install.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build_wheels:
+    needs: [setup, build_llvm]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp310", "cp311", "cp312", "cp313"]
+    name: Build quadrants ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    timeout-minutes: 360
+
+    env:
+      QUADRANTS_VERSION: ${{ matrix.version }}
+      PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+    steps:
+      - name: Checkout quadrants v${{ env.QUADRANTS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Genesis-Embodied-AI/quadrants
+          ref: v${{ env.QUADRANTS_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch quadrants source
+        run: git apply python-wheels/patches/quadrants/${{ env.QUADRANTS_VERSION }}/*.patch
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: quadrants-llvm-${{ env.LLVM_VERSION }}-riscv64
+
+      - name: Unpack LLVM, select the interpreter
+        run: |
+          tar xzf llvm-install.tar.gz
+          echo "LLVM_DIR=$(pwd)/llvm-install" >> "$GITHUB_ENV"
+          echo "/opt/python/${{ matrix.python }}-${{ matrix.python }}/bin" >> "$GITHUB_PATH"
+
+      - name: Build and check wheel
+        run: |
+          bash .github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
+          bash .github/workflows/scripts_new/manylinux_wheel/2_build.sh
+          bash .github/workflows/scripts_new/manylinux_wheel/3_check.sh
+
+      - name: Smoke-test wheel
+        run: |
+          rm -f dist/*.whl
+          cp wheelhouse/*.whl dist/
+          bash .github/workflows/scripts_new/manylinux_wheel/4_install_wheel.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quadrants-${{ matrix.version }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish quadrants ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: quadrants-${{ matrix.version }}-*-manylinux_riscv64
