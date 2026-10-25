@@ -80,11 +80,13 @@ jobs:
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Same as upstream's [tool.cibuildwheel.linux] before-all, minus
-          # epel-release: EPEL carries no riscv64 repo (gotcha 51), and it would
-          # otherwise abort the && chain before libchafa is even cloned.
+          # epel-release (gotcha 51, no riscv64 EPEL repo) and ImageMagick-devel
+          # (EPEL-only package on RHEL/Rocky, so same gap; --without-tools means
+          # libchafa itself never touches it either way, it only backs the two
+          # tests below).
           CIBW_BEFORE_ALL_LINUX: >-
             dnf group install -y 'Development Tools' &&
-            dnf install -y ImageMagick-devel glib2-devel pkgconf-pkg-config &&
+            dnf install -y glib2-devel pkgconf-pkg-config &&
             cd libs &&
             git clone --branch $CHAFA_VERSION https://github.com/hpjansson/chafa libchafa_src &&
             cd libchafa_src &&
@@ -95,6 +97,16 @@ jobs:
             cd ../ &&
             cp libchafa_src/chafa/.libs/*chafa.so linux/
           CIBW_ENVIRONMENT_PASS_LINUX: CHAFA_VERSION
+          # tests/1_aspect_test.py and tests/6_print_rows_test.py import
+          # chafa.loader, which dlopens MagickWand; without ImageMagick-devel
+          # (unavailable on riscv64) they can't collect, so run the rest.
+          CIBW_TEST_COMMAND_LINUX: >-
+            pytest -rP
+            {package}/tests/0_PIL_test.py
+            {package}/tests/2_raw_test.py
+            {package}/tests/3_capabilities_test.py
+            {package}/tests/4_new_similar_test.py
+            {package}/tests/5_passthrough_test.py
         run: |
           set -euo pipefail
           uv pip install --upgrade cibuildwheel
