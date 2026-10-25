@@ -25,20 +25,32 @@ submodules: recursive, so the follow-up `git submodule update` is
 both redundant and pointed at a path that doesn't exist here. Skip
 both on riscv64.
 
-Upstream-Status: Inappropriate [riscv64 has no pyright wheel, and our workflow checks the repo out at a different path than upstream's own CI does]
+cmake is pinned to the exact 3.31.6 release we publish a riscv64
+wheel for (CLAUDE.md gotcha 30). With PIP_EXTRA_INDEX_URL set, pip
+resolves the highest version satisfying a constraint across *both*
+indexes and treats a sdist-only candidate as resolvable -- PyPI's
+cmake ships no riscv64 wheel for any release, so an unpinned
+"cmake<4.0.0" lets pip pick a newer PyPI-only sdist (3.31.10 as of
+this port) over our wheel and build CMake itself from source. That
+source build FATAL_ERRORs configuring its bundled cmcurl ("Could NOT
+find OpenSSL ... Could not find OpenSSL. Install an OpenSSL
+development package"), since the manylinux_riscv64 image carries no
+OpenSSL dev headers.
+
+Upstream-Status: Inappropriate [riscv64 has no pyright wheel, our workflow checks the repo out at a different path than upstream's own CI does, and PyPI's cmake ships no riscv64 wheel for any release]
 
 Signed-off-by: RISE Project CI <ci@riseproject.dev>
 ---
- .../manylinux_wheel/1_prerequisites.sh        | 21 +++++++++++++++----
- 1 file changed, 17 insertions(+), 4 deletions(-)
+ .../manylinux_wheel/1_prerequisites.sh        | 27 +++++++++++++++++----
+ 1 file changed, 23 insertions(+), 4 deletions(-)
 
 diff --git a/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh b/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
-index 03ca845..76157e2 100644
+index 03ca845..eea10bb 100644
 --- a/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
 +++ b/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
-@@ -3,12 +3,25 @@
+@@ -3,12 +3,31 @@
  set -ex
- 
+
  pip install -U pip
 -pip install --group dev
 +if [[ "$(uname -m)" == "riscv64" ]]; then
@@ -46,14 +58,20 @@ index 03ca845..76157e2 100644
 +    # to (it wraps a prebuilt Node binary); install only what `pip wheel --no-build-isolation`
 +    # below actually needs: build.py's own [build-system].requires, plus the cmake/ninja it
 +    # drives them with, plus psutil/requests (qd_build's own non-stdlib imports).
-+    pip install "cmake<4.0.0" ninja "nanobind>=2.0.0,<2.14.0" "scikit-build-core>=0.10" \
++    # Pinned to the exact version we publish a riscv64 wheel for: with PIP_EXTRA_INDEX_URL
++    # pip resolves the highest version across *both* indexes, and PyPI's cmake has no
++    # riscv64 wheel for any release (not even the one we mirror) -- an unpinned "cmake<4.0.0"
++    # lets pip land on a newer PyPI-only sdist (3.31.10 at the time of writing) and build
++    # CMake itself from source, which FATAL_ERRORs configuring its bundled cmcurl because
++    # this image carries no OpenSSL development headers.
++    pip install "cmake==3.31.6" ninja "nanobind>=2.0.0,<2.14.0" "scikit-build-core>=0.10" \
 +        "setuptools_scm>=6.0" "numpy>=2.0.0" psutil requests
 +    yum install -y ccache  # setup_sccache() no-ops on riscv64; CMakeLists.txt's own
 +                           # find_program(ccache) picks this up as the compiler launcher instead.
 +else
 +    pip install --group dev
 +fi
- 
+
  yum install -y git wget
 -# Note: following depends on the name of the repo:
 -git config --global --add safe.directory /__w/quadrants/quadrants
@@ -63,6 +81,6 @@ index 03ca845..76157e2 100644
 +    git config --global --add safe.directory /__w/quadrants/quadrants
 +    git submodule update --init --jobs 2
 +fi
- 
+
  LLVM_DIR=$(python download_llvm.py | tail -n 1)
  export PATH=${LLVM_DIR}/bin:$PATH
