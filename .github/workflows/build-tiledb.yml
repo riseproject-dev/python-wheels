@@ -19,11 +19,13 @@ on:
     paths:
       - '.github/workflows/build-tiledb.yml'
       - 'docs/packages/tiledb.yaml'
+      - 'patches/tiledb/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-tiledb.yml'
       - 'docs/packages/tiledb.yaml'
+      - 'patches/tiledb/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -86,6 +88,12 @@ jobs:
         working-directory: libtiledb-src
         run: sed 's/arm64/riscv64/' ports/triplets/arm64-linux-release.cmake > ports/triplets/riscv64-linux-release.cmake
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
       # S3/Azure/GCS and serialization are off: their vcpkg trees (aws-sdk-cpp,
       # google-cloud-cpp/gRPC, azure-sdk, capnproto, curl) have no riscv64 port testing.
       - name: Build TileDB
@@ -94,7 +102,7 @@ jobs:
         run: |
           docker run --rm -i --network=host \
             -v "$GITHUB_WORKSPACE:/work" -w /work/libtiledb-src \
-            -e TILEDB_PACKAGE_VERSION -e VCPKG_FORCE_SYSTEM_BINARIES=YES -e HOST_IDS="$(id -u):$(id -g)" \
+            -e TILEDB_PACKAGE_VERSION -e TILEDB_VERSION -e VCPKG_FORCE_SYSTEM_BINARIES=YES -e HOST_IDS="$(id -u):$(id -g)" \
             "$MANYLINUX_RISCV64_IMAGE" \
             bash <<'SCRIPT'
           set -eux
@@ -106,6 +114,9 @@ jobs:
           trap dump_logs ERR
           yum install -y ninja-build perl-IPC-Cmd perl-Time-Piece perl-FindBin curl zip unzip tar
           git config --global --add safe.directory '*'
+          # VCPKG_OVERLAY_PORTS: vcpkg's own openssl port has no riscv64 case and falls
+          # back to a 32-bit Configure target that it then also hands
+          # enable-ec_nistp_64_gcc_128 (a 64-bit-only flag) - see the overlay's README.
           cmake -S . -B /tmp/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
@@ -117,7 +128,8 @@ jobs:
             -DTILEDB_SERIALIZATION=OFF \
             -DTILEDB_WEBP=ON \
             -DTILEDB_TESTS=OFF \
-            -DVCPKG_TARGET_TRIPLET=riscv64-linux-release
+            -DVCPKG_TARGET_TRIPLET=riscv64-linux-release \
+            -DVCPKG_OVERLAY_PORTS=/work/python-wheels/patches/tiledb/$TILEDB_VERSION/vcpkg-overlay-ports
           cmake --build /tmp/build -j4 --config Release --target package
           mkdir -p /work/libtiledb-out/licenses
           cp /tmp/build/tiledb-*.tar.gz /work/libtiledb-out/
