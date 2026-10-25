@@ -57,6 +57,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **643** — An upstream test suite that needs a Node.js helper (a mock server via
   `npm ci`/`npm run`) still runs on the riscv64 runner: `actions/setup-node` with
   `mirror: https://unofficial-builds.nodejs.org/download/release` installs a riscv64 Node.
+- **662** — A netCDF `/vsizip/`/`/vsi*` open needs `userfaultfd(2)`, which a fully unconfined
+  seccomp profile and `CAP_SYS_PTRACE` do not restore — that syscall is gated by the host
+  kernel's `vm.unprivileged_userfaultfd` sysctl, not by anything a container flag reaches.
+- **663** — A hang reproducible at one exact parametrize id, with sibling parametrizations
+  passing clean on either side, is a per-input library bug, not corrupted global state from
+  an earlier failure; `--timeout-method=thread` can't interrupt a blocking GIL-held C call.
 
 ---
 
@@ -964,3 +970,50 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
      filter entries whose `files` include `linux-riscv64`. This covers Node used as a
      *test-time tool* only. A package that bundles or downloads a Node binary into the
      wheel is a different question (feasibility gotchas on playwright).
+
+662. **A netCDF `/vsizip/`/`/vsi*`-auto open genuinely needs Linux `userfaultfd(2)`, which
+     neither a fully unconfined seccomp profile nor `CAP_SYS_PTRACE` restores — don't treat
+     gotcha 552's fix as a template for every container-syscall `EPERM` (the pyramids-gis
+     case).** GDAL's netCDF driver opens any `/vsi*` virtual-filesystem path (zip, auto
+     archive detection) through a `userfaultfd`-backed memory-mapping shim.
+     `tests/netcdf/io/test_netcdf_archive.py::TestNetCDFReadFileArchiveLinux::test_open_zipped_nc_via_vsi_auto`
+     and `...::test_open_zipped_nc_via_vsi_zip` failed identically, byte-for-byte, across
+     three separate riscv64 CI runs: the baseline, a round adding
+     `CIBW_CONTAINER_ENGINE: "docker; create_args: --security-opt=seccomp=unconfined"`, and a
+     further round adding `--cap-add=SYS_PTRACE` on top. Gotcha 552's fix (that same
+     capability) worked for a *different* syscall — `pidfd_getfd(2)`, blocked by Docker's
+     *default*, non-unconfined seccomp profile. `userfaultfd(2)` is a different mechanism,
+     gated by the **host kernel's** `vm.unprivileged_userfaultfd` sysctl, checked before a
+     container's own seccomp filter or capability set are ever consulted. No `docker run`
+     flag reachable from an unprivileged cibuildwheel container flips that sysctl — it needs
+     `--privileged` or a host/runner-level `sysctl -w`, both out of a package workflow's
+     reach. **Fix: deselect both tests and revert any seccomp/capability widening added
+     chasing this** once a second round lands the identical failure — the generalizable tell
+     is the syscall itself (the traceback or a `strace` names `userfaultfd`), not the shape
+     of the failure.
+
+663. **A hang reproducible at one exact pytest parametrize id, with sibling parametrizations
+     of the same test — including other same-shaped ones — passing clean on either side of
+     it, is a per-input bug in the library's C code, not corrupted global state left over
+     from an earlier failed test; `--timeout-method=thread` reports `Timeout` without
+     actually freeing the runner (the pyramids-gis case).**
+     `tests/netcdf/samples/test_array_io.py::test_read_array_returns_spatial_array[none__5v__1d2-2d2-3d1__curv]`
+     hung for roughly 800-850s before pytest-timeout's thread watchdog finally fired,
+     identically across CI runs, even though the suite's own `--timeout=60` is far shorter —
+     while many neighboring parametrizations, including other `curv`-suffixed ones, passed
+     normally just before and after it in collection order. That pattern (not "everything
+     after the first failure gets slower or flakier", not "only this grid type across the
+     board") rules out the tempting but wrong theory that the two FAILED tests earlier in the
+     same run (gotcha 662) left GDAL's driver registry or PROJ context corrupted for the rest
+     of the process: state corruption reads as noisy and order-dependent, not reproducibly
+     keyed to one specific data shape (5 variables, dims `1d2-2d2-3d1`, curvilinear grid).
+     **`--timeout-method=thread` can't save you here** — its watcher thread still needs the
+     GIL to act, and a blocking call stuck inside GDAL's curvilinear-grid raster-read path in
+     C never yields it, so the configured timeout is not what actually ends the hang; only
+     the job's own wall clock (`timeout-minutes`) does, burning the full hang's length on
+     every rebuild before the run is even reported as failed. Not yet root-caused at the C
+     level. **Fix: deselect the exact parametrize id** (`--deselect
+     "path::test[none__5v__1d2-2d2-3d1__curv]"`, copied verbatim from what pytest itself
+     reports and quoted for the brackets) rather than widening a marker or `-k` expression
+     that would also drop the passing sibling parametrizations, and rather than leaving it to
+     hang and burn CI minutes on every run.
