@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] use schedule(static) for the dynamic/guided OpenMP loops
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+CI's cp312, cp313 and cp314 legs each segfaulted inside libgomp during
+`pytest --pyargs dipy` (PR #3112): cp312 and cp314 faulted with the C
+stack landing in dipy.libs/libgomp-*.so.1.0.0 -> tractogen's compiled
+extension -> libgomp again, from dipy/conftest.py's doctest runner
+building a StatefulTractogram; cp313 faulted inside nlmeans's compiled
+extension from denoise/tests/test_denoise.py::test_denoise. All three
+show "Fatal Python error: Segmentation fault" with no Python frame at
+fault and the OpenMP runtime on the C stack, matching gotcha 166's
+signature for the runners' libgomp exactly: a fault inside the OpenMP
+runtime, specific to the dynamic/guided work-share schedules, and not
+confined to one function.
+
+`grep -rn "schedule(dynamic\|schedule(guided" --include=*.pyx` finds
+seven loops across four files: dipy/tracking/tractogen.pyx's streamline
+generator (the one that crashed cp312/cp314), dipy/denoise/denspeed.pyx's
+_nlmeans_3d and nlmeans_3d_blockwise (the one that crashed cp313, plus
+two more dynamic loops in the same file), dipy/denoise/shift_twist_convolution.pyx's
+perform_convolution, and dipy/tracking/fbcmeasures.pyx's FBCMeasures.
+Converting all seven to schedule(static) costs load balancing on loop
+bodies whose per-iteration cost varies, not correctness.
+
+Tag it Inappropriate and revert once the runners' toolchain is fixed,
+per gotcha 166.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ dipy/denoise/denspeed.pyx                | 8 ++++----
+ dipy/denoise/shift_twist_convolution.pyx | 2 +-
+ dipy/tracking/fbcmeasures.pyx            | 2 +-
+ dipy/tracking/tractogen.pyx              | 2 +-
+ 4 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/dipy/denoise/denspeed.pyx b/dipy/denoise/denspeed.pyx
+index e2546e0..088182f 100644
+--- a/dipy/denoise/denspeed.pyx
++++ b/dipy/denoise/denspeed.pyx
+@@ -106,7 +106,7 @@ def _nlmeans_3d(double[:, :, ::1] arr, double[:, :, ::1] mask,
+     # move the block
+     with nogil, parallel():
+ 
+-        for i in prange(B, I - B, schedule="dynamic"):
++        for i in prange(B, I - B, schedule="static"):
+             for j in range(B, J - B):
+                 for k in range(B, K - B):
+ 
+@@ -966,7 +966,7 @@ def nlmeans_3d_blockwise(double[:, :, :] image, double[:, :, :] mask, int patch_
+ 
+     # Phase 1: Compute local statistics (means and variances) in parallel
+     with nogil, parallel():
+-        for center_z in prange(img_depth, schedule="dynamic"):
++        for center_z in prange(img_depth, schedule="static"):
+             for center_x in range(img_width):
+                 for center_y in range(img_height):
+                     if mask[center_y, center_x, center_z] > 0:
+@@ -986,7 +986,7 @@ def nlmeans_3d_blockwise(double[:, :, :] image, double[:, :, :] mask, int patch_
+ 
+     if use_sigma_map:
+         with nogil, parallel():
+-            for center_z in prange(0, img_depth, 2, schedule="dynamic"):
++            for center_z in prange(0, img_depth, 2, schedule="static"):
+                 thread_id = threadid()
+                 for center_x in range(0, img_width, 2):
+                     for center_y in range(0, img_height, 2):
+@@ -1015,7 +1015,7 @@ def nlmeans_3d_blockwise(double[:, :, :] image, double[:, :, :] mask, int patch_
+                                               img_height, img_width, img_depth)
+     else:
+         with nogil, parallel():
+-            for center_z in prange(0, img_depth, 2, schedule="dynamic"):
++            for center_z in prange(0, img_depth, 2, schedule="static"):
+                 thread_id = threadid()
+                 for center_x in range(0, img_width, 2):
+                     for center_y in range(0, img_height, 2):
+diff --git a/dipy/denoise/shift_twist_convolution.pyx b/dipy/denoise/shift_twist_convolution.pyx
+index b5eed05..2dcacf2 100644
+--- a/dipy/denoise/shift_twist_convolution.pyx
++++ b/dipy/denoise/shift_twist_convolution.pyx
+@@ -173,7 +173,7 @@ cdef double [:, :, :, ::1] perform_convolution (double [:, :, :, ::1] odfs,
+     with nogil:
+ 
+         # loop over ODFs cx,cy,cz,orient --> y and v
+-        for corient in prange(OR1, schedule='guided'):
++        for corient in prange(OR1, schedule='static'):
+             for cx in range(nx):
+                 for cy in range(ny):
+                     for cz in range(nz):
+diff --git a/dipy/tracking/fbcmeasures.pyx b/dipy/tracking/fbcmeasures.pyx
+index 50bfa34..af6a837 100644
+--- a/dipy/tracking/fbcmeasures.pyx
++++ b/dipy/tracking/fbcmeasures.pyx
+@@ -260,7 +260,7 @@ cdef class FBCMeasures:
+         # compute fiber LFBC measures
+         with nogil:
+ 
+-            for line_id in prange(num_fibers, schedule='guided'):
++            for line_id in prange(num_fibers, schedule='static'):
+                 for point_id in range(streamlines_length[line_id] - 1):
+                     score_mp[line_id] = 0.0
+                     for line_id2 in range(num_fibers):
+diff --git a/dipy/tracking/tractogen.pyx b/dipy/tracking/tractogen.pyx
+index 5777537..426d135 100644
+--- a/dipy/tracking/tractogen.pyx
++++ b/dipy/tracking/tractogen.pyx
+@@ -171,7 +171,7 @@ cdef void generate_tractogram_c(double[:,::1] seed_positions,
+     if nbr_threads <= 0:
+         nbr_threads = 0
+ 
+-    for i in prange(_len, nogil=True, num_threads=nbr_threads, schedule='dynamic', chunksize=64):
++    for i in prange(_len, nogil=True, num_threads=nbr_threads, schedule='static', chunksize=64):
+         stream = <double*> malloc((params.max_nbr_pts * 3 * 2 + 1) * sizeof(double))
+         stream_idx = <int*> malloc(2 * sizeof(int))
+ 
