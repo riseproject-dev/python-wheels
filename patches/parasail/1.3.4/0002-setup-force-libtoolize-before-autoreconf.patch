@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 25 Oct 2026 00:00:00 +0000
+Subject: [PATCH] setup: force libtoolize before autoreconf for riscv64
+
+Upstream-Status: Inappropriate [riscv64 build infra, irrelevant to jeffdaily/parasail-python]
+
+build_parasail() falls back to running a bare autoreconf -fi on the
+downloaded GitHub archive snapshot of jeffdaily/parasail's master
+branch, relying on autoreconf's own detection of configure.ac's
+LT_INIT([win32-dll]) call to invoke libtoolize and seed m4/libtool.m4
+(gitignored, not shipped in the snapshot) before aclocal/automake run.
+
+On the riscv64 manylinux runner that auto-detection does not trigger
+libtoolize: automake still auto-installs the ordinary missing
+build-aux/ files (compile, config.guess, config.sub, install-sh,
+missing, depcomp, test-driver) via --add-missing, but never installs
+build-aux/ltmain.sh or m4/libtool.m4, so aclocal.m4 never gets the
+libtool macros and automake dies on Makefile.am's lib_LTLIBRARIES with
+"Libtool library used but 'LIBTOOL' is undefined".
+
+Run libtoolize --force --copy explicitly before autoreconf so
+m4/libtool.m4 and build-aux/ltmain.sh exist regardless of autoreconf's
+own LT_INIT detection; this is the standard autogen.sh remedy for this
+exact failure and is a no-op (same files, --force just re-copies them)
+on toolchains where autoreconf's detection already works.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index 637214b..c3e4213 100644
+--- a/setup.py
++++ b/setup.py
+@@ -181,6 +181,16 @@ def run_autoreconf(root):
+     if all_good:
+         retcode = -1
+         try:
++            # Force libtoolize to seed m4/libtool.m4 (and friends) before
++            # autoreconf runs: on some toolchains autoreconf's own
++            # auto-detection of LT_INIT fails to invoke libtoolize, so
++            # aclocal never picks up the libtool macros and automake dies
++            # with "Libtool library used but 'LIBTOOL' is undefined".
++            subprocess.Popen([
++                'libtoolize',
++                '--force',
++                '--copy',
++                ], cwd=root).wait()
+             retcode = subprocess.Popen([
+                 'autoreconf',
+                 '-fi',
