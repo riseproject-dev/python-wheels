@@ -20,13 +20,17 @@ mode that makes sense):
    146 already exist, titles are not always the PyPI name (`SGLang`, `LibCST`, `PyNaCl`), and
    duplicates are already a problem (bcrypt has four). Match on a normalised name, case-insensitively,
    and when several match, link the **oldest** — that is what the repo already does (#82, #84, #94).
-3. **Development link**: PR -> issue. A closing keyword in the PR body also works, but for an
-   already-merged PR use the mutation the Development panel uses:
-   `addCloseIssueReferences(input:{issueId:..., pullRequestIds:[...]})`. Read it back via the PR's
-   `closingIssuesReferences`.
-4. **Project**: add the issue to Projects > *Python Wheels* (`PVT_kwDOCRlTBM4BbcwJ`) and set
-   **Status** (`PVTSSF_lADOCRlTBM4BbcwJzhWNMvs`) to *Available in RISE PyPI*
-   (option `47fc9ee4`; the others are *Todo* `f75ad846` and *Available Upstream* `98236657`).
+3. **Development link**: PR -> issue, on the already-merged PR, with the mutation the
+   Development panel uses: `addCloseIssueReferences(input:{issueId:..., pullRequestIds:[...]})`.
+   Read it back via the PR's `closingIssuesReferences`. Never put a closing keyword in the PR
+   body: the issue must stay open, only a deprecation closes it.
+4. **Project**: automatic. Once the package PR is merged and the site deployed, `website.yml`'s
+   `sync-project-status` job (`ci_scripts/sync_project_status.py`) adds the issue to
+   Projects > *Python Wheels* (`PVT_kwDOCRlTBM4BbcwJ`) and sets **Status**
+   (`PVTSSF_lADOCRlTBM4BbcwJzhWNMvs`) to *Available in RISE PyPI* (option `47fc9ee4`; the
+   others are *Todo* `f75ad846` and *Available Upstream* `98236657`). Do not set it by hand
+   before the package is on `/simple/`; `ci_scripts/sync_project_status.py --dry-run` shows
+   what the next run will change.
 
 Needs `project` scope on the gh token (`gh auth refresh -h github.com -s project`) on top of
 `repo`/`workflow`. PR #390 <-> issue #405 is the reference pair to diff a new one against.
