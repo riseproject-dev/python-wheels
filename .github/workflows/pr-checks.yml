@@ -83,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - uses: actions/setup-python@v7
         with:
@@ -92,15 +92,18 @@ jobs:
       - name: Validate Upstream-Status in added/modified patches
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python ci_scripts/check_patch.py "$BASE_SHA" "$HEAD_SHA"
+        # The checkout is the PR merged into its base: diffing the base commit
+        # against it lists exactly what the PR changes, with no history needed.
+        run: |
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          python ci_scripts/check_patch.py "$BASE_SHA" HEAD
 
   check_packages_yaml:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
@@ -109,14 +112,16 @@ jobs:
       - name: Validate changed docs/packages/*.yaml and their build workflows
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          # The checkout is the PR merged into its base: diffing the base commit
+          # against it lists exactly what the PR changes, with no history needed.
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
           ret=0
-          for path in $(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- 'docs/packages/*.yaml'); do
+          for path in $(git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD -- 'docs/packages/*.yaml'); do
             uv run --quiet ci_scripts/pending_versions.py --check "$(basename "$path" .yaml)" || ret=1
           done
-          for path in $(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- '.github/workflows/build-*.yml' '.github/workflows/test-*.yml'); do
+          for path in $(git diff --name-only --diff-filter=ACMR "$BASE_SHA" HEAD -- '.github/workflows/build-*.yml' '.github/workflows/test-*.yml'); do
             package=$(sed -En 's/^[[:space:]]+package:[[:space:]]*([^ #]+).*/\1/p' "$path" | head -n1)
             if [[ -z "$package" ]]; then
               echo "::error file=$path::the setup job must call _setup.yml with a package: input"
