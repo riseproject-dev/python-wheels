@@ -528,6 +528,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       needs no wheel in its own job** — a libgomp probe answers in ten minutes instead of
       queueing behind a multi-hour build.
 
+662. **When gotcha 115's own diagnostic rebuild is what makes the SIGSEGV go away, that *is*
+    the finding — ship it as `SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo`, not as a deeper dig
+    (the robust-laplacian case).** All four interpreter legs crashed identically at
+    `CIBW_TEST_COMMAND` with no Python-level traceback under scikit-build-core's default
+    Release config (`-O3 -DNDEBUG`). The gotcha 115 gdb-backtrace rebuild
+    (`SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo SKBUILD_INSTALL_STRIP=false`, gdb installed via
+    `CIBW_BEFORE_TEST_LINUX`) ran clean — no crash, so no backtrace either, which is itself
+    the signal that the fault is sensitive to the optimisation level (`-O2` vs `-O3`), the
+    classic shape of UB the optimiser is free to miscompile at one level and not the other.
+    - **Don't chase a backtrace that a clean run cannot produce.** Gotcha 168's "never leave
+      the branch in that state" is about the gdb/strip scaffolding, which exists only to read
+      symbols — once the rebuild itself is the fix, strip it back out (`SKBUILD_INSTALL_STRIP`
+      left at its default `true`, `CIBW_BEFORE_TEST_LINUX` and the gdb test wrapper removed,
+      matrix restored) and keep only `SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo` in
+      `CIBW_ENVIRONMENT` as the actual behaviour change, same mechanism as gotcha 46's
+      constrained-arch `-O0`/`-O1` downgrades.
+    - **This is weaker evidence than gotcha 166/167's fully-isolated toolchain bugs** — there
+      is no standalone reproducer, no named faulting function, and no proof the same tree is
+      clean on another architecture at the same optimisation level — so comment the rebuild's
+      reason in the workflow and cite this gotcha rather than asserting a specific bug; a
+      future porter hitting the identical "all legs crash, no traceback" shape on an
+      Eigen/geometry-central-style header-heavy numeric C++ dependency tree should try the
+      same rebuild before spending hours on gotcha 167's fuller isolation ladder.
+
 169. **`astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
     statically what a distro ships as shared — which fails tests that assert on module
     *kind* or bundle system libraries (the pyinstaller case).** The Anatomy section mandates
