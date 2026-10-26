@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 13 Oct 2026 23:45:00 +0200
+Subject: [PATCH 1/2] cmake: build wpiutil's vendored protobuf when
+ USE_SYSTEM_PROTOBUF is OFF
+
+Upstream-Status: To upstream [not yet submitted; python-wheels does not open issues/PRs on third-party repos]
+
+The Gradle build, which produces the wpiutil-cpp Maven artifacts that
+robotpy-native-wpiutil repackages, compiles the vendored
+wpiutil/src/main/native/thirdparty/protobuf sources straight into
+libwpiutil and ships their headers, so the published libwpiutil.so
+exports ~5.8k google::protobuf symbols. The CMake build can only link a
+system libprotobuf instead (WITH_PROTOBUF=ON) or drop protobuf support
+altogether (OFF), so neither produces a library that is ABI-compatible
+with the published headers.
+
+Add a USE_SYSTEM_PROTOBUF option (default ON, keeping today's
+behaviour), mirroring USE_SYSTEM_FMTLIB: when it is OFF, wpiutil
+compiles the vendored protobuf sources and installs their headers
+the way the Gradle build does.
+
+robotpy-native-wpimath builds libwpimath in the same CMake tree, and
+the libwpiutil.so it links against at run time is the one
+robotpy-native-wpiutil ships, so wpiutil has to be configured exactly
+as it is for that package (this is the same patch).
+
+Also make GenResource.cmake join the prefix and function name with an
+underscore, as shared/resources.gradle does, so that the CMake-built
+library exports WPI_GetResource_wpilib_128_png like the published one
+rather than WPIGetResource_wpilib_128_png.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ CMakeLists.txt                  |  3 ++-
+ cmake/scripts/GenResource.cmake |  3 +++
+ wpiutil/CMakeLists.txt          | 16 +++++++++++++++-
+ 3 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fcf78ed..f97f38d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -95,6 +95,7 @@ option(WITH_BENCHMARK "Build the benchmark project" ON)
+ 
+ # Options for using a package manager (e.g., vcpkg) for certain dependencies.
+ option(USE_SYSTEM_FMTLIB "Use system fmtlib" OFF)
++option(USE_SYSTEM_PROTOBUF "Use system protobuf" ON)
+ option(USE_SYSTEM_LIBUV "Use system libuv" OFF)
+ option(USE_SYSTEM_EIGEN "Use system eigen" OFF)
+ 
+@@ -152,7 +153,7 @@ endif()
+ find_package(LIBSSH CONFIG 0.7.1)
+ 
+ set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
+-if(WITH_PROTOBUF)
++if(WITH_PROTOBUF AND USE_SYSTEM_PROTOBUF)
+     set(protobuf_MODULE_COMPATIBLE ON CACHE BOOL "" FORCE)
+     find_package(Protobuf REQUIRED)
+     find_program(PROTOC_COMPILER protoc REQUIRED)
+diff --git a/cmake/scripts/GenResource.cmake b/cmake/scripts/GenResource.cmake
+index ad9ca91..edc4e5d 100644
+--- a/cmake/scripts/GenResource.cmake
++++ b/cmake/scripts/GenResource.cmake
+@@ -4,6 +4,9 @@ string(LENGTH "${fileHex}" fileHexSize)
+ math(EXPR fileSize "${fileHexSize} / 2")
+ 
+ get_filename_component(inputBase ${input} NAME)
++if(NOT prefix STREQUAL "")
++    set(prefix "${prefix}_")
++endif()
+ string(REGEX REPLACE "[^a-zA-Z0-9]" "_" funcName "${inputBase}")
+ set(funcName "GetResource_${funcName}")
+ 
+diff --git a/wpiutil/CMakeLists.txt b/wpiutil/CMakeLists.txt
+index 05359d9..c02eb1b 100644
+--- a/wpiutil/CMakeLists.txt
++++ b/wpiutil/CMakeLists.txt
+@@ -127,6 +127,9 @@ if(NOT WITH_PROTOBUF)
+     list(FILTER wpiutil_native_src EXCLUDE REGEX "/protobuf/")
+     # Don't filter out protobuf cpp file, it only uses nanopb
+     list(APPEND wpiutil_native_src src/main/native/cpp/protobuf/Protobuf.cpp)
++elseif(NOT USE_SYSTEM_PROTOBUF)
++    file(GLOB_RECURSE wpiutil_protobuf_src src/main/native/thirdparty/protobuf/src/*.cpp)
++    list(APPEND wpiutil_native_src ${wpiutil_protobuf_src})
+ endif()
+ file(GLOB_RECURSE wpiutil_unix_src src/main/native/unix/*.cpp)
+ file(GLOB_RECURSE wpiutil_linux_src src/main/native/linux/*.cpp)
+@@ -149,8 +152,19 @@ if(MSVC)
+     target_compile_definitions(wpiutil PRIVATE -D_CRT_SECURE_NO_WARNINGS)
+ endif()
+ wpilib_target_warnings(wpiutil)
+-if(WITH_PROTOBUF)
++if(WITH_PROTOBUF AND USE_SYSTEM_PROTOBUF)
+     target_link_libraries(wpiutil protobuf::libprotobuf Threads::Threads ${CMAKE_DL_LIBS})
++elseif(WITH_PROTOBUF)
++    target_link_libraries(wpiutil Threads::Threads ${CMAKE_DL_LIBS})
++    install(
++        DIRECTORY src/main/native/thirdparty/protobuf/include/
++        DESTINATION "${include_dest}/wpiutil"
++    )
++    target_include_directories(
++        wpiutil
++        PUBLIC
++            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/main/native/thirdparty/protobuf/include>
++    )
+ else()
+     target_link_libraries(wpiutil Threads::Threads ${CMAKE_DL_LIBS})
+     target_compile_definitions(wpiutil PUBLIC NO_PROTOBUF)
+-- 
+2.43.0
+
