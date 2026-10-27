@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 27 Oct 2026 12:45:26 +0000
+Subject: [PATCH] Add a riscv64 context-switch backend to the CPU fiber
+ dispatcher
+
+Upstream-Status: To upstream [no riscv64 runner upstream to regression-test it on]
+
+warp/native/cpu_fiber.cpp (new in 1.18.0) provides the per-thread cooperative
+fibers behind block_dim>1 kernels on CPU. It carries hand-written context-switch
+assembly for x86-64 SysV and AArch64 and the Win32 fibers API, and ends in
+#error for every other architecture, so building warp.so for riscv64 stops at
+
+  cpu_fiber.cpp:230:2: error: #error "wp_fiber: unsupported architecture ..."
+
+Add the riscv64 equivalent of the AArch64 backend. wp_fiber_switch_asm saves the
+LP64D callee-saved set on the outgoing fiber's stack (ra, s0-s11, and fs0-fs11
+plus fcsr when the target has the D extension), stores the new SP in
+from->rsp, loads to->rsp and `ret`s through the restored ra. A fresh fiber's
+stack is seeded with a zeroed 208-byte frame whose ra slot holds
+wp_fiber_entry_trampoline and whose fcsr slot holds the creating thread's
+current value, so the stack pointer is 16-byte aligned on entry to the
+trampoline as the psABI requires. gp and tp are thread-wide and not touched.
+
+No register is reserved for the tile shared-storage pointer on riscv64 (that is
+an AArch64-only x28 convention in tile.h), so the fresh frame needs no special
+handling for it.
+---
+ warp/native/cpu_fiber.cpp | 106 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 105 insertions(+), 1 deletion(-)
+
+diff --git a/warp/native/cpu_fiber.cpp b/warp/native/cpu_fiber.cpp
+index 8f6eef2..8d0a68b 100644
+--- a/warp/native/cpu_fiber.cpp
++++ b/warp/native/cpu_fiber.cpp
+@@ -226,8 +226,102 @@ __asm__(
+ #endif
+ );
+ 
++#elif defined(__riscv) && (__riscv_xlen == 64)
++// =====================================================================
++// POSIX RISC-V 64 backend (Linux riscv64)
++// =====================================================================
++//
++// LP64/LP64D callee-saved set: ra, s0-s11 (12 GPRs), plus fs0-fs11 (12 FP
++// regs) and fcsr when the target has the D extension. 13*8 + 12*8 + 8 = 208
++// bytes of saved state per swap, a multiple of the 16-byte stack alignment.
++// Layout (low -> high offset from saved-frame base):
++//
++//     [  0]  ra   -- freshly-init'd fibers preload this with
++//                   wp_fiber_entry_trampoline (see init_fiber_stack)
++//     [  8]  s0   [ 16]  s1   ...   [ 96]  s11
++//     [104]  fs0  [112]  fs1  ...   [192]  fs11
++//     [200]  fcsr
++//
++// `ret` jumps to ra, which we just reloaded from offset 0.
++#if defined(__riscv_flen) && (__riscv_flen >= 64)
++#define WP_FIBER_RV_FP(...) __VA_ARGS__
++#else
++#define WP_FIBER_RV_FP(...)
++#endif
++__asm__(
++    ".text\n"
++    ".globl wp_fiber_switch_asm\n"
++    ".hidden wp_fiber_switch_asm\n"
++    ".type wp_fiber_switch_asm, @function\n"
++    "wp_fiber_switch_asm:\n"
++    "    addi sp, sp, -208\n"
++    "    sd ra, 0(sp)\n"
++    "    sd s0, 8(sp)\n"
++    "    sd s1, 16(sp)\n"
++    "    sd s2, 24(sp)\n"
++    "    sd s3, 32(sp)\n"
++    "    sd s4, 40(sp)\n"
++    "    sd s5, 48(sp)\n"
++    "    sd s6, 56(sp)\n"
++    "    sd s7, 64(sp)\n"
++    "    sd s8, 72(sp)\n"
++    "    sd s9, 80(sp)\n"
++    "    sd s10, 88(sp)\n"
++    "    sd s11, 96(sp)\n"
++    WP_FIBER_RV_FP(
++    "    fsd fs0, 104(sp)\n"
++    "    fsd fs1, 112(sp)\n"
++    "    fsd fs2, 120(sp)\n"
++    "    fsd fs3, 128(sp)\n"
++    "    fsd fs4, 136(sp)\n"
++    "    fsd fs5, 144(sp)\n"
++    "    fsd fs6, 152(sp)\n"
++    "    fsd fs7, 160(sp)\n"
++    "    fsd fs8, 168(sp)\n"
++    "    fsd fs9, 176(sp)\n"
++    "    fsd fs10, 184(sp)\n"
++    "    fsd fs11, 192(sp)\n"
++    "    frcsr t0\n"
++    "    sd t0, 200(sp)\n")
++    "    sd sp, 0(a0)\n"  // from->rsp = sp (a0 = from; rsp at offset 0)
++    "    ld sp, 0(a1)\n"  // sp = to->rsp (a1 = to)
++    WP_FIBER_RV_FP(
++    "    ld t0, 200(sp)\n"
++    "    fscsr t0\n"
++    "    fld fs11, 192(sp)\n"
++    "    fld fs10, 184(sp)\n"
++    "    fld fs9, 176(sp)\n"
++    "    fld fs8, 168(sp)\n"
++    "    fld fs7, 160(sp)\n"
++    "    fld fs6, 152(sp)\n"
++    "    fld fs5, 144(sp)\n"
++    "    fld fs4, 136(sp)\n"
++    "    fld fs3, 128(sp)\n"
++    "    fld fs2, 120(sp)\n"
++    "    fld fs1, 112(sp)\n"
++    "    fld fs0, 104(sp)\n")
++    "    ld s11, 96(sp)\n"
++    "    ld s10, 88(sp)\n"
++    "    ld s9, 80(sp)\n"
++    "    ld s8, 72(sp)\n"
++    "    ld s7, 64(sp)\n"
++    "    ld s6, 56(sp)\n"
++    "    ld s5, 48(sp)\n"
++    "    ld s4, 40(sp)\n"
++    "    ld s3, 32(sp)\n"
++    "    ld s2, 24(sp)\n"
++    "    ld s1, 16(sp)\n"
++    "    ld s0, 8(sp)\n"
++    "    ld ra, 0(sp)\n"
++    "    addi sp, sp, 208\n"
++    "    ret\n"
++    ".size wp_fiber_switch_asm, .-wp_fiber_switch_asm\n"
++    ".section .note.GNU-stack,\"\",@progbits\n"
++    ".text\n"
++);
++
+ #else
+-#error "wp_fiber: unsupported architecture; supported: POSIX x86-64 SysV, POSIX AArch64, Windows."
++#error "wp_fiber: unsupported architecture; supported: POSIX x86-64 SysV, POSIX AArch64, POSIX RISC-V 64, Windows."
+ #endif
+ 
+ #if !defined(_WIN32)
+@@ -334,6 +428,16 @@ void* init_fiber_stack(void* stack_top, size_t* slots_used)
+     // bind ahead of any tile access or nested Warp call so both fresh and
+     // reused AArch64 fibers receive the current block's arena pointer.
+     *slots_used = 12 + 8;
++#elif defined(__riscv) && (__riscv_xlen == 64)
++    sp -= 208;  // ra + 12 GPRs + 12 FP regs + fcsr
++    memset(sp, 0, 208);
++    *(void**)(sp + 0) = (void*)&wp_fiber_entry_trampoline;  // ra
++#if defined(__riscv_flen) && (__riscv_flen >= 64)
++    uint64_t fcsr;
++    __asm__ volatile("frcsr %0" : "=r"(fcsr));
++    *reinterpret_cast<uint64_t*>(sp + 200) = fcsr;
++#endif
++    *slots_used = 13 + 12;
+ #else
+ #error "wp_fiber: unsupported architecture"
+ #endif
+-- 
+2.43.0
+
