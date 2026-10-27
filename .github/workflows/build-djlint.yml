@@ -79,15 +79,21 @@ jobs:
           CIBW_ENVIRONMENT: >-
             HATCH_BUILD_HOOK_ENABLE_MYPYC=1
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest pytest-xdist
+          # test_third_party_licenses.py (new in 1.46.6) reads mypy's installed license metadata.
+          CIBW_TEST_REQUIRES: pytest pytest-xdist mypy
           # pyproject.toml is what djlint resolves reported paths against.
           # docs/, README.md and src/djlint/rules.yaml (a single data file, not
           # the package directory - avoids shadowing the installed wheel with
           # the uncompiled checkout) back the doc-consistency tests added in
           # 1.45.0 (test_docs.py, test_readme.py, and two tests in
           # test_cli.py) that check the docs' examples against the real
-          # linter/formatter/CLI output.
-          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml docs README.md src/djlint/rules.yaml src/djlint/settings.py
+          # linter/formatter/CLI output. LICENSE-THIRD-PARTY is read from the
+          # working directory by test_mypy_license_is_current (new in 1.47.0);
+          # it is absent from the 1.46.5 tag (present from 1.46.6), and
+          # cibuildwheel errors out on a missing test source, so it is only
+          # listed for the other versions. The non-empty value must sit in the
+          # && branch because an empty string is falsy in `a && '' || b`.
+          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml docs README.md src/djlint/rules.yaml src/djlint/settings.py ${{ matrix.version != '1.46.5' && 'LICENSE-THIRD-PARTY' || '' }}
           # Upstream never tests its wheels; run the suite its CI runs.
           # The import assert catches a silently-uncompiled (pure-Python) wheel.
           #
@@ -118,9 +124,16 @@ jobs:
           # over budget, not a flake. A hard-coded upstream performance
           # assumption this riscv64 runner can't meet, same shape as
           # test_closed_pipe_is_not_a_crash above.
+          #
+          # test_h054_reads_unmatched_closing_tags_in_one_pass (new in 1.47.0)
+          # deselected: it only asserts time.perf_counter() - start < 2 for H054
+          # over 15000 unmatched closing tags (a wall-clock budget, not a
+          # behaviour check; the findings assertion before it holds). Passes on
+          # cp312/cp314 but lands over the 2 s budget on cp313 on this riscv64
+          # runner, same shape as test_lint[blocks] above.
           CIBW_TEST_COMMAND: >-
             python -c "import djlint; assert djlint.__file__.endswith('.so'), djlint.__file__"
-            && python -m pytest tests --deselect tests/test_djlint/test_djlint.py::test_closed_pipe_is_not_a_crash --deselect tests/test_unclosed_template_tags.py::test_lint[blocks]
+            && python -m pytest tests --deselect tests/test_djlint/test_djlint.py::test_closed_pipe_is_not_a_crash --deselect tests/test_unclosed_template_tags.py::test_lint[blocks] --deselect tests/test_linter/test_h054.py::test_h054_reads_unmatched_closing_tags_in_one_pass
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
