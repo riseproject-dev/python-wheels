@@ -31,9 +31,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  OPENMM_BUILD_WHEELS_REF: db996361bca08a147c00f79dd4de8793d721fe34
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -58,6 +55,23 @@ jobs:
       image: quay.io/pypa/manylinux_2_39_riscv64
 
     steps:
+      # openmm-build-wheels has no tags: each release is its "Build X.Y.Z (#N)"
+      # commit, which pins GIT_REVISION to the release tag in
+      # .github/workflows/BuildWheels.yml. Add a line here with each new version
+      # in docs/packages/openmm.yaml; an unknown version fails the build rather
+      # than building with the wrong recipe.
+      - name: Resolve the openmm-build-wheels commit for ${{ env.OPENMM_VERSION }}
+        run: |
+          case "$OPENMM_VERSION" in
+            8.6.0) ref=db996361bca08a147c00f79dd4de8793d721fe34 ;;  # Build 8.6.0 (#48)
+            8.6.1) ref=944f549a9329f57526319ed33977ccb1038c7546 ;;  # Build 8.6.1 (#51)
+            *)
+              echo "::error::no known openmm-build-wheels commit for version '$OPENMM_VERSION'; add it to the case in this step"
+              exit 1
+              ;;
+          esac
+          echo "OPENMM_BUILD_WHEELS_REF=$ref" >> "$GITHUB_ENV"
+
       - name: Checkout openmm ${{ env.OPENMM_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -80,13 +94,36 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
+      - name: Check the sources are openmm ${{ env.OPENMM_VERSION }}
+        run: |
+          set -euo pipefail
+          cmake_var() { sed -n "s/^SET(OPENMM_$1_VERSION \([0-9]*\))\$/\1/p" openmm/CMakeLists.txt; }
+          declared="$(cmake_var MAJOR).$(cmake_var MINOR).$(cmake_var BUILD)"
+          if [ "$declared" != "$OPENMM_VERSION" ]; then
+            echo "::error::openmm/CMakeLists.txt declares version '$declared', not '$OPENMM_VERSION'"
+            exit 1
+          fi
+          # The recipe must be the one that builds this release: its
+          # GIT_REVISION is an abbreviated commit of the openmm release tag.
+          rev="$(sed -n "s/^  GIT_REVISION: '\([0-9a-f]*\)'\$/\1/p" openmm-build-wheels/.github/workflows/BuildWheels.yml)"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/openmm"
+          head="$(git -C openmm rev-parse HEAD)"
+          if [ -z "$rev" ] || [ "${head#"$rev"}" = "$head" ]; then
+            echo "::error::openmm-build-wheels at $OPENMM_BUILD_WHEELS_REF builds revision '$rev', not openmm $OPENMM_VERSION ($head)"
+            exit 1
+          fi
+
       - name: Install dependencies with dnf
         run: dnf -y install doxygen zip opencl-headers ocl-icd
 
       - name: Patch openmm source
         working-directory: openmm
         run: |
-          git apply "$GITHUB_WORKSPACE"/python-wheels/patches/openmm/"$OPENMM_VERSION"/*.patch
+          # A version without a patches directory builds unpatched.
+          patches=("$GITHUB_WORKSPACE"/python-wheels/patches/openmm/"$OPENMM_VERSION"/*.patch)
+          if [ -e "${patches[0]}" ]; then
+            git apply "${patches[@]}"
+          fi
           git apply "$GITHUB_WORKSPACE"/openmm-build-wheels/devtools/patches/library_path.patch
           git apply "$GITHUB_WORKSPACE"/openmm-build-wheels/devtools/patches/cxx11_abi.patch
           git apply "$GITHUB_WORKSPACE"/openmm-build-wheels/devtools/patches/link_args.patch
