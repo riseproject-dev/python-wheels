@@ -30,12 +30,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # Upstream releases without git tags, so pin the release commit: the merge of
-  # #137, which bumps the version to 0.10.1. Update it alongside the
-  # version in docs/packages/blasthttp.yaml.
-  BLASTHTTP_REF: 4387f2bf582bce7cf4f970695da2168d68c3d55a
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -61,12 +55,40 @@ jobs:
       BLASTHTTP_VERSION: ${{ matrix.version }}
 
     steps:
+      # Upstream releases without git tags, so every version is pinned to its
+      # release commit. Add a line here with each new version in
+      # docs/packages/blasthttp.yaml; an unknown version fails the build rather
+      # than building the wrong source.
+      - name: Resolve the blasthttp source for ${{ env.BLASTHTTP_VERSION }}
+        run: |
+          case "$BLASTHTTP_VERSION" in
+            # Merge of #86, whose tree matches the 0.10.0 PyPI sdist.
+            0.10.0) ref=5a10fd55590c4046d54bc7f74824dfa733a7e89d ;;
+            # Merge of #137, which bumps the version to 0.10.1.
+            0.10.1) ref=4387f2bf582bce7cf4f970695da2168d68c3d55a ;;
+            *)
+              echo "::error::no known blasthttp source commit for version '$BLASTHTTP_VERSION'; add it to the case in this step"
+              exit 1
+              ;;
+          esac
+          echo "BLASTHTTP_REF=$ref" >> "$GITHUB_ENV"
+
       - name: Checkout blasthttp ${{ env.BLASTHTTP_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: blacklanternsecurity/blasthttp
           ref: ${{ env.BLASTHTTP_REF }}
           persist-credentials: false
+
+      - name: Check the source version is ${{ env.BLASTHTTP_VERSION }}
+        run: |
+          for f in Cargo.toml pyproject.toml; do
+            declared="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$f" | head -n 1)"
+            if [ "$declared" != "$BLASTHTTP_VERSION" ]; then
+              echo "::error::$f at $BLASTHTTP_REF declares version '$declared', not '$BLASTHTTP_VERSION'; fix the ref for this version"
+              exit 1
+            fi
+          done
 
       - name: Determine target interpreter
         id: interp
