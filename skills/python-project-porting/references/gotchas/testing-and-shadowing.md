@@ -691,7 +691,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       into `{project}` for cibuildwheel to carry into the container (gotcha 7) therefore finds
       `{project}/<pkg>.egg-info`, the in-tree build's leftover, even though cibuildwheel's
       test cwd is a fresh temp dir (the sqlcipher3 case). `cd` doesn't help there. Run it as
-      `python -P {project}/<script>.py` (3.11+, which the default matrix always is): `-P`
+      `python -P {project}/<script>.py` (3.11+; with cp39/cp310 in the matrix use `python -I`): `-P`
       skips that `sys.path[0]` entry, and the script itself still runs.
 
 618. **`--import-mode=importlib` does not immunize a package-nested test suite against

@@ -3678,8 +3678,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       unblock this. **For an archived dependent, resolve the pin to a concrete version before
       writing "revisit once the dep lands"** — otherwise the note promises an unblocking that
       the named work cannot deliver.
-    - **Intersect the pinned dependency window's own *interpreter* coverage with this
-      repo's default matrix; an empty intersection settles the port on its own.** TF
+    - **Intersect the pinned dependency window's own *interpreter* coverage with the
+      matrix the port would build; an empty intersection settles the port on its own.** TF
       2.13.1/2.14.0/2.15.0 ship `cp38`-`cp311` wheels and nothing later, while this repo
       builds cp312/cp313/cp314/cp314t — zero overlap, so no matrix row could be valid even
       with a riscv64 TF 2.15 in hand. This is a cheap PyPI-JSON check (`{f['filename']}`

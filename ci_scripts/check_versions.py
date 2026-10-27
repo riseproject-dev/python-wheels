@@ -22,10 +22,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set
 from packaging import version
+from packaging.specifiers import SpecifierSet
 from pathlib import Path
 import requests
 import yaml
 
+from pending_versions import RISCV64_PYTHONS
 from update_doc import normalize_name, version_blocks
 
 
@@ -36,10 +38,10 @@ PACKAGES_FILE = "ci_scripts/packages.txt"
 DEPRECATED_FILE = "ci_scripts/deprecated.txt"
 REPO = "riseproject-dev/python-wheels"
 
-# Python versions (interpreter tags) a package must have upstream riscv64
-# wheels for before we deprecate our own build. "3.14t" is the free-threaded
+# Python versions riscv64 can build (cp314t -> "3.14t"); an upstream riscv64
+# wheel for any of them deprecates our own build. "3.14t" is the free-threaded
 # build — a distinct ABI from "3.14", so it needs its own wheel.
-TARGET_PYTHON_VERSIONS = ["3.12", "3.13", "3.14", "3.14t"]
+TARGET_PYTHON_VERSIONS = [f"3.{tag[3:]}" for tag in RISCV64_PYTHONS]
 
 
 def read_packages() -> List[str]:
@@ -175,6 +177,44 @@ def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
     return has_wheels
 
 
+def upstream_python_versions(package_info: Dict, target_version: str) -> Optional[List[str]]:
+    """
+    The Python versions ("3.10", "3.14t") upstream builds target_version for,
+    from its wheels on PyPI, or None if PyPI doesn't have that version.
+
+    A cpXY-cpXY or cpXY-cpXYt wheel means that interpreter, and a cpXY-abi3
+    wheel a single cpXY build (it loads on every later CPython, gotcha 11).
+    Without any (sdist-only or pure wheels), requires_python decides over the
+    RISCV64_PYTHONS, leaving out free-threaded builds since nothing says
+    upstream supports them.
+    """
+    files = package_info.get("releases", {}).get(target_version)
+    if not files:
+        return None
+    built = set()
+    for f in files:
+        tags = _parse_wheel_tags(f.get("filename", ""))
+        if not tags:
+            continue
+        for py in tags[0].split("."):
+            if not re.fullmatch(r"cp3\d+", py):
+                continue
+            for abi in tags[1].split("."):
+                if abi in (py, py + "t"):
+                    built.add(abi)
+                elif abi.startswith("abi3"):
+                    built.add(py)
+    if not built:
+        spec = SpecifierSet(next((f["requires_python"] for f in files if f.get("requires_python")), ""))
+        built = {t for t in RISCV64_PYTHONS if not t.endswith("t") and spec.contains(f"3.{t[3:]}")}
+    return sorted((f"3.{t[3:]}" for t in built), key=lambda v: (int(v[2:].rstrip("t")), v.endswith("t")))
+
+
+def python_versions_line(pythons: List[str]) -> str:
+    """Quoted, so YAML can't read '3.10' as the float 3.1."""
+    return "  python-versions: [" + ", ".join(f"'{v}'" for v in pythons) + "]"
+
+
 def find_upstream_issue(package: str) -> Optional[str]:
     """
     Find issue for a package in the wheel_builder's Upstream milestone.
@@ -303,10 +343,11 @@ def get_versions_since(package_info: Dict, declared: Set[str], since: datetime) 
     return sorted(result, key=version.parse)
 
 
-def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
+def declare_versions(yaml_file: Path, new_versions: List[str], package_info: Dict) -> List[str]:
     """
-    Append a bare `- version:` entry for each version not yet listed in the
-    package YAML, and return the versions that were added.
+    Append a `- version:` entry, with the `python-versions` upstream builds it
+    for, for each version not yet listed in the package YAML, and return the
+    versions that were added.
 
     An entry without `tag`/`files` is what the build workflow builds, so this
     is all an upgrade PR has to change.
@@ -319,6 +360,9 @@ def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
     lines = [content.rstrip("\n")]
     for v in added:
         lines.append(yaml.safe_dump([{"version": v}], default_flow_style=False).rstrip("\n"))
+        pythons = upstream_python_versions(package_info, v)
+        if pythons is not None:
+            lines.append(python_versions_line(pythons))
     yaml_file.write_text("\n".join(lines) + "\n")
     return added
 
@@ -370,6 +414,29 @@ def carry_over_patches(
         dirs[new_public] = target.name
         created.append(str(target.relative_to(patches_dir)))
     return created
+
+
+def fill_python_versions(yaml_file: Path, package_info: Dict) -> List[str]:
+    """
+    Add `python-versions` to every entry of the package YAML that lacks it and
+    whose version PyPI has, preserving the rest of the file byte-for-byte, and
+    return the versions that were filled in.
+    """
+    lines = yaml_file.read_text().splitlines()
+    filled = []
+    # Bottom-up so earlier block ranges stay valid after inserts.
+    for start, end in reversed(list(version_blocks(lines))):
+        raw = str(yaml.safe_load("\n".join(lines[start:end]))[0].get("version"))
+        if any(line.startswith("  python-versions:") for line in lines[start:end]):
+            continue
+        pythons = upstream_python_versions(package_info, raw)
+        if pythons is None:
+            continue
+        lines.insert(start + 1, python_versions_line(pythons))
+        filled.append(raw)
+    if filled:
+        yaml_file.write_text("\n".join(lines) + "\n")
+    return filled[::-1]
 
 
 def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
@@ -512,7 +579,7 @@ def check_upgrade(
     if new_versions:
         print(f"[^] {package} can be upgraded: v{registry_version} -> {', '.join(f'v{v}' for v in new_versions)}")
         if declare:
-            added = declare_versions(package_yaml(package), new_versions)
+            added = declare_versions(package_yaml(package), new_versions, pypi_info)
             print(f"    [+] declared {', '.join(f'v{v}' for v in added)} in {package_yaml(package).relative_to(ROOT_DIR)}")
             for created in carry_over_patches(package, added, declared):
                 print(f"    [+] copied the patches of the previous version to patches/{created}")
@@ -758,6 +825,24 @@ def _self_test():
     assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
     assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
 
+    def files(requires_python, *wheels):
+        return [{"filename": f"pkg-1.0-{w}-manylinux_2_28_x86_64.whl", "requires_python": requires_python}
+                for w in wheels] + [{"filename": "pkg-1.0.tar.gz", "requires_python": requires_python}]
+
+    def pythons(*args):
+        return upstream_python_versions({"releases": {"1.0": files(*args)}}, "1.0")
+
+    assert upstream_python_versions({"releases": {}}, "1.0") is None
+    # Upstream's own list, cp313t included; ancient cp37m and pp wheels say nothing.
+    assert pythons(">=3.7", "cp37-cp37m", "pp310-pypy310_pp73", "cp310-cp310", "cp313-cp313",
+                   "cp313-cp313t", "cp315-cp315t") == ["3.10", "3.13", "3.13t", "3.15t"]
+    # Compressed tag sets count; abi3 is one build, pure wheels say nothing.
+    assert pythons(None, "cp313.cp314-cp313") == ["3.13"]
+    assert pythons(None, "cp310-abi3", "cp314-cp314t", "py3-none") == ["3.10", "3.14t"]
+    assert pythons(">=3.12,<3.14", "py3-none") == ["3.12", "3.13"]
+    assert python_versions_line(["3.10", "3.14t"]) == "  python-versions: ['3.10', '3.14t']"
+    assert yaml.safe_load(python_versions_line(["3.10"]).strip()) == {"python-versions": ["3.10"]}
+
     # Per-package PR titles, one PR per package.
     upgrade = {"status": "need_upgrade", "package": "PyYAML", "registry_version": "6.0",
                "new_versions": ["6.0.1", "6.0.2"], "yanked": []}
@@ -804,6 +889,9 @@ def main():
     parser.add_argument("--declare", action="store_true",
                         help="Apply the outcome to the working tree: declare new versions and mark yanked ones in "
                              "docs/packages/<pkg>.yaml, deprecate packages in the YAML, packages.txt and deprecated.txt")
+    parser.add_argument("--python-versions", action="store_true",
+                        help="Only add the python-versions upstream builds for to every entry of "
+                             "docs/packages/<pkg>.yaml lacking it (e.g. a new port's pending version)")
     parser.add_argument("--report", type=Path, metavar="FILE", help="Write a Markdown summary of the whole run")
     parser.add_argument("--report-dir", type=Path, metavar="DIR",
                         help="Write one Markdown PR body per changed package, plus a packages.json manifest, "
@@ -815,6 +903,21 @@ def main():
 
     if args.self_test:
         _self_test()
+        return
+
+    if args.python_versions:
+        if not args.packages:
+            parser.error("--python-versions needs the packages to fill in")
+        for package in args.packages:
+            package_data = load_package_yaml(package)
+            if package_data is None:
+                sys.exit(f"[X] No {package_yaml(package).relative_to(ROOT_DIR)}")
+            pypi_info = get_pypi_package_info(package_data.get("package-name", package))
+            if pypi_info is None:
+                sys.exit(f"[X] Could not get PyPI info for {package}")
+            filled = fill_python_versions(package_yaml(package), pypi_info)
+            print(f"[+] {package}: python-versions added for "
+                  f"{', '.join(f'v{v}' for v in filled) or 'nothing'}")
         return
 
     if args.packages:

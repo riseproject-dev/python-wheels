@@ -173,9 +173,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       parametrisation — 100 of 100 is a gate, a scattered mix is not. That one command
       separates "upstream doesn't support this on riscv64" from "our wheel is broken",
       and it costs nothing next to re-reading tracebacks.
-    - **Deselect per matrix entry, not globally.** Turn `python: [cp312, ...]` into
-      `include:` with a per-entry filter and interpolate it into the test command
-      (`-k "${{ matrix.pytest_k }}"`), so the interpreter that *can* exercise the
+    - **Deselect per matrix entry, not globally.** Derive a per-entry filter from
+      `matrix.python` (`-k "${{ matrix.python != 'cp314' && 'not feature' || '' }}"`; in
+      an unconverted workflow, turn `python: [cp312, ...]` into `include:` entries with a
+      `pytest_k` key) and interpolate it into the test command, so the interpreter that *can* exercise the
       feature keeps testing it — dropping it everywhere would have thrown away 105
       real tests on cp314. `-k ""` is a valid no-op filter, so the unrestricted entry
       needs no second command shape.
