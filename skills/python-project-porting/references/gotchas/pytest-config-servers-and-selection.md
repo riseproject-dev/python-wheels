@@ -1017,3 +1017,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
      reports and quoted for the brackets) rather than widening a marker or `-k` expression
      that would also drop the passing sibling parametrizations, and rather than leaving it to
      hang and burn CI minutes on every run.
+     - **Confirmed a second time, in a sibling test function, same signature.**
+       `test_roundtrip_file.py::test_roundtrip_preserves_variable_set[none__111v__1d96-2d13-3d2__str]`
+       (a netCDF *write* through GDAL's multidim API, not the *read* path the first instance
+       hit) hung identically on two separate interpreter builds (`cp312` and `cp314`) in the
+       same CI run, both times stopping at the exact same parametrize id right after the same
+       preceding test passed — the shape that rules out resource contention under a loaded
+       runner fleet as the explanation: contention would not pick the same one input twice
+       while 10+ neighbors on either side of it, including other large-variable-count cases,
+       pass clean both times. One matching occurrence is a coincidence worth a second look;
+       two, on the same id, across different interpreters, in the same PR, is the pattern —
+       deselect it the same way rather than spending a round chasing "maybe it's just slow".
