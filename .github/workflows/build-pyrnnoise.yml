@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# Based on upstream's own wheel build at this commit:
+# Based on upstream's own wheel build:
 #   https://github.com/pengzhendong/pyrnnoise/blob/a4edc69/.github/workflows/release.yml
 name: Build pyrnnoise wheels (riscv64)
 
@@ -34,10 +34,13 @@ permissions:
 
 env:
   # Upstream cuts releases from a workflow_dispatch that stamps VERSION at
-  # build time (never committed) and tags no commit at all. This is the
-  # commit whose tree (pyrnnoise/pyrnnoise.py, requirements.txt) is
-  # byte-identical to the released 0.4.3 sdist/wheel contents.
-  PYRNNOISE_REF: a4edc697a2f475dcdac14c453d7c06eebbd06b33
+  # build time (never committed) and tags no commit at all. Each entry is the
+  # commit whose pyrnnoise/*.py is byte-identical to the released wheel's.
+  # A new version must be added here, or the checkout guard below fails.
+  PYRNNOISE_REFS: >-
+    {"0.4.3": "a4edc697a2f475dcdac14c453d7c06eebbd06b33",
+     "0.4.4": "56c437f32cfa10136fdf766321d5570d9368d0a6",
+     "0.4.5": "fe603b252ccc7d3bacadb77d6ab766c48acc6fce"}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -62,13 +65,19 @@ jobs:
       PYRNNOISE_VERSION: ${{ matrix.version }}
 
     steps:
-      - name: Checkout pyrnnoise ${{ env.PYRNNOISE_REF }}
+      - name: Checkout pyrnnoise ${{ env.PYRNNOISE_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pengzhendong/pyrnnoise
-          ref: ${{ env.PYRNNOISE_REF }}
+          ref: ${{ fromJSON(env.PYRNNOISE_REFS)[env.PYRNNOISE_VERSION] }}
           submodules: true
           persist-credentials: false
+
+      - name: Check the checkout is the requested version
+        run: |
+          expected='${{ fromJSON(env.PYRNNOISE_REFS)[env.PYRNNOISE_VERSION] }}'
+          test -n "$expected"
+          test "$(git rev-parse HEAD)" = "$expected"
 
       - name: Checkout python-wheels
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -107,7 +116,11 @@ jobs:
           # musllinux_riscv64 wheel on this registry, so musllinux is
           # dropped (same outcome as build-keystone-engine.yml).
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,matplotlib,av,soundfile,soxr
+          # pillow (a matplotlib dependency) has no riscv64 wheel on public
+          # PyPI's newest release and its sdist needs libjpeg headers.
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,matplotlib,av,soundfile,soxr,pillow
           CIBW_TEST_COMMAND: >-
             python -c "import numpy as np;
             from pyrnnoise.rnnoise import create, destroy, process_frame, FRAME_SIZE;
