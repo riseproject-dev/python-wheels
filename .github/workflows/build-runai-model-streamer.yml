@@ -189,6 +189,22 @@ jobs:
             [ -n "$native" ] && ln -sf "$native" "/usr/bin/riscv64-linux-gnu-$tool"
           done
 
+          # cpp/WORKSPACE (0.17.0+) points the @cuda repository at /usr/local/cuda and
+          # device/cuda compiles against include/cuda.h (headers only: libcuda.so is
+          # dlopen()ed at run time and nothing links it). The image has no CUDA toolkit
+          # and NVIDIA ships none for riscv64, so take the arch-independent driver-API
+          # header from the nvidia-cuda-runtime-cu12 wheel. Nothing from it is packaged.
+          /opt/python/cp312-cp312/bin/pip download -q --no-deps --only-binary=:all: \
+            --platform manylinux2014_x86_64 --python-version 3.12 \
+            -d /tmp/cudart nvidia-cuda-runtime-cu12==12.9.79
+          mkdir -p /usr/local/cuda/include
+          /opt/python/cp312-cp312/bin/python - /tmp/cudart/*.whl <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              with open("/usr/local/cuda/include/cuda.h", "wb") as out:
+                  out.write(zf.read("nvidia/cuda_runtime/include/cuda.h"))
+          PY
+
           cd cpp
           bazel build streamer:libstreamer.so --config=riscv64
 
