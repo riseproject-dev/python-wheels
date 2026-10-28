@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] CMakeLists: patch fetched deboost.context for riscv64
+
+deboost.context (fetched via FetchContent) already ships riscv64 assembly
+for its fcontext stack-switching routines
+(asm/{make,jump,ontop}_riscv64_sysv_elf_gas.S), but its own CMakeLists.txt's
+UNIX arch dispatch only branches on `arm`/`aarch64`, then falls through to
+a CMAKE_SIZEOF_VOID_P-based x86_64/i386 choice for everything else. On
+riscv64 this silently selects the x86_64 .S files instead of the riscv64
+ones that are already present but unreachable.
+
+Insert the missing `elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "riscv64")`
+branch into the fetched CMakeLists.txt via FetchContent's PATCH_COMMAND,
+before FetchContent_MakeAvailable() adds it as a subdirectory. The edit is
+done by a small `cmake -P` script rather than an inline `sed` expression:
+with nle's cmake_minimum_required(3.28) (CMP0168 unset) FetchContent
+populates through a generated sub-build project, and re-serializing the
+PATCH_COMMAND into it expands `${...}` and strips quotes and backslashes,
+which mangled an inline sed expression into
+`sed: -e expression #1, char 19: unknown option to 's'`. A script path
+survives that round trip unchanged. The script is idempotent and does
+nothing if deboost.context ever grows its own riscv64 branch.
+
+Upstream-Status: To upstream [not filed yet; the underlying arch-dispatch bug belongs in septag/deboost.context, which this project vendors via FetchContent rather than owning]
+---
+ CMakeLists.txt                      |  6 +++++-
+ cmake/deboost_context_riscv64.cmake | 21 +++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 1 deletion(-)
+ create mode 100644 cmake/deboost_context_riscv64.cmake
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0337a7e..b92b16a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -82,7 +82,11 @@ FetchContent_MakeAvailable(pybind11)
+ FetchContent_Declare(
+   deboost_context
+   GIT_REPOSITORY https://github.com/septag/deboost.context.git
+-  GIT_HASH "259fc4103bad6bb484d5ff426ace56ac557107a4" EXCLUDE_FROM_ALL)
++  GIT_HASH "259fc4103bad6bb484d5ff426ace56ac557107a4" EXCLUDE_FROM_ALL
++  # deboost.context ships riscv64 asm but its CMakeLists.txt's UNIX arch
++  # dispatch has no riscv64 branch; see the script for details.
++  PATCH_COMMAND ${CMAKE_COMMAND} -P
++                ${CMAKE_CURRENT_SOURCE_DIR}/cmake/deboost_context_riscv64.cmake)
+ FetchContent_MakeAvailable(deboost_context)
+
+ add_compile_definitions(
+diff --git a/cmake/deboost_context_riscv64.cmake b/cmake/deboost_context_riscv64.cmake
+new file mode 100644
+index 0000000..b613270
+--- /dev/null
++++ b/cmake/deboost_context_riscv64.cmake
+@@ -0,0 +1,21 @@
++# Run as deboost_context's FetchContent PATCH_COMMAND (`cmake -P`, working
++# directory = the fetched source tree). deboost.context ships riscv64 fcontext
++# assembly (asm/{make,jump,ontop}_riscv64_sysv_elf_gas.S), but the UNIX arch
++# dispatch in its CMakeLists.txt has no riscv64 branch and falls through to the
++# x86_64 files; insert the missing branch. Done from a script file rather than
++# an inline `sed` so that nothing has to survive FetchContent re-serializing the
++# PATCH_COMMAND into its sub-build project (which expands variables and strips
++# quotes and backslashes).
++file(READ CMakeLists.txt _content)
++if(NOT _content MATCHES "riscv64")
++  set(_anchor "    # PC (x86/x64)\n")
++  string(FIND "${_content}" "${_anchor}" _pos)
++  if(_pos EQUAL -1)
++    message(FATAL_ERROR "deboost.context: '# PC (x86/x64)' arch dispatch anchor not found")
++  endif()
++  string(
++    REPLACE "${_anchor}"
++            "    elseif (\${CMAKE_SYSTEM_PROCESSOR} MATCHES \"riscv64\")\n        set(CPU_ARCH \"riscv64\")\n        set(ASM_EXT \"sysv_elf_gas.S\")\n${_anchor}"
++            _content "${_content}")
++  file(WRITE CMakeLists.txt "${_content}")
++endif()

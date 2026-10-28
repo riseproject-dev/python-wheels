@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 7 Sep 2026 18:00:00 +0200
+Subject: [PATCH] relax the exact zlib-compressed-length assertion in test_hist_encode
+
+Upstream-Status: To upstream [not yet submitted; the bug is generic (any manylinux/musllinux image with a newer zlib or zlib-ng trips it, not riscv64-specific), but this session may not open issues/PRs on third-party repos]
+
+test_hist_encode asserts an exact byte length for zlib.compress() output
+of the varint payload pyhdrh produces. That payload is architecture-
+independent (confirmed: identical byte length and content on x86_64,
+aarch64, riscv64 for the same inputs), but zlib's own compressed output
+size is not portable across deflate implementations/versions. The
+manylinux_2_39_riscv64 image (AlmaLinux 10.2) links CPython's zlib
+module against zlib-ng 1.3.1, which compresses 6 of the 8
+ENCODE_ARG_LIST cases to exactly 4 bytes more than the hardcoded
+expected_compressed_length (calibrated against an older zlib, e.g.
+1.2.12); musllinux_1_2_riscv64 (Alpine 3.22, vanilla zlib 1.3.2)
+matches the hardcoded values exactly. Reproduced natively on both
+manylinux_2_39_aarch64 and musllinux_1_2_aarch64 (same distro/zlib
+builds as their riscv64 counterparts, no emulation needed), so this is
+a zlib-build artifact, not a riscv64 or even an architecture bug.
+
+Replace the exact-length assert with a small tolerance (comfortably
+above the observed +4 byte delta, well below what an actual encoding
+regression would produce) and add a decode round-trip check so the
+test still verifies real correctness rather than just being loosened.
+---
+ test/test_hdrhistogram.py | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/test/test_hdrhistogram.py b/test/test_hdrhistogram.py
+index 01ceb2f..dbcd0d4 100644
+--- a/test/test_hdrhistogram.py
++++ b/test/test_hdrhistogram.py
+@@ -433,7 +433,15 @@ def check_hist_encode(word_size,
+         fill_to_index = fill_start_index + (fill_count_percent * histogram.counts_len) // 100
+         fill_hist_counts(histogram, fill_to_index, fill_start_index)
+     b64 = histogram.encode()
+-    assert len(b64) == expected_compressed_length
++    # The zlib-compressed length is a property of the deflate implementation
++    # linked into the interpreter (zlib vs zlib-ng, and version), not of the
++    # varint payload pyhdrh produces, which is architecture-independent. A
++    # small tolerance keeps the check meaningful (it still catches a
++    # corrupted/oversized encode) without pinning it to one zlib build.
++    assert abs(len(b64) - expected_compressed_length) <= 8, (len(b64), expected_compressed_length)
++    decoded = HdrHistogram(LOWEST, WRK2_MAX_LATENCY, digits, word_size=word_size)
++    decoded.decode_and_add(b64)
++    assert decoded.get_total_count() == histogram.get_total_count()
+
+
+ # A list of call arguments to check_hdr_encode
+--
+2.55.0

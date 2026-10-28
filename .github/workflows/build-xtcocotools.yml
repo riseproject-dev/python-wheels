@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-n-publish-linux` job of
+# https://github.com/jin-s13/xtcocoapi/blob/v1.14.3/.github/workflows/publish-to-pypi.yml
+name: Build xtcocotools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/xtcocotools.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-xtcocotools.yml'
+      - 'docs/packages/xtcocotools.yaml'
+      - 'patches/xtcocotools/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-xtcocotools.yml'
+      - 'docs/packages/xtcocotools.yaml'
+      - 'patches/xtcocotools/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: xtcocotools
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build xtcocotools ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      XTCOCOTOOLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout xtcocoapi ${{ env.XTCOCOTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jin-s13/xtcocoapi
+          ref: v${{ env.XTCOCOTOOLS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch xtcocoapi source
+        run: git apply python-wheels/patches/xtcocotools/${{ env.XTCOCOTOOLS_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,matplotlib,contourpy,kiwisolver,pillow
+          # setup.py has no build-system table and imports numpy at top level;
+          # upstream installs requirements.txt into the build env first.
+          CIBW_BEFORE_BUILD: pip install -r {project}/requirements.txt wheel
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # Upstream has no test suite; its demos are the only runnable checks.
+          CIBW_TEST_COMMAND: >-
+            cd {project}/demos &&
+            python demo_coco.py &&
+            python demo_coco_wholebody.py &&
+            python demo_crowdpose.py &&
+            python -c "import numpy as np; from xtcocotools import mask; m = np.asfortranarray(np.tri(8, dtype=np.uint8)[:, :, None]); assert (mask.decode(mask.encode(m)) == m).all(); r = mask.encode(m); assert mask.area(r)[0] == 36; assert (mask.toBbox(r) == [[0, 0, 8, 8]]).all(); assert mask.iou(r, r, [0])[0, 0] == 1"
+
+      - name: Verify the wheel ships the compiled extension and licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("xtcocotools/_mask.") and n.endswith(".so") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(sys.argv[1], "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: xtcocotools-${{ env.XTCOCOTOOLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish xtcocotools ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: xtcocotools-${{ matrix.version }}-*-manylinux_riscv64

@@ -1418,6 +1418,8 @@ The porting gotchas (559 of them) live in [`references/gotchas/`](gotchas/), spl
 - **166** — The riscv64 runners' libgomp faults on the `dynamic` and `guided` OpenMP
 - **167** — A riscv64-only intermittent SIGSEGV: climb the control ladder before you debug
 - **168** — Running a diagnostic on the riscv64 runner: drive it from `CIBW_TEST_COMMAND`, and
+- **662** — When gotcha 115's own diagnostic rebuild is what makes the SIGSEGV go away, that
+  *is* the finding — ship it as `SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo`, not as a deeper dig.
 - **169** — `astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear

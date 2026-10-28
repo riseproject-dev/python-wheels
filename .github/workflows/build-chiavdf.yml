@@ -31,8 +31,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  GMP_VERSION: '6.2.1'
-  GMP_SHA256: 'fd4829912cddd12f84181c3451cc752be224643e87fac497b69edddadc49b4f2'
 
 jobs:
   setup:
@@ -64,6 +62,19 @@ jobs:
           ref: ${{ env.CHIAVDF_VERSION }}
           persist-credentials: false
 
+      # Up to 1.1.14 upstream bundled GMP 6.2.1 with replacement files (gmp-patch-6.2.1/);
+      # from 1.2.0 it bundles GMP 6.3.0 with a diff (gmp-6.3.0.diff).
+      - name: Select the GMP version
+        run: |
+          case "${CHIAVDF_VERSION}" in
+            1.0.*|1.1.*)
+              echo "GMP_VERSION=6.2.1" >> "$GITHUB_ENV"
+              echo "GMP_SHA256=fd4829912cddd12f84181c3451cc752be224643e87fac497b69edddadc49b4f2" >> "$GITHUB_ENV" ;;
+            *)
+              echo "GMP_VERSION=6.3.0" >> "$GITHUB_ENV"
+              echo "GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898" >> "$GITHUB_ENV" ;;
+          esac
+
       # GMP and pybind11 are linked into the wheel; upstream ships neither notice.
       - name: Fetch GMP and stage the bundled dependencies' licences
         run: |
@@ -84,10 +95,12 @@ jobs:
           CIBW_BEFORE_ALL: >-
             yum -y install boost-devel
             && tar xJf gmp-${{ env.GMP_VERSION }}.tar.xz
-            && cp src/lib/gmp-patch-6.2.1/longlong.h gmp-${{ env.GMP_VERSION }}/
-            && cp src/lib/gmp-patch-6.2.1/compat.c gmp-${{ env.GMP_VERSION }}/
-            && cp src/lib/gmp-patch-6.2.1/mpz/inp_raw.c gmp-${{ env.GMP_VERSION }}/mpz
-            && cd gmp-${{ env.GMP_VERSION }} && ./configure --enable-fat --enable-cxx
+            && cd gmp-${{ env.GMP_VERSION }}
+            && if [ -d ../src/lib/gmp-patch-${{ env.GMP_VERSION }} ]; then
+            cp ../src/lib/gmp-patch-${{ env.GMP_VERSION }}/longlong.h ../src/lib/gmp-patch-${{ env.GMP_VERSION }}/compat.c . &&
+            cp ../src/lib/gmp-patch-${{ env.GMP_VERSION }}/mpz/inp_raw.c mpz/;
+            else patch -p1 < ../src/lib/gmp-${{ env.GMP_VERSION }}.diff; fi
+            && ./configure --enable-fat --enable-cxx
             && make && make install && cd .. && rm -rf gmp-${{ env.GMP_VERSION }}
             && cmake --version
             && uname -a
@@ -98,7 +111,9 @@ jobs:
           import sys, zipfile
           names = zipfile.ZipFile(sys.argv[1]).namelist()
           exts = [n for n in names if n.endswith(".so")]
-          assert len(exts) == 1 and exts[0].startswith("chiavdf.cpython-"), exts
+          # Up to 1.1.14 the extension is chiavdf.cpython-*.so at the wheel root;
+          # 1.2.0 moved it into the package as chiavdf/_chiavdf.cpython-*.so.
+          assert len(exts) == 1 and exts[0].startswith(("chiavdf.cpython-", "chiavdf/_chiavdf.cpython-")), exts
           assert exts[0].endswith("-riscv64-linux-gnu.so"), exts
           libs = {n.split("/")[-1].split("-")[0] for n in names if n.startswith("chiavdf.libs/") and not n.endswith("/")}
           assert libs == {"libgmp", "libgmpxx"}, libs
@@ -147,6 +162,19 @@ jobs:
           path: chiavdf
           persist-credentials: false
 
+      # Up to 1.1.14 upstream bundled GMP 6.2.1 with replacement files (gmp-patch-6.2.1/);
+      # from 1.2.0 it bundles GMP 6.3.0 with a diff (gmp-6.3.0.diff).
+      - name: Select the GMP version
+        run: |
+          case "${CHIAVDF_VERSION}" in
+            1.0.*|1.1.*)
+              echo "GMP_VERSION=6.2.1" >> "$GITHUB_ENV"
+              echo "GMP_SHA256=fd4829912cddd12f84181c3451cc752be224643e87fac497b69edddadc49b4f2" >> "$GITHUB_ENV" ;;
+            *)
+              echo "GMP_VERSION=6.3.0" >> "$GITHUB_ENV"
+              echo "GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898" >> "$GITHUB_ENV" ;;
+          esac
+
       # The bundled GMP is the pristine release plus chiavdf's replacement files.
       - name: Combine GPL sources into one archive
         run: |
@@ -155,7 +183,7 @@ jobs:
           tar xf rpm-gpl-sources.tar -C gpl-sources
           curl -fsSL --retry 5 "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" -o "gpl-sources/gmp-${GMP_VERSION}.tar.xz"
           echo "${GMP_SHA256}  gpl-sources/gmp-${GMP_VERSION}.tar.xz" | sha256sum -c -
-          cp -r chiavdf/src/lib/gmp-patch-6.2.1 gpl-sources/
+          cp -r chiavdf/src/lib/gmp-* gpl-sources/
           tar cf gpl-sources.tar -C gpl-sources .
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
