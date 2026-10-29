@@ -1285,6 +1285,8 @@ The porting gotchas (559 of them) live in [`references/gotchas/`](gotchas/), spl
 - **658** — A Cython extension that `cimport numpy` and names a flag numpy 2 dropped from
   `__init__.pxd` (`np.NPY_OWNDATA`) still *compiles* — Cython falls back to a Python attribute
   lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
+- **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
+  path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

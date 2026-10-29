@@ -30,6 +30,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **658** — A Cython extension that `cimport numpy` and names a flag numpy 2 dropped from
   `__init__.pxd` (`np.NPY_OWNDATA`) still *compiles* — Cython falls back to a Python attribute
   lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
+- **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
+  path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
 
 ---
 
@@ -691,3 +693,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       (ppwwyyxx/cocoapi) already carries the identical fix; forks of the same file rarely do.
     - Reproduces on x86_64 in a minute — `pip wheel --no-build-isolation` against numpy 2
       in a venv, then call `mask.decode(mask.encode(m))`.
+
+663. **setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` — `ValueError:
+    Version file path must be relative, got absolute: …` from `build_py` (the pyarrow 16.1.0
+    case; see `build-pyarrow.yml`).** Older `setup.py`s commonly build the path from their own
+    location, e.g. pyarrow ≤ 16's `use_scm_version={'root': os.path.dirname(setup_dir),
+    'write_to': os.path.join(setup_dir, 'pyarrow/_generated_version.py')}` with
+    `setup_dir = os.path.abspath(...)`. Traceback: `_integration/build_py.py` `run` →
+    `_write_version_files` → `_is_inside_package` → `_sanitize_relative_path`. Same family as
+    gotchas 29/588 — a build dep left unpinned on an old release's `--no-isolation` build
+    drifts past the API that release was written against.
+    - **Boundary, bisected from the wheels**: 9.2.2 (and 8.x) has no `build_py` integration;
+      `_integration/dump_version.py` explicitly accepts an absolute `write_to` under `root`
+      (`write_to.relative_to(root)` → `target = write_to`). 10.0.5 adds the `build_py`
+      mixin but still just does `build_lib / relative_path` (pathlib keeps the absolute
+      side). 10.1.1 is the first release containing `_sanitize_relative_path`; 10.1.x–10.3.4
+      all fail. A ten-line `setup.py` with that `use_scm_version` dict plus `setup.py
+      build_py` against setuptools 81 reproduces it on x86_64: 9.2.2/10.0.5 pass, 10.1.2/10.3.4
+      fail with the identical message.
+    - **`SETUPTOOLS_SCM_PRETEND_VERSION*` does not help** — it skips the git lookup, not the
+      version-file write.
+    - Fix: pin `setuptools_scm<10` (resolves 9.2.2, the pre-`build_py` codepath the release
+      was written against) next to the other build-dep pins. A project-specific prefix knob
+      also works when one exists — pyarrow's `SETUPTOOLS_SCM_VERSION_WRITE_TO_PREFIX=python`
+      makes `write_to` relative to `root` and 10.3.4 then builds clean (the file still lands
+      in `build_lib`, copied as an ordinary package module) — but that is per-project, while
+      the pin is the generic answer. Upstreams that moved to `[tool.setuptools_scm]
+      version_file = '<pkg>/...'` (pyarrow 25.0.1's scikit-build-core `pyproject.toml`)
+      never hit it.
