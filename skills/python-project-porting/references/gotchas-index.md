@@ -1403,11 +1403,11 @@ The porting gotchas (561 of them) live in [`references/gotchas/`](gotchas/), spl
 - **643** — A test suite that needs Node.js (an npm mock server) still runs on riscv64:
   `actions/setup-node` with `mirror: https://unofficial-builds.nodejs.org/download/release`
   installs a riscv64 Node (the eppo-server-sdk case).
-- **663** — A netCDF `/vsizip/`/`/vsi*`-auto open needs `userfaultfd(2)`, gated by the host
+- **665** — A netCDF `/vsizip/`/`/vsi*`-auto open needs `userfaultfd(2)`, gated by the host
   kernel's `vm.unprivileged_userfaultfd` sysctl, not by anything a container's seccomp
   profile or capability set reaches — don't treat gotcha 552's `CAP_SYS_PTRACE` fix as a
   template for this syscall too; deselect rather than keep widening the container (pyramids-gis).
-- **664** — A hang reproducible at one exact parametrize id, with sibling parametrizations
+- **666** — A hang reproducible at one exact parametrize id, with sibling parametrizations
   passing clean on either side, is a per-input library bug, not corrupted GDAL global state
   left over from an earlier failed test; `--timeout-method=thread` can't interrupt a
   blocking GIL-held C call, so only the job's own wall clock ends the hang (pyramids-gis).

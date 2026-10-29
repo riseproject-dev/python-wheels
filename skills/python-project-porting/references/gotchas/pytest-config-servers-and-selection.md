@@ -57,10 +57,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **643** — An upstream test suite that needs a Node.js helper (a mock server via
   `npm ci`/`npm run`) still runs on the riscv64 runner: `actions/setup-node` with
   `mirror: https://unofficial-builds.nodejs.org/download/release` installs a riscv64 Node.
-- **662** — A netCDF `/vsizip/`/`/vsi*` open needs `userfaultfd(2)`, which a fully unconfined
+- **665** — A netCDF `/vsizip/`/`/vsi*` open needs `userfaultfd(2)`, which a fully unconfined
   seccomp profile and `CAP_SYS_PTRACE` do not restore — that syscall is gated by the host
   kernel's `vm.unprivileged_userfaultfd` sysctl, not by anything a container flag reaches.
-- **663** — A hang reproducible at one exact parametrize id, with sibling parametrizations
+- **666** — A hang reproducible at one exact parametrize id, with sibling parametrizations
   passing clean on either side, is a per-input library bug, not corrupted global state from
   an earlier failure; `--timeout-method=thread` can't interrupt a blocking GIL-held C call.
 
@@ -971,7 +971,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
      *test-time tool* only. A package that bundles or downloads a Node binary into the
      wheel is a different question (feasibility gotchas on playwright).
 
-663. **A netCDF `/vsizip/`/`/vsi*`-auto open genuinely needs Linux `userfaultfd(2)`, which
+665. **A netCDF `/vsizip/`/`/vsi*`-auto open genuinely needs Linux `userfaultfd(2)`, which
      neither a fully unconfined seccomp profile nor `CAP_SYS_PTRACE` restores — don't treat
      gotcha 552's fix as a template for every container-syscall `EPERM` (the pyramids-gis
      case).** GDAL's netCDF driver opens any `/vsi*` virtual-filesystem path (zip, auto
@@ -992,7 +992,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
      is the syscall itself (the traceback or a `strace` names `userfaultfd`), not the shape
      of the failure.
 
-664. **A hang reproducible at one exact pytest parametrize id, with sibling parametrizations
+666. **A hang reproducible at one exact pytest parametrize id, with sibling parametrizations
      of the same test — including other same-shaped ones — passing clean on either side of
      it, is a per-input bug in the library's C code, not corrupted global state left over
      from an earlier failed test; `--timeout-method=thread` reports `Timeout` without
@@ -1004,7 +1004,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
      normally just before and after it in collection order. That pattern (not "everything
      after the first failure gets slower or flakier", not "only this grid type across the
      board") rules out the tempting but wrong theory that the two FAILED tests earlier in the
-     same run (gotcha 663) left GDAL's driver registry or PROJ context corrupted for the rest
+     same run (gotcha 665) left GDAL's driver registry or PROJ context corrupted for the rest
      of the process: state corruption reads as noisy and order-dependent, not reproducibly
      keyed to one specific data shape (5 variables, dims `1d2-2d2-3d1`, curvilinear grid).
      **`--timeout-method=thread` can't save you here** — its watcher thread still needs the
