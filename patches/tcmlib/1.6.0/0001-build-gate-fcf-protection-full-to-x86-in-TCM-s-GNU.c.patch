@@ -1,0 +1,45 @@
+From 384ee8a7590516884d8a8290921864efa2644d55 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 10 Sep 2026 22:32:07 +0200
+Subject: [PATCH] build: gate -fcf-protection=full to x86 in TCM's GNU.cmake
+
+Upstream-Status: To upstream [python-wheels does not open issues/PRs on third-party repos, so this can't be submitted to uxlfoundation/oneTBB from here; flagging for a human to upstream]
+
+thread_composability_manager/cmake/compilers/GNU.cmake adds
+-fcf-protection=full unconditionally for GCC >= 8, unlike oneTBB's own
+cmake/compilers/GNU.cmake, which gates the same flag behind
+CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|amd64|i.86|x86)". -fcf-protection is
+Intel CET control-flow hardening; on riscv64 GCC 13 rejects it outright:
+
+  cc1plus: error: '-fcf-protection=full' is not supported for this target
+  compilation terminated due to -Wfatal-errors.
+
+Restore the same x86 guard TBB's copy already has. Reproduces on riscv64
+only; x86_64 and aarch64 builds are unaffected.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ thread_composability_manager/cmake/compilers/GNU.cmake | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/thread_composability_manager/cmake/compilers/GNU.cmake b/thread_composability_manager/cmake/compilers/GNU.cmake
+index d7c1a46..abfbbce 100644
+--- a/thread_composability_manager/cmake/compilers/GNU.cmake
++++ b/thread_composability_manager/cmake/compilers/GNU.cmake
+@@ -26,7 +26,12 @@ endif()
+ set(TCM_COMMON_COMPILE_FLAGS ${TCM_COMMON_COMPILE_FLAGS} -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv
+     -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>)
+ 
+-set(TCM_LIB_COMPILE_FLAGS $<$<NOT:$<CONFIG:Debug>>:-flto> $<$<NOT:$<VERSION_LESS:${CMAKE_CXX_COMPILER_VERSION},8.0>>:-fcf-protection=full>)
++set(TCM_LIB_COMPILE_FLAGS $<$<NOT:$<CONFIG:Debug>>:-flto>)
++# -fcf-protection is x86 CET hardening; GCC rejects it outright ("is not supported for
++# this target") on other architectures, unlike -fstack-clash-protection above.
++if (CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|amd64|i.86|x86)")
++  set(TCM_LIB_COMPILE_FLAGS ${TCM_LIB_COMPILE_FLAGS} $<$<NOT:$<VERSION_LESS:${CMAKE_CXX_COMPILER_VERSION},8.0>>:-fcf-protection=full>)
++endif()
+ 
+ set(TCM_LIB_LINK_FLAGS ${TCM_LIB_LINK_FLAGS} $<$<NOT:$<CONFIG:Debug>>:-flto>  -Wl,-z,relro,-z,now,-z,noexecstack)
+ set(TCM_COMPILE_DEFINITIONS "")
+-- 
+2.50.1 (Apple Git-155)
+
