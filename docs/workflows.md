@@ -276,7 +276,12 @@ version is no longer pending. That push has two effects:
 - the package build workflow may be triggered by its YAML path, but `_setup.yml`
   returns `[]`, so all guarded build/publish jobs skip;
 - `website.yml` regenerates package pages and the static PEP 503/691 Simple API,
-  builds the Jekyll site, and deploys it to `pypi.riseproject.dev`.
+  builds the Jekyll site, and deploys it to `pypi.riseproject.dev`. Its
+  `sync-project-status` job then runs `ci_scripts/sync_project_status.py`, which
+  moves the open `<pkg> riscv64 support` issue of every package in
+  `ci_scripts/packages.txt` to *Available in RISE PyPI* in the Python Wheels
+  project, unless it already says *Available in RISE PyPI* or *Available Upstream*.
+  The issue stays open; only a deprecation closes it.
 
 The GitHub Release exists before this merge, but pip cannot discover it through
 the RISE index until the YAML reaches `main` and the website deployment
@@ -414,7 +419,8 @@ job must grant `contents: write` and `pull-requests: write`.
 - `pr-checks.yml` checks commit/PR policy, validates package YAML/workflow
   pairing, and validates patch `Upstream-Status` headers.
 - `website.yml` turns `docs/packages/*.yaml` into package documentation and the
-  Simple API, then deploys GitHub Pages.
+  Simple API, deploys GitHub Pages, then marks newly published packages'
+  issues *Available in RISE PyPI* in the Python Wheels project.
 
 ## The RISC-V Wheels Dashboard
 

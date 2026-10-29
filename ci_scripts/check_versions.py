@@ -16,7 +16,6 @@ https://gitlab.com/riseproject/python/wheel_builder/-/blob/main/ci_scripts/check
 import json
 import re
 import shutil
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,7 +25,8 @@ from pathlib import Path
 import requests
 import yaml
 
-from update_doc import normalize_name, version_blocks
+from github_issues import fetch_issues, normalize_name, oldest_open_issue
+from update_doc import version_blocks
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -34,7 +34,6 @@ DOCS_DIR = ROOT_DIR / "docs" / "packages"
 PATCHES_DIR = ROOT_DIR / "patches"
 PACKAGES_FILE = "ci_scripts/packages.txt"
 DEPRECATED_FILE = "ci_scripts/deprecated.txt"
-REPO = "riseproject-dev/python-wheels"
 
 # Python versions (interpreter tags) a package must have upstream riscv64
 # wheels for before we deprecate our own build. "3.14t" is the free-threaded
@@ -175,31 +174,25 @@ def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
     return has_wheels
 
 
+_issues: Optional[Dict] = None
+
+
 def find_upstream_issue(package: str) -> Optional[str]:
     """
-    Find issue for a package in the wheel_builder's Upstream milestone.
+    Number of the package's oldest open "{package} riscv64 support" issue.
 
-    All issues in the upstream milestone follow the same title format:
-
-        {package} riscv64 support
+    The issues are fetched once and reused for every package of the run.
     """
-    try:
-        issue_title = f"{package} riscv64 support"
-        result = subprocess.run([
-            "gh", "issue", "list",
-            "--search", issue_title,
-            "--json", "number",
-            "--jq", ".[0].number",
-            "--repo", REPO,
-        ], capture_output=True, text=True, timeout=30)
-
-        if result.returncode != 0:
-            return None
-
-        return result.stdout.strip() or None
-
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, Exception):
-        return None
+    global _issues
+    if _issues is None:
+        try:
+            # Project fields are not needed here, and the nightly token cannot read them.
+            _issues = fetch_issues(with_project=False)
+        except RuntimeError as e:
+            print(f"warning: {e}", file=sys.stderr)
+            _issues = {}
+    issue = oldest_open_issue(_issues, package)
+    return str(issue["number"]) if issue else None
 
 
 def deprecate_package(package: str) -> bool:
