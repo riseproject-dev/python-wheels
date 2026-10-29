@@ -1,0 +1,167 @@
+From 7bd5afd2c143e7db533bafc04c17ef4555c45a4b Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 10:08:00 +0000
+Subject: [PATCH 3/4] Convert fp16 in software on RISC-V targets without Zfh
+
+Upstream-Status: To upstream [no riscv64 runner upstream to regression-test it on]
+
+float_to_half()/half_to_float() convert through Clang's native _Float16 in
+kernel code. RV64GC has no half-precision hardware, so Clang lowers both
+conversions to the compiler-rt libcalls __extendhfsf2/__truncsfhf2, and
+wp_load_obj() (warp/native/clang/clang.cpp) resolves a JIT-compiled module's
+externals from a curated CRT table that carries no compiler builtins. Every
+module holding an fp16 kernel therefore failed to materialize:
+
+  JIT session error: Symbols not found: [ __extendhfsf2, __truncsfhf2 ]
+  Failed to lookup symbol: Failed to materialize symbols: ...
+  RuntimeError: Failed to find forward kernel '...' for device 'cpu'
+
+and took the module's non-fp16 kernels down with it -- 649 of the 1552 errors
+in a full riscv64 run of warp.tests, spread over test_codegen, test_print,
+test_spatial, test_transform, test_fabricarray and 40 more modules.
+
+x86_64 sidesteps this by adding +f16c to the cc1 invocation, which lowers both
+conversions to vcvtph2ps/vcvtps2ph; aarch64 gets fcvt from armv8-a. RISC-V has
+no such baseline extension -- Zfh is optional, is not part of rv64gc, and
+asking for it would emit fcvt.h.s on hardware that need not implement it -- so
+convert in software instead.
+
+The two routines are bit-for-bit what _Float16 yields where the hardware does
+have half support: round to nearest with ties to even, signalling NaNs quieted,
+NaN payloads preserved. Verified exhaustively against (_Float16) on x86_64
+(+f16c) over all 2^32 float bit patterns and all 2^16 half bit patterns, zero
+differences, so a riscv64 kernel rounds exactly as an x86_64 or aarch64 one
+does rather than picking up the ties-away rounding of the Giesen routine
+warp.cpp uses for the host-side conversions.
+
+Guarded on !__riscv_zfh so a Zfh-enabled target keeps the native path.
+---
+ warp/native/builtin.h | 105 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 105 insertions(+)
+
+diff --git a/warp/native/builtin.h b/warp/native/builtin.h
+index f0c23b5..b1ad4b7 100644
+--- a/warp/native/builtin.h
++++ b/warp/native/builtin.h
+@@ -367,6 +367,109 @@ CUDA_CALLABLE inline float bfloat16_to_float(wp_bfloat16 x) { return wp_bfloat16
+ 
+ #elif defined(__clang__)
+ 
++#if defined(__riscv) && !defined(__riscv_zfh)
++
++// RISC-V without Zfh has no half-precision hardware, so Clang lowers every _Float16 conversion
++// to the compiler-rt libcalls __extendhfsf2/__truncsfhf2. A JIT-compiled module resolves its
++// externals from the curated CRT table in wp_load_obj() (warp/native/clang/clang.cpp), which
++// carries no compiler builtins, so a module holding any fp16 kernel fails to materialize with
++// "JIT session error: Symbols not found: [ __extendhfsf2, __truncsfhf2 ]".
++//
++// Convert in software instead. Both routines are bit-for-bit what _Float16 yields where the
++// hardware does have half support -- round to nearest with ties to even, signalling NaNs
++// quieted, payloads preserved -- verified exhaustively over all 2^32 floats and all 2^16
++// halves, so kernels round exactly as they do on x86_64 (+f16c) and aarch64.
++CUDA_CALLABLE inline half float_to_half(float x)
++{
++    unsigned int bits;
++    memcpy(&bits, &x, sizeof(bits));
++
++    const unsigned int sign = (bits >> 16) & 0x8000u;
++    const unsigned int magnitude = bits & 0x7fffffffu;
++
++    unsigned int u;
++    if (magnitude >= 0x7f800000u)  // Inf or NaN
++    {
++        const unsigned int mantissa = magnitude & 0x007fffffu;
++        u = sign | 0x7c00u | (mantissa ? ((mantissa >> 13) | 0x0200u) : 0u);  // NaN quieted, Inf kept
++    }
++    else if (magnitude >= 0x47800000u)  // 65536 and above overflows the half range
++    {
++        u = sign | 0x7c00u;
++    }
++    else if (magnitude >= 0x38800000u)  // 2^-14 and above is a normal half
++    {
++        u = sign | (((magnitude >> 23) - 127 + 15) << 10) | ((magnitude >> 13) & 0x03ffu);
++        const unsigned int rest = magnitude & 0x1fffu;  // the bits that do not fit
++        if (rest > 0x1000u || (rest == 0x1000u && (u & 1u)))
++            u += 1;  // round to nearest, ties to even
++    }
++    else
++    {
++        const unsigned int exponent = magnitude >> 23;
++        const unsigned int shift = 126 - exponent;  // a subnormal half's ulp is 2^-24
++        if (exponent == 0 || shift > 24)
++        {
++            u = sign;  // underflows to zero
++        }
++        else
++        {
++            const unsigned int mantissa = (magnitude & 0x007fffffu) | 0x00800000u;  // implicit bit
++            const unsigned int rest = mantissa & ((1u << shift) - 1u);
++            const unsigned int tie = 1u << (shift - 1);
++            u = sign | (mantissa >> shift);
++            if (rest > tie || (rest == tie && (u & 1u)))
++                u += 1;  // round to nearest, ties to even
++        }
++    }
++
++    half h;
++    h.u = static_cast<unsigned short>(u);
++    return h;
++}
++
++CUDA_CALLABLE inline float half_to_float(half h)
++{
++    const unsigned int sign = (static_cast<unsigned int>(h.u) & 0x8000u) << 16;
++    const unsigned int exponent = (static_cast<unsigned int>(h.u) >> 10) & 0x001fu;
++    const unsigned int mantissa = static_cast<unsigned int>(h.u) & 0x03ffu;
++
++    unsigned int bits;
++    if (exponent == 0x1fu)  // Inf or NaN
++    {
++        bits = sign | 0x7f800000u | (mantissa ? ((mantissa << 13) | 0x00400000u) : 0u);
++    }
++    else if (exponent == 0u)  // zero or subnormal
++    {
++        if (mantissa == 0u)
++        {
++            bits = sign;
++        }
++        else
++        {
++            // Renormalize: shift the mantissa up until its leading one leaves the field.
++            unsigned int m = mantissa;
++            unsigned int e = 127 - 15 + 1;
++            while ((m & 0x0400u) == 0u)
++            {
++                m <<= 1;
++                e -= 1;
++            }
++            bits = sign | (e << 23) | ((m & 0x03ffu) << 13);
++        }
++    }
++    else
++    {
++        bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
++    }
++
++    float val;
++    memcpy(&val, &bits, sizeof(val));
++    return val;
++}
++
++#else
++
+ // _Float16 is Clang's native half-precision floating-point type
+ CUDA_CALLABLE inline half float_to_half(float x)
+ {
+@@ -381,6 +484,8 @@ CUDA_CALLABLE inline float half_to_float(half h)
+     return static_cast<float>(f16);
+ }
+ 
++#endif  // __riscv && !__riscv_zfh
++
+ #ifndef WP_NO_BFLOAT16
+ CUDA_CALLABLE inline wp_bfloat16 float_to_bfloat16(float x)
+ {
+-- 
+2.43.0
+
