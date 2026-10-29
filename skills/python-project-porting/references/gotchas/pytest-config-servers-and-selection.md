@@ -1028,3 +1028,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
        pass clean both times. One matching occurrence is a coincidence worth a second look;
        two, on the same id, across different interpreters, in the same PR, is the pattern —
        deselect it the same way rather than spending a round chasing "maybe it's just slow".
+     - **Confirmed a third time, same exact parametrize id, yet another sibling test
+       function.** `test_roundtrip_file.py::test_roundtrip_preserves_convention[none__111v__1d96-2d13-3d2__str]`
+       hung identically on the same input id — same file, a different test function from the
+       already-deselected `test_roundtrip_preserves_variable_set`, same `GetDimensions()` call
+       inside GDAL's multidim API on the stack. Three independent hits on one exact id, across
+       three test functions and three interpreter builds, is conclusive: the bug lives in that
+       one data shape going through GDAL's multidim group/dimension resolution on riscv64, not
+       in any single test. Deselect each new sibling that reaches it the same way; do not widen
+       the search for a shared root cause unless it's cheap, since the fix (deselect) is already
+       known and proven.
