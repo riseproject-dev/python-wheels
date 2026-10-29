@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 20:10:00 +0000
+Subject: [PATCH] Do not make cast-align fatal on strict-alignment targets
+
+GCC only emits -Wcast-align on targets it considers strict-alignment, so the
+C++ core's casts from byte buffers to protocol header layouts are silent on
+x86_64 and aarch64 and fatal on riscv64:
+
+  core/io/mcbp_session.cxx:141:26: error: cast from 'const std::byte*' to
+  'const mcbp_header_layout*' increases required alignment of target type
+  [-Werror=cast-align]
+
+-Wcast-align is a performance diagnostic, not a correctness one, and the
+casts it flags here are the protocol decoding the core is built around. Demote
+it the same way the GCC block below already demotes the four warnings asio
+trips, so every other warning stays fatal.
+
+Upstream-Status: To upstream [not yet submitted; this port may only touch riseproject-dev/python-wheels]
+---
+ deps/couchbase-cxx-client/cmake/CompilerWarnings.cmake | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/deps/couchbase-cxx-client/cmake/CompilerWarnings.cmake b/deps/couchbase-cxx-client/cmake/CompilerWarnings.cmake
+--- a/deps/couchbase-cxx-client/cmake/CompilerWarnings.cmake
++++ b/deps/couchbase-cxx-client/cmake/CompilerWarnings.cmake
+@@ -55,7 +55,9 @@
+       -Wno-compound-token-split-by-macro)
+ 
+   if(WARNINGS_AS_ERRORS)
+-    set(COMMON_WARNINGS ${COMMON_WARNINGS} -Werror)
++    # -Wcast-align is only emitted on strict-alignment targets such as riscv64,
++    # where it flags the byte-buffer-to-header casts the protocol code is built on.
++    set(COMMON_WARNINGS ${COMMON_WARNINGS} -Werror -Wno-error=cast-align)
+     set(MSVC_WARNINGS ${MSVC_WARNINGS} /WX)
+   endif()
+ 
