@@ -1,0 +1,82 @@
+From fecb91d56058e1882a5944d178f253d0b12a3eb2 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 24 Oct 2026 00:19:55 +0000
+Subject: [PATCH] tls: report a locally closed transport's read-side loss as
+ clean
+
+Upstream-Status: To upstream [not yet submitted]
+
+close() marks the transport closing, then the TLS writer worker sends
+close_notify and shuts the socket down in both directions. That
+shutdown(SHUT_RDWR) wakes the TLS reader worker with EOF (or ECONNRESET)
+before the peer's own close_notify may have arrived, so rustls reports
+"peer closed connection without sending TLS close_notify". The reader
+enqueues that as ConnectionLost(Some(err)), and when it beats the
+writer's ConnectionLost(None) the error surfaces from wait_closed() of a
+stream the caller closed itself.
+
+The reader already reports ConnectionLost(None) when it notices the
+transport is closing before a read; do the same when a read fails after
+close() started. asyncio does not report read errors on a transport the
+user closed either.
+
+The window is wide on slow hardware: on the riscv64 runner it failed
+tests/test_tls.py::TestTls::test_client_config_cache_reuses_and_invalidates.
+On x86_64, delaying the server's close by 20ms in that test's pattern and
+pinning to one CPU turns 35/400 connections into this error (8 more into
+ECONNRESET); with this patch 0/3200 fail, and the TLS test modules go
+from 4/40 failing runs to 0/120.
+---
+ src/transport/stream/reader.rs | 24 +++++++++++++++++++-----
+ 1 file changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/src/transport/stream/reader.rs b/src/transport/stream/reader.rs
+index 6a11af0..e1c937e 100644
+--- a/src/transport/stream/reader.rs
++++ b/src/transport/stream/reader.rs
+@@ -303,16 +303,14 @@ pub(super) fn run_tls_reader(
+             TlsReadOutcome::Continue => continue,
+             TlsReadOutcome::Eof => {}
+             TlsReadOutcome::ConnectionLost(err) => {
+-                core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(err)));
++                enqueue_tls_read_failure(&core, err);
+                 return;
+             }
+         }
+ 
+         let (fd, pollable) = tls_socket_wait_target(&tls_state);
+         if let Err(err) = wait_socket_ready(fd, pollable, true, false) {
+-            core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+-                err.to_string(),
+-            )));
++            enqueue_tls_read_failure(&core, err.to_string());
+             return;
+         }
+ 
+@@ -323,9 +321,25 @@ pub(super) fn run_tls_reader(
+                 return;
+             }
+             TlsReadOutcome::ConnectionLost(err) => {
+-                core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(err)));
++                enqueue_tls_read_failure(&core, err);
+                 return;
+             }
+         }
+     }
+ }
++
++/// Report a TLS read failure as connection loss, unless the transport is
++/// already closing.
++///
++/// `close()` marks the transport closing, then the writer sends close_notify
++/// and shuts the socket down in both directions. That shutdown wakes this
++/// reader with EOF (or ECONNRESET) before the peer's own close_notify may
++/// have arrived, so rustls reports "peer closed connection without sending
++/// TLS close_notify". The loss is self-inflicted: like asyncio, report a
++/// locally closed transport's `connection_lost()` with `None` instead of
++/// letting the race surface as an error from `wait_closed()`.
++#[cfg_attr(feature = "profile", hotpath::measure)]
++fn enqueue_tls_read_failure(core: &Arc<StreamTransportCore>, err: String) {
++    let err = if core.is_closing() { None } else { Some(err) };
++    core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(err));
++}
