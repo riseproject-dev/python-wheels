@@ -1,0 +1,79 @@
+From b4096c724e5bc6f0c2cca8d24665fa3d534b341d Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 18 Sep 2026 05:11:46 +0000
+Subject: [PATCH] swig: guard the direct %stubcode sites for SWIG without the
+ -stubs patch
+
+casadi.i carries a compat shim that defines the %stub_* primitives empty
+when SWIG_STUBS_ENABLED is unset, and its own comment says direct
+`%stubcode %{...%}` use sites have to be guarded with
+`#ifdef SWIG_STUBS_ENABLED` separately, because `%insert("stubs")` is not
+a known target in vanilla SWIG. Four of the use sites are unguarded, so
+generating the Python bindings with stock SWIG fails at the first one:
+
+    casadi.i:3815: Error: Unknown directive '%stubcode'.
+
+Guard them like the others. With the patched fork (jaeandersson/swig,
+which upstream's own CI image ships) SWIG_STUBS_ENABLED is set and the
+blocks are emitted exactly as before; the manylinux image's stock SWIG
+now parses the file instead of aborting.
+
+Upstream-Status: To upstream [not yet submitted; the same sites are still unguarded on upstream's main]
+---
+ swig/casadi.i | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/swig/casadi.i b/swig/casadi.i
+index 84ebbaadd..f2551e213 100644
+--- a/swig/casadi.i
++++ b/swig/casadi.i
+@@ -3145,6 +3145,7 @@ class _SupportsMX(Protocol):
+  * DM-backed array satisfies _SupportsDM (hence _DM, and via the unions _SX
+  * and _MX too) -- matching casadi's runtime to_ptr rules. */
+ #if defined(SWIG_STUBS_ENABLED) && defined(SWIGPYTHON)
++#ifdef SWIG_STUBS_ENABLED
+ %stubcode %{class ArrayInterface(Generic[_T]):
+     """numpy-semantics array view over a casadi DM/SX/MX.  Constructing one
+     dispatches to the backing-typed subclass ArrayInterfaceDM/SX/MX."""
+@@ -3237,6 +3238,7 @@ class ArrayInterfaceMX(ArrayInterface[MX]):
+ 
+ %}
+ #endif
++#endif
+ 
+ /* Matrix input aliases.  SX/MX both extend DM; they don't extend each
+  * other -- to_ptr<SX>(MX) and to_ptr<MX>(SX) fail at runtime.
+@@ -3812,9 +3814,11 @@ PyOS_setsig(SIGINT, SigIntHandler);
+ %stub_unary_math(arcsinh)
+ %stub_unary_math(arccosh)
+ /* Re-exported from numpy at runtime (`from numpy import pi, inf`). */
++#ifdef SWIG_STUBS_ENABLED
+ %stubcode %{pi: float
+ inf: float
+ %}
++#endif
+ %stub_overload_func(arctan2, DM, x: _DM, y: _DM)
+ %stub_overload_func(arctan2, SX, x: _SX, y: _SX)
+ %stub_overload_func(arctan2, MX, x: _MX, y: _MX)
+@@ -4058,8 +4062,10 @@ class NZproxy:
+  * masks -- the _selftyped overload matches only when _T=MX, keeping
+  * DM.nz / SX.nz narrow. */
+ #ifdef SWIG_STUBS_ENABLED
++#ifdef SWIG_STUBS_ENABLED
+ %stubcode %{class NZproxy(Generic[_TNZ]):
+ %}
++#endif
+ %stub_method(__init__,    None, matrix: _TNZ)
+ %stub_overload_method_selftyped(__getitem__, MX, NZproxy[MX], s: _MIndex | MX)
+ %stub_overload_method(__getitem__, _TNZ,  s: _MIndex)
+@@ -4154,8 +4160,10 @@ class NZproxy:
+  * scalar-object boxing for symbolic.  Keeps scipy.linalg.solve(A,b)
+  * etc. typing without forcing users to wrap calls in np.array().  */
+ %stub_method(__array__, %arg(NDArray[arraydtype]), *args: Any, **kwargs: Any)
++#ifdef SWIG_STUBS_ENABLED
+ %stubcode %{    __array_priority__: float
+ %}
++#endif
+ %stub_method(__array_ufunc__, Any, ufunc: Any, method: builtins.str, *inputs: Any, **kwargs: Any)
+ %stub_method(__array_function__, Any, func: Any, types: Any, args: Any, kwargs: Any)
+ %enddef
