@@ -246,7 +246,20 @@ jobs:
               --only-binary=numpy,libcst "numpy>=2.0.0" "libcst>=1.8.6"
           # 16.1.0's setup.py imports pkg_resources, removed in setuptools 82 (gotcha 29),
           # and passes an absolute write_to, rejected by setuptools_scm >= 10.1 (gotcha 663)
-          "$pybin" -m pip install -U "cython>=3.1" scikit-build-core "setuptools_scm<10" wheel build "setuptools<82"
+          CYTHON_SPEC="cython>=3.1"
+          if [ "$ARROW_VERSION" = "16.1.0" ]; then
+              # Cython 3.1 (May 2025, ~a year after this release) tightened `with nogil:`
+              # GIL-safety checking; pyarrow/table.pxi's `options.unify_schemas =
+              # promote_options != "none"` inside a nogil block is a Python string
+              # compare that only Cython's older, more lenient check let through
+              # (gotcha 23's shape). Upstream's own build-system.requires floor for
+              # 16.1.0 is just cython>=0.29.31 -- release-era Cython was 3.0.x, so cap
+              # below the breaking version rather than patch pyarrow's source. Safe to
+              # scope to this version alone: the matrix excludes cp313/cp314/cp314t for
+              # it above, and those are the only legs that need 3.1's free-threading support.
+              CYTHON_SPEC="cython>=3,<3.1"
+          fi
+          "$pybin" -m pip install -U "$CYTHON_SPEC" scikit-build-core "setuptools_scm<10" wheel build "setuptools<82"
           mkdir -p /output
           pushd "$ARROW_SRC/python"
           "$pybin" -m build --wheel --no-isolation \
