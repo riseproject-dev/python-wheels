@@ -26,6 +26,7 @@ from pathlib import Path
 import requests
 import yaml
 
+from pending_versions import base_versions
 from update_doc import normalize_name, version_blocks
 
 
@@ -430,6 +431,7 @@ def check_package(
     package: str,
     since: Optional[datetime] = None,
     declare: bool = False,
+    base_file: Optional[Path] = None,
 ) -> Dict[str, any]:
     """
     Check a single package against PyPI and optionally apply the outcome to
@@ -465,7 +467,7 @@ def check_package(
             marked = mark_yanked(package_yaml(package), yanked)
             print(f"    [+] marked {', '.join(f'v{v}' for v in marked)} yanked in {package_yaml(package).relative_to(ROOT_DIR)}")
 
-    result = check_upgrade(package, package_data, pypi_info, registry_version, since, declare)
+    result = check_upgrade(package, package_data, pypi_info, registry_version, since, declare, base_file)
     result["yanked"] = yanked
     return result
 
@@ -477,6 +479,7 @@ def check_upgrade(
     registry_version: str,
     since: Optional[datetime],
     declare: bool,
+    base_file: Optional[Path] = None,
 ) -> Dict[str, any]:
     """Classify the package as up to date, deprecatable or upgradable, and act on it."""
     pypi_version = get_pypi_latest_version(pypi_info)
@@ -514,7 +517,16 @@ def check_upgrade(
         if declare:
             added = declare_versions(package_yaml(package), new_versions)
             print(f"    [+] declared {', '.join(f'v{v}' for v in added)} in {package_yaml(package).relative_to(ROOT_DIR)}")
-            for created in carry_over_patches(package, added, declared):
+            # The package branch can be stale (it is not rebased while its PR is
+            # open), so a version it adds may already be on the base branch, where
+            # it was built with or without patches. Only a version the base does
+            # not declare is new enough to get the previous version's patches.
+            on_base = base_versions(base_file) if base_file else set()
+            fresh = [v for v in added if v not in on_base]
+            if len(fresh) < len(added):
+                print(f"    [=] {package}: {', '.join(f'v{v}' for v in added if v not in fresh)} "
+                      "already declared on the base branch, not copying patches")
+            for created in carry_over_patches(package, fresh, declared):
                 print(f"    [+] copied the patches of the previous version to patches/{created}")
         return {
             "status": "need_upgrade",
@@ -804,6 +816,9 @@ def main():
     parser.add_argument("--declare", action="store_true",
                         help="Apply the outcome to the working tree: declare new versions and mark yanked ones in "
                              "docs/packages/<pkg>.yaml, deprecate packages in the YAML, packages.txt and deprecated.txt")
+    parser.add_argument("--base-file", type=Path, metavar="FILE",
+                        help="Base branch copy of the package YAML (as for pending_versions.py): with --declare, "
+                             "only versions it does not declare get the previous version's patches")
     parser.add_argument("--report", type=Path, metavar="FILE", help="Write a Markdown summary of the whole run")
     parser.add_argument("--report-dir", type=Path, metavar="DIR",
                         help="Write one Markdown PR body per changed package, plus a packages.json manifest, "
@@ -828,7 +843,7 @@ def main():
     results = []
     for package in packages:
         try:
-            results.append(check_package(package, since=args.since, declare=args.declare))
+            results.append(check_package(package, since=args.since, declare=args.declare, base_file=args.base_file))
         except KeyboardInterrupt:
             print("\n[!] Interrupted by user")
             sys.exit(1)
