@@ -71,10 +71,15 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Upstream's build[uv] frontend asserts a host uv in the audit step.
           CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-          # click 8.5 makes get_text_stream untyped, so mypyc rejects djlint's source.
+          # --no-isolation makes `build` check the mypyc hook's dependencies against what is
+          # installed, and since 1.47.1 upstream pins them exactly (hatch-mypyc, click, mypy, ...:
+          # the wheels are compiled against those versions), so install exactly the pins the
+          # checkout declares. (Before 1.47.1 the list was unpinned, and click 8.5 made
+          # get_text_stream untyped so mypyc rejected djlint's source: those versions need
+          # "click<8.5" on top.)
           CIBW_BEFORE_BUILD: >-
-            pip install hatchling hatch-mypyc "click<8.5" cssbeautifier jsbeautifier
-            json5 types-pyyaml types-regex typing-extensions
+            python -c "import tomllib; print(*tomllib.load(open('pyproject.toml', 'rb'))['tool']['hatch']['build']['targets']['wheel']['hooks']['mypyc']['dependencies'], sep='\n')" > /tmp/mypyc-requirements.txt
+            && pip install hatchling -r /tmp/mypyc-requirements.txt typing-extensions
           # Restates upstream's [tool.cibuildwheel] environment, which this replaces.
           CIBW_ENVIRONMENT: >-
             HATCH_BUILD_HOOK_ENABLE_MYPYC=1
