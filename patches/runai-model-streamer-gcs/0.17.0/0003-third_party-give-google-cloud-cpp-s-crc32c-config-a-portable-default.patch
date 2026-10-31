@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 04:00:00 +0000
+Subject: [PATCH] third_party: give google-cloud-cpp's crc32c config a
+ portable default
+
+google-cloud-cpp 2.37.0's bazel/crc32c.BUILD generates crc32c_config.h
+by first rewriting every `#cmakedefine01 X` to `#define X` and then
+appending the value per substitution. HAVE_SSE42 and HAVE_ARM64_CRC32C
+only get a value on @platforms//cpu:x86_64 and :arm64; on any other CPU
+the "//conditions:default" branch is empty, so both end up as bare
+`#define HAVE_SSE42`, and crc32c's own `#if HAVE_SSE42 && ...` /
+`#if HAVE_ARM64_CRC32C` fail to preprocess ("operator '&&' has no left
+operand", "#if with no expression"). google-cloud-cpp main still has
+the empty default.
+
+Patch the fetched google_cloud_cpp archive so the default branch sets
+both to 0, i.e. crc32c's portable implementation. x86_64 and aarch64
+builds are unaffected.
+
+Upstream-Status: To upstream [this port does not open issues/PRs against third-party repos; the empty default is a google-cloud-cpp bug on every CPU other than x86_64/arm64, and runai-model-streamer can carry the patch until it is fixed there]
+---
+ cpp/third_party/gcp_repo.bzl                          |  2 ++
+ cpp/third_party/google_cloud_cpp_crc32c_default.patch | 17 +++++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/cpp/third_party/gcp_repo.bzl b/cpp/third_party/gcp_repo.bzl
+index e91b830..17803dd 100644
+--- a/cpp/third_party/gcp_repo.bzl
++++ b/cpp/third_party/gcp_repo.bzl
+@@ -8,4 +8,6 @@ def load_gcp_repo():
+         sha256 = "10867580483cb338e7d50920c2383698f3572cc6b4c7d072e38d5f43755cbd80",
+         strip_prefix = "google-cloud-cpp-2.37.0",
+         url = "https://github.com/googleapis/google-cloud-cpp/archive/v2.37.0.tar.gz",
++        patches = [Label("//third_party:google_cloud_cpp_crc32c_default.patch")],
++        patch_args = ["-p1"],
+     )
+diff --git a/cpp/third_party/google_cloud_cpp_crc32c_default.patch b/cpp/third_party/google_cloud_cpp_crc32c_default.patch
+new file mode 100644
+index 0000000..d357c31
+--- /dev/null
++++ b/cpp/third_party/google_cloud_cpp_crc32c_default.patch
+@@ -0,0 +1,17 @@
++diff --git a/bazel/crc32c.BUILD b/bazel/crc32c.BUILD
++index c8d8b3c..78b083f 100644
++--- a/bazel/crc32c.BUILD
+++++ b/bazel/crc32c.BUILD
++@@ -115,7 +115,11 @@ configure_template(
++             " HAVE_SSE42": " HAVE_SSE42 0",
++             " HAVE_ARM64_CRC32C": " HAVE_ARM64_CRC32C 1",
++         },
++-        "//conditions:default": {},
+++        # Any other CPU (e.g. riscv64) uses crc32c's portable implementation.
+++        "//conditions:default": {
+++            " HAVE_SSE42": " HAVE_SSE42 0",
+++            " HAVE_ARM64_CRC32C": " HAVE_ARM64_CRC32C 0",
+++        },
++     }),
++     template = "src/crc32c_config.h.in",
++ )
+-- 
+2.43.0
+
