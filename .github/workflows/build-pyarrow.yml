@@ -285,7 +285,7 @@ jobs:
           docker run -i --rm \
             -v "$PWD/arrow:/arrow" \
             -v "$PWD/output:/output" \
-            -e PIP_EXTRA_INDEX_URL \
+            -e PIP_EXTRA_INDEX_URL -e PYARROW_VERSION \
             -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
             -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
             -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
@@ -346,9 +346,18 @@ jobs:
           # hypothesis is only-binary too: upstream ships no cp314t riscv64 wheel (it builds
           # riscv64 abi3-only, and abi3t starts at 3.15), so without this pip falls back to its
           # sdist and the Rust build dies on a triple rustup does not have. Ours comes from the registry.
+          PYTEST_SPEC="pytest"
+          if [ "$PYARROW_VERSION" = "16.1.0" ]; then
+              # 16.1.0's bundled conftest.py defines pytest_ignore_collect(path, config),
+              # the pre-9.1 hookspec signature; pytest 9.1 (Nov 2026) dropped the legacy
+              # `path` LEGACY_PATH parameter, so pluggy's hookimpl validation now rejects
+              # it at collection time -- release-era pytest still had it (gotcha 23's shape,
+              # this time in the test deps rather than the build tool).
+              PYTEST_SPEC="pytest<9.1"
+          fi
           "$pybin" -m pip install -U --only-binary=numpy,cffi,hypothesis \
               --extra-index-url "$PIP_EXTRA_INDEX_URL" \
-              pytest hypothesis cffi pytz packaging "numpy>=2.0.0"
+              "$PYTEST_SPEC" hypothesis cffi pytz packaging "numpy>=2.0.0"
           # pandas may lack a free-threaded riscv64 wheel; skip its tests if so
           if "$pybin" -m pip install -U --only-binary=pandas \
               --extra-index-url "$PIP_EXTRA_INDEX_URL" pandas; then
