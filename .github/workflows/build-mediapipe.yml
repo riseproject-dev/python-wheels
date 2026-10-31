@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# mediapipe tags no release and publishes no sdist; PyPI's 1.0.1 wheels were
-# built from commit 02d83cb8, where mediapipe/version.bzl reads 1.0.1 and which
-# is the last commit before the upload. The build follows upstream's own
-# manylinux recipe:
+# mediapipe publishes no sdist and tagged no release up to 1.0.1; PyPI's 1.0.1
+# wheels were built from commit 02d83cb8, where mediapipe/version.bzl reads 1.0.1
+# and which is the last commit before the upload. 1.1.0 and later have vX.Y.Z
+# tags. The build follows upstream's own manylinux recipe:
 # https://github.com/google/mediapipe/blob/master/Dockerfile.manylinux_2_28_x86_64
 # https://github.com/google/mediapipe/blob/master/build_manylinux_wheel.sh
 name: Build mediapipe wheels (riscv64)
@@ -38,9 +38,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  # No upstream tag exists for this version; move together with the version in
-  # docs/packages/mediapipe.yaml.
-  MEDIAPIPE_REF: 02d83cb8eb451099dfb24c02a8784ed996a1710c
   OPENCV_VERSION: '4.10.0'
   # Upstream downloads a bazel release binary, which exists for no riscv64;
   # 7.5.0 is the version this repo bootstraps from source.
@@ -139,7 +136,24 @@ jobs:
       MEDIAPIPE_VERSION: ${{ matrix.version }}
 
     steps:
-      - name: Checkout google/mediapipe @ ${{ env.MEDIAPIPE_REF }}
+      # 1.0.1 was never tagged; 1.1.0 and later are the commits of the vX.Y.Z
+      # tags, where mediapipe/version.bzl reads that version. Add a line here
+      # with each new version in docs/packages/mediapipe.yaml; an unknown
+      # version fails the build rather than building the wrong source.
+      - name: Resolve the mediapipe source for ${{ env.MEDIAPIPE_VERSION }}
+        run: |
+          case "$MEDIAPIPE_VERSION" in
+            1.0.1) ref=02d83cb8eb451099dfb24c02a8784ed996a1710c ;;
+            1.1.0) ref=821db8a4428baf58bf4c09a0330c937e6e0a3753 ;;  # tag v1.1.0
+            1.1.1) ref=50505c8312c7eacb1bd411cecdc4cc9fd08d53cb ;;  # tag v1.1.1
+            *)
+              echo "::error::no known mediapipe source commit for version '$MEDIAPIPE_VERSION'; add it to the case in this step"
+              exit 1
+              ;;
+          esac
+          echo "MEDIAPIPE_REF=$ref" >> "$GITHUB_ENV"
+
+      - name: Checkout google/mediapipe for ${{ env.MEDIAPIPE_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: google/mediapipe
@@ -147,6 +161,14 @@ jobs:
           path: mediapipe
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Check the source version is ${{ env.MEDIAPIPE_VERSION }}
+        run: |
+          declared="$(awk '/MEDIAPIPE_FULL_VERSION/ {split($0, a, "="); print a[2]}' mediapipe/mediapipe/version.bzl | tr -d '" ')"
+          if [ "$declared" != "$MEDIAPIPE_VERSION" ]; then
+            echo "::error::mediapipe/version.bzl at $MEDIAPIPE_REF declares version '$declared', not '$MEDIAPIPE_VERSION'; fix the ref for this version"
+            exit 1
+          fi
 
       - name: Download bazel
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
