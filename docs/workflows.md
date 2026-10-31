@@ -207,6 +207,18 @@ one. Publication fails if no wheels match, wheels contain mixed names or
 versions, the wheel version is undeclared, GPL sources are missing, or the
 resulting release is not immutable.
 
+A rebuild leaves the previous release behind: the YAML entry moves to the new
+tag, so the old release is linked from nowhere. `gc-releases.yml` (manual
+dispatch, dry run by default) runs `ci_scripts/gc-releases.py`, which deletes
+every release named `<package>-v<version>-<timestamp>` whose tag is not the
+`tag` of a version entry in `docs/packages/*.yaml` on `main`. A tag recorded by
+the YAML of an open `package/<pkg>` pull request is kept, because merging that
+PR links it.
+The script refuses to run if it finds no tag at all or would delete more than
+half of the releases. It shares the `publish-wheel` concurrency group so no
+publication is in flight, and the git tag of a deleted release stays, as an
+immutable release's tag cannot be removed.
+
 ### The package branch and PR
 
 `update_doc.py` normalizes the wheel's project name and uses:
