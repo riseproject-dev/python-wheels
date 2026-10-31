@@ -56,11 +56,26 @@ jobs:
       PYXDAMERAULEVENSHTEIN_VERSION: ${{ matrix.version }}
 
     steps:
+      # Upstream tags older releases `vX.Y.Z` and newer ones plain `X.Y.Z`; use whichever exists.
+      - name: Resolve upstream tag
+        id: tag
+        run: |
+          for ref in "v$VERSION" "$VERSION"; do
+            if git ls-remote --exit-code --tags https://github.com/lanl/pyxDamerauLevenshtein "refs/tags/$ref" >/dev/null; then
+              echo "ref=$ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "no tag for $VERSION in lanl/pyxDamerauLevenshtein" >&2
+          exit 1
+        env:
+          VERSION: ${{ env.PYXDAMERAULEVENSHTEIN_VERSION }}
+
       - name: Checkout pyxDamerauLevenshtein v${{ env.PYXDAMERAULEVENSHTEIN_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: lanl/pyxDamerauLevenshtein
-          ref: v${{ env.PYXDAMERAULEVENSHTEIN_VERSION }}
+          ref: ${{ steps.tag.outputs.ref }}
           persist-credentials: false
 
       - name: Build wheels
@@ -70,6 +85,10 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Restates upstream's [tool.cibuildwheel] environment (an env var replaces it),
+          # minus -mtune=generic: GCC has no such CPU on riscv64 ("unknown cpu 'generic'
+          # for '-mtune'"), which fails the first C compile since 1.11.0.
+          CIBW_ENVIRONMENT: CFLAGS="-O3 -g0 -pipe -fPIC" LDFLAGS="-fPIC"
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_COMMAND: pytest {package}/tests
 
