@@ -131,6 +131,17 @@ jobs:
 
           git apply python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0002-cargo-patch-lance-crates-for-riscv64.patch
 
+      # 0.41.0's re_protos/build.rs calls protoc_bin_vendored::protoc_bin_path()?,
+      # which has no riscv64 binary; the patch falls back to the system protoc
+      # installed below (PROTOC_INCLUDE points at its include dir). Earlier
+      # releases have no such patch.
+      - name: Patch re_protos to use the system protoc
+        run: |
+          patch_file="python-wheels/patches/rerun-sdk/${RERUN_SDK_VERSION}/0004-re_protos-fall-back-to-the-system-protoc-when-protoc-bin-vendored-has-no-binary.patch"
+          if [ -f "$patch_file" ]; then
+            git apply "$patch_file"
+          fi
+
       # re_importer moved from crates/store/re_importer (0.37.x) to
       # crates/data_flow/re_importer (0.38.0+) upstream; CIBW_TEST_SOURCES
       # below needs its importer_mcap test-assets path to track whichever one
@@ -245,7 +256,10 @@ jobs:
           # upstream-labelled sandboxes/integration suites, not the SDK's
           # regression tests. test_headless_viewer.py spawns the (unbuilt)
           # rerun-cli binary, same as test_rrd_reader_multi_store.py's
-          # session fixture (`rerun rrd merge`). test_server.py needs the
+          # session fixture (`rerun rrd merge`); test_rrd_route.py (0.39+)
+          # shells out to `rerun rrd route` the same way, and
+          # test_dataloader_video_conversion.py / test_dataloader_video_rgb_bank.py
+          # (0.40+) import av, like test_dataloader_video.py. test_server.py needs the
           # `datafusion` Python package (no riscv64 wheel anywhere, same as
           # test_datafusion_utils.py and, new in 0.38.x, test_chunk_index.py,
           # which imports `from datafusion import col, lit` at module scope);
@@ -276,6 +290,8 @@ jobs:
           # test_laziness, test_own_chunk_rules) don't touch `.reader()` and
           # pass, so they're deselected individually rather than the whole
           # file ignored.
+          # 0.40.0 adds test_gop_batching, which fails the same way (it reaches
+          # `ChunkStore.reader()`), so it is deselected too.
           CIBW_TEST_COMMAND: >-
             cd rerun_py &&
             python -c "import rerun_bindings.rerun_bindings as m; assert m.__file__.endswith('.so'), m.__file__" &&
@@ -288,10 +304,13 @@ jobs:
             --ignore=tests/integration/test_chunk_store_reader.py
             --ignore=tests/integration/test_chunk_index.py
             --ignore=tests/integration/test_rrd_reader_multi_store.py
+            --ignore=tests/integration/test_rrd_route.py
             --ignore=tests/unit/test_dataloader_decoder_helpers.py
             --ignore=tests/unit/test_dataloader_manifest.py
             --ignore=tests/unit/test_dataloader_query_indices.py
             --ignore=tests/unit/test_dataloader_skip_incomplete.py
+            --ignore=tests/unit/test_dataloader_video_conversion.py
+            --ignore=tests/unit/test_dataloader_video_rgb_bank.py
             --ignore=tests/unit/test_sample_index.py
             --ignore=tests/unit/test_datafusion_utils.py
             --ignore=tests/unit/test_viewer_client.py
@@ -306,6 +325,7 @@ jobs:
             --deselect=tests/integration/test_optimized_stream.py::test_chunk_store_path
             --deselect=tests/integration/test_optimized_stream.py::test_sweep_order_observable
             --deselect=tests/integration/test_optimized_stream.py::test_own_chunk_default
+            --deselect=tests/integration/test_optimized_stream.py::test_gop_batching
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
