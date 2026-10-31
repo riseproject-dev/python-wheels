@@ -54,18 +54,39 @@ jobs:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # 9.1.1 pins `cython>=0.25,<3.0`, and Cython 0.29 emits calls to the
         # pre-3.13 `_PyLong_AsByteArray` signature, so cp313+ cannot compile.
-        # Upstream ships cp39-cp312 wheels for this release for the same reason.
-        python: ["cp312"]
+        # Upstream ships cp39-cp312 wheels for this release for the same reason;
+        # 10.0.0 moved to Cython 3 and builds on every interpreter.
+        python: ["cp312", "cp313", "cp314"]
+        exclude:
+          - version: 9.1.1
+            python: cp313
+          - version: 9.1.1
+            python: cp314
 
     env:
       THINC_VERSION: ${{ matrix.version }}
 
     steps:
-      - name: Checkout thinc release-v${{ env.THINC_VERSION }}
+      # Upstream tagged 9.x releases `release-vX.Y.Z` and 10.0.0 `v10.0.0`; use whichever exists.
+      - name: Resolve upstream tag
+        id: tag
+        run: |
+          for ref in "release-v$VERSION" "v$VERSION" "$VERSION"; do
+            if git ls-remote --exit-code --tags https://github.com/explosion/thinc "refs/tags/$ref" >/dev/null; then
+              echo "ref=$ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "no tag for $VERSION in explosion/thinc" >&2
+          exit 1
+        env:
+          VERSION: ${{ env.THINC_VERSION }}
+
+      - name: Checkout thinc ${{ env.THINC_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: explosion/thinc
-          ref: release-v${{ env.THINC_VERSION }}
+          ref: ${{ steps.tag.outputs.ref }}
           persist-credentials: false
 
       - name: Checkout python-wheels
@@ -74,8 +95,33 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
+      # Only some versions need patching (9.1.1 needed the removed free-threaded-support
+      # option commented out; 10.0.0 dropped it), so a missing directory is not an error.
       - name: Patch thinc source
-        run: git apply python-wheels/patches/thinc/${{ env.THINC_VERSION }}/*.patch
+        run: |
+          patches="$PWD/python-wheels/patches/thinc/$THINC_VERSION"
+          if [ -d "$patches" ]; then
+            git apply "$patches"/*.patch
+          fi
+
+      # Installs the checkout's own build-system.requires; for a Cython<3 release it also
+      # caps numpy, whose 2.5.0 replaced the legacy numpy/__init__.pxd with a hard
+      # "requires Cython 3.0.0 or newer" abort.
+      - name: Stage the build-requirements script
+        run: |
+          cat > resolve-build-requires.py <<'REQ_EOF'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as f:
+              requires = tomllib.load(f)["build-system"]["requires"]
+          old_cython = any(
+              r.lower().startswith("cython") and "<3" in r.replace(" ", "")
+              for r in requires
+          )
+          for r in requires:
+              print("numpy>=2.0.0,<2.5.0" if old_cython and r.lower().startswith("numpy") else r)
+          REQ_EOF
 
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
@@ -87,13 +133,11 @@ jobs:
           # numpy has no riscv64 wheel on public PyPI; the build and the test
           # environment both resolve it from our registry.
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # build-system.requires verbatim, except numpy: 2.5.0 replaced the
-          # legacy numpy/__init__.pxd with a hard "requires Cython 3.0.0 or
-          # newer" abort, and this release pins cython<3.0.
+          # build-system.requires of the checkout, with numpy capped below 2.5.0 for a
+          # Cython<3 release (see "Stage the build-requirements script").
           CIBW_BEFORE_BUILD: >-
-            pip install setuptools wheel "cython>=0.25,<3.0"
-            "murmurhash>=1.0.2,<1.1.0" "cymem>=2.0.2,<2.1.0"
-            "preshed>=3.0.2,<3.1.0" "blis>=1.0.0,<1.1.0" "numpy>=2.0.0,<2.5.0"
+            python {project}/resolve-build-requires.py {project}/pyproject.toml > /tmp/build-requirements.txt
+            && pip install wheel -r /tmp/build-requirements.txt
           CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
           CIBW_TEST_REQUIRES: pytest>=8.2.0 hypothesis>=3.27.0,<6.72.2 mock>=2.0.0,<3.0.0
           # setup.cfg registers the `slow` marker; without it -Werror turns
@@ -104,13 +148,16 @@ jobs:
       - name: Check the extension modules made it into the wheel
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
-          import sys, zipfile
+          import os, sys, zipfile
           expected = {
               "thinc/backends/cblas",
               "thinc/backends/numpy_ops",
               "thinc/layers/premap_ids",
               "thinc/layers/sparselinear",
           }
+          # 10.0.0 also compiles thinc.backends.linalg and thinc.extra.search.
+          if not os.environ["THINC_VERSION"].startswith("9."):
+              expected |= {"thinc/backends/linalg", "thinc/extra/search"}
           for whl in sys.argv[1:]:
               names = zipfile.ZipFile(whl).namelist()
               found = {n.split(".", 1)[0] for n in names if n.endswith(".so")}
