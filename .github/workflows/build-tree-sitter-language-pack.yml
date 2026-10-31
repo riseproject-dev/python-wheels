@@ -74,15 +74,23 @@ jobs:
           python3 - <<'PY'
           import concurrent.futures as cf
           import json
+          import os
           import pathlib
           import re
+          import time
           import urllib.error
           import urllib.request
 
           NAMES = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "LICENCE.md",
                    "LICENCE.txt", "COPYING", "COPYING.md", "COPYING.txt", "LICENSE-MIT",
                    "LICENSE-APACHE", "UNLICENSE", "license", "license.md"]
-          EXPECTED = 357
+          # Grammars whose repository publishes no licence file at the revision
+          # sources/language_definitions.json pins (the same 14 in every release
+          # from 1.15.8 to 1.22.1). Spelling them out means a grammar that loses
+          # its licence, or a fetch that silently fails, trips the assertion below
+          # instead of shrinking the wheel's licence set unnoticed.
+          UNLICENSED = {"brightscript", "cooklang", "corn", "ebnf", "eds", "eex", "elsa",
+                        "facility", "groovy", "move", "pgn", "slint", "t32", "vb"}
           LICENCE_RE = re.compile(r"(?i)^(licen[cs]e|copying|notice)")
           out = pathlib.Path("packages/python/grammar-licenses")
 
@@ -112,11 +120,21 @@ jobs:
               else:
                   return None
               for candidate in NAMES:
-                  try:
-                      with urllib.request.urlopen("%s/%s" % (base, candidate), timeout=60) as response:
-                          return write(language, candidate, response.read())
-                  except (urllib.error.URLError, TimeoutError):
-                      continue
+                  for attempt in range(6):
+                      try:
+                          with urllib.request.urlopen("%s/%s" % (base, candidate), timeout=60) as response:
+                              return write(language, candidate, response.read())
+                      except urllib.error.HTTPError as error:
+                          # Only a 404 means "no such file"; rate limiting (429) and
+                          # server errors are retried, never read as a missing licence.
+                          if error.code == 404:
+                              break
+                          if error.code not in (429, 500, 502, 503, 504) or attempt == 5:
+                              raise
+                      except (urllib.error.URLError, TimeoutError):
+                          if attempt == 5:
+                              raise
+                      time.sleep(5 * (attempt + 1))
               return None
 
 
@@ -125,7 +143,10 @@ jobs:
               staged = [name for name in pool.map(stage, sorted(definitions.items())) if name]
           missing = sorted(set(definitions) - set(staged))
           print("staged %d; no licence file at the pinned revision: %s" % (len(staged), ", ".join(missing)))
-          assert len(staged) == EXPECTED, len(staged)
+          assert set(missing) == UNLICENSED, sorted(set(missing) ^ UNLICENSED)
+          # the built wheel must carry exactly this many grammar licences
+          with open(os.environ["GITHUB_ENV"], "a") as env_file:
+              env_file.write("TSLP_LICENCES=%d\n" % len(staged))
           PY
 
       - name: Patch tree-sitter-language-pack source
@@ -163,14 +184,15 @@ jobs:
             TSLP_LANGUAGES=all
             TSLP_LINK_MODE=static
             TSLP_GRAMMAR_CFLAGS=-O2
+            TSLP_LICENCES=${{ env.TSLP_LICENCES }}
           CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-timeout
           CIBW_TEST_SOURCES: e2e/python
           # test_download.py needs upstream's prebuilt parser bundle for this
           # platform, which is exactly what riscv64 has none of.
           CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as md;
+            python -c "import importlib.metadata as md, os;
             n = len([p for p in md.files('tree-sitter-language-pack') if '.dist-info/licenses/grammar-licenses/' in str(p)]);
-            assert n == 357, n"
+            assert n == int(os.environ['TSLP_LICENCES']), n"
             && cd e2e/python
             && python -m pytest tests --ignore=tests/test_download.py
 
