@@ -362,9 +362,38 @@ jobs:
           "$pybin" -m pip install -U --only-binary=numpy,cffi,hypothesis \
               --extra-index-url "$PIP_EXTRA_INDEX_URL" \
               "$PYTEST_SPEC" hypothesis cffi pytz packaging "numpy>=2.0.0"
+
+          PANDAS_SPEC="pandas"
+          PYTEST_K=""
+          if [ "$PYARROW_VERSION" = "16.1.0" ]; then
+              # pandas 3.0 made string-backed dtypes the default for columns that used
+              # to come back as plain object dtype (and changed pa.array(Categorical)'s
+              # inferred value type to large_string); 16.1.0's pandas-compat code and its
+              # own test suite's expected values both predate that and assume object/
+              # string, so an unconstrained `pip install pandas` (today's 3.1.0) breaks
+              # ~42 of the suite's tests on dtype-equality assertions alone -- confirmed
+              # from the CI log (test_backwards_compatible_index_naming et al. failing
+              # with dtype='object' vs dtype='str', test_dictionary_from_pandas with
+              # string vs large_string). Same release-era-drift shape as the cython/
+              # pytest caps above, this time in a floating *test* dependency.
+              PANDAS_SPEC="pandas<3"
+              # test_memory.py hardcodes `should_have_jemalloc = sys.platform == "linux"`
+              # (removed in later pyarrow releases, e.g. it's gone by 25.0.1) -- it never
+              # checks whether *this* build actually enabled jemalloc. We build with
+              # ARROW_JEMALLOC=OFF (see the env block above: "jemalloc is page-size
+              # fragile"), so these 4 tests fail here on every Linux build that disables
+              # it, regardless of pandas: confirmed from the CI log, each failing on the
+              # exact jemalloc/mimalloc assertion (ArrowNotImplementedError, "Unsupported
+              # backend 'jemalloc'", "'jemalloc' in ['mimalloc', 'system']", an
+              # allocation byte-count tied to the allocator). Excluded by test function
+              # name via -k (not --deselect: --pyargs resolves test files under the
+              # interpreter's own site-packages path, which varies per matrix.python, so
+              # there is no single static path --deselect could name).
+              PYTEST_K="not (test_env_var or test_specific_memory_pools or test_supported_memory_backends or test_table_uses_memory_pool)"
+          fi
           # pandas may lack a free-threaded riscv64 wheel; skip its tests if so
           if "$pybin" -m pip install -U --only-binary=pandas \
-              --extra-index-url "$PIP_EXTRA_INDEX_URL" pandas; then
+              --extra-index-url "$PIP_EXTRA_INDEX_URL" "$PANDAS_SPEC"; then
               export PYARROW_TEST_PANDAS=ON
           else
               echo "WARNING: pandas has no riscv64 wheel for ${{ matrix.python }}; disabling pandas tests."
@@ -372,7 +401,11 @@ jobs:
           fi
 
           "$pybin" -c 'import pyarrow; pyarrow.create_library_symlinks()'
-          "$pybin" -m pytest -r s --pyargs pyarrow
+          if [ -n "$PYTEST_K" ]; then
+              "$pybin" -m pytest -r s --pyargs pyarrow -k "$PYTEST_K"
+          else
+              "$pybin" -m pytest -r s --pyargs pyarrow
+          fi
           PYARROW_TEST_EOF
 
   publish:
