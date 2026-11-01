@@ -1,0 +1,115 @@
+Upstream-Status: To upstream [not yet submitted]
+
+Add a riscv64 Linux platform to the build system
+
+Platform::current() panics on any arch other than x86_64/aarch64, so
+configure cannot run on riscv64 at all. Add a LinuxRiscv variant: rustls
+like the other Linux targets, the riscv64gc Rust triple, uv's riscv64gc
+release archive, and a manylinux_2_39_riscv64 wheel tag. protoc and node
+publish no riscv64 binary, so protoc requires PROTOC_BINARY, and node
+reuses the x86_64 entry (only reached without NODE_BINARY), the same way
+LinuxArm already reuses the x86_64 clang-format binary.
+
+diff --git a/build/configure/src/python.rs b/build/configure/src/python.rs
+index 947582f..a8e4fe8 100644
+--- a/build/configure/src/python.rs
++++ b/build/configure/src/python.rs
+@@ -155,6 +155,7 @@ impl BuildAction for BuildWheel {
+             let platform_tag = match platform {
+                 Platform::LinuxX64 => "manylinux_2_35_x86_64",
+                 Platform::LinuxArm => "manylinux_2_35_aarch64",
++                Platform::LinuxRiscv => "manylinux_2_39_riscv64",
+                 Platform::MacX64 => "macosx_12_0_x86_64",
+                 Platform::MacArm => "macosx_12_0_arm64",
+                 Platform::WindowsX64 => "win_amd64",
+diff --git a/build/ninja_gen/src/archives.rs b/build/ninja_gen/src/archives.rs
+index 3d2120b..ca6852d 100644
+--- a/build/ninja_gen/src/archives.rs
++++ b/build/ninja_gen/src/archives.rs
+@@ -23,6 +23,7 @@ pub struct OnlineArchive {
+ pub enum Platform {
+     LinuxX64,
+     LinuxArm,
++    LinuxRiscv,
+     MacX64,
+     MacArm,
+     WindowsX64,
+@@ -36,6 +37,7 @@ impl Platform {
+         match (os, arch) {
+             ("linux", "x86_64") => Self::LinuxX64,
+             ("linux", "aarch64") => Self::LinuxArm,
++            ("linux", "riscv64") => Self::LinuxRiscv,
+             ("macos", "x86_64") => Self::MacX64,
+             ("macos", "aarch64") => Self::MacArm,
+             ("windows", "x86_64") => Self::WindowsX64,
+@@ -49,7 +51,7 @@ impl Platform {
+             // On Linux, wheels are not allowed to link to OpenSSL, and linking setup
+             // caused pain for AnkiDroid in the past. On other platforms, we stick to
+             // native libraries, for smaller binaries.
+-            Platform::LinuxX64 | Platform::LinuxArm => "rustls",
++            Platform::LinuxX64 | Platform::LinuxArm | Platform::LinuxRiscv => "rustls",
+             _ => "native-tls",
+         }
+     }
+@@ -58,6 +60,7 @@ impl Platform {
+         match self {
+             Platform::LinuxX64 => "x86_64-unknown-linux-gnu",
+             Platform::LinuxArm => "aarch64-unknown-linux-gnu",
++            Platform::LinuxRiscv => "riscv64gc-unknown-linux-gnu",
+             Platform::MacX64 => "x86_64-apple-darwin",
+             Platform::MacArm => "aarch64-apple-darwin",
+             Platform::WindowsX64 => "x86_64-pc-windows-msvc",
+diff --git a/build/ninja_gen/src/node.rs b/build/ninja_gen/src/node.rs
+index b6731e2..608f29b 100644
+--- a/build/ninja_gen/src/node.rs
++++ b/build/ninja_gen/src/node.rs
+@@ -18,7 +18,8 @@ use crate::input::BuildInput;
+ 
+ pub fn node_archive(platform: Platform) -> OnlineArchive {
+     match platform {
+-        Platform::LinuxX64 => OnlineArchive {
++        // todo: nodejs.org publishes no riscv64 build; set NODE_BINARY
++        Platform::LinuxX64 | Platform::LinuxRiscv => OnlineArchive {
+             url: "https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-x64.tar.xz",
+             sha256: "325c0f1261e0c61bcae369a1274028e9cfb7ab7949c05512c5b1e630f7e80e12",
+         },
+diff --git a/build/ninja_gen/src/protobuf.rs b/build/ninja_gen/src/protobuf.rs
+index 1198f65..eaba26b 100644
+--- a/build/ninja_gen/src/protobuf.rs
++++ b/build/ninja_gen/src/protobuf.rs
+@@ -31,6 +31,9 @@ pub fn protoc_archive(platform: Platform) -> OnlineArchive {
+                 sha256: "6c554de11cea04c56ebf8e45b54434019b1cd85223d4bbd25c282425e306ecc2",
+             }
+         },
++        Platform::LinuxRiscv => {
++            panic!("protoc publishes no riscv64 binary; set PROTOC_BINARY")
++        }
+         Platform::MacX64 | Platform::MacArm => {
+             OnlineArchive {
+                 url: "https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-osx-universal_binary.zip",
+@@ -54,7 +57,7 @@ fn clang_format_archive(platform: Platform) -> OnlineArchive {
+                 sha256: "64060bc4dbca30d0d96aab9344e2783008b16e1cae019a2532f1126ca5ec5449",
+             }
+         }
+-        Platform::LinuxArm => {
++        Platform::LinuxArm | Platform::LinuxRiscv => {
+             // todo: replace with arm64 binary
+             OnlineArchive {
+                 url: "https://github.com/ankitects/clang-format-binaries/releases/download/anki-2021-01-09/clang-format_linux_x86_64.zip",
+diff --git a/build/ninja_gen/src/python.rs b/build/ninja_gen/src/python.rs
+index 16c61f7..755ca13 100644
+--- a/build/ninja_gen/src/python.rs
++++ b/build/ninja_gen/src/python.rs
+@@ -37,6 +37,12 @@ pub fn uv_archive(platform: Platform) -> OnlineArchive {
+                 sha256: "eee8dd658d20e5ac85fec9c2326b6cbc9d83a1eef09ef07433e58698ac849591",
+             }
+         },
++        Platform::LinuxRiscv => {
++            OnlineArchive {
++                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-riscv64gc-unknown-linux-gnu.tar.gz",
++                sha256: "dd43289c567fda3ca59ec714ffca09125f1149289448667f36a4bb7c29c859be",
++            }
++        },
+         Platform::MacX64 => {
+             OnlineArchive {
+                 url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-x86_64-apple-darwin.tar.gz",
