@@ -107,9 +107,11 @@ jobs:
           # sdist above) raises NotImplementedException for. That is the engine, not the
           # compiled sqlglot, so only that test is left out of the otherwise-unchanged
           # `python -m unittest` run (no braces below: cibuildwheel expands {project}).
+          # It runs as a module (python -m), not from stdin: test_optimizer's process pool
+          # re-imports __main__ in its workers, which a script read from stdin cannot offer.
           CIBW_TEST_COMMAND: |
             cd {project}
-            SKIP_INTEGRATION=1 python - <<'PYEOF'
+            cat > unittest_without_duckdb_gap.py <<'PYEOF'
             import sys
             import unittest
 
@@ -130,10 +132,12 @@ jobs:
                 return kept
 
 
-            suite = prune(unittest.defaultTestLoader.discover("."))
-            result = unittest.TextTestRunner(verbosity=1).run(suite)
-            sys.exit(0 if result.wasSuccessful() else 1)
+            if __name__ == "__main__":
+                suite = prune(unittest.defaultTestLoader.discover("."))
+                result = unittest.TextTestRunner(verbosity=1).run(suite)
+                sys.exit(0 if result.wasSuccessful() else 1)
             PYEOF
+            SKIP_INTEGRATION=1 python -m unittest_without_duckdb_gap
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
