@@ -1,0 +1,251 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+#   https://github.com/krypton-byte/neonize/blob/0.9.0/.github/workflows/release.yml
+# and the `test` job of
+#   https://github.com/krypton-byte/neonize/blob/0.9.0/.github/workflows/ci.yml
+name: Build neonize wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/neonize.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-neonize.yml'
+      - 'docs/packages/neonize.yaml'
+      - 'patches/neonize/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-neonize.yml'
+      - 'docs/packages/neonize.yaml'
+      - 'patches/neonize/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: neonize
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build neonize ${{ matrix.version }} py310-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      NEONIZE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout neonize ${{ env.NEONIZE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: krypton-byte/neonize
+          ref: ${{ env.NEONIZE_VERSION }}
+          path: neonize
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '^1.25'
+          cache-dependency-path: neonize/goneonize/go.sum
+
+      - name: Install the C toolchain for cgo (sqlite)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc libc6-dev
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          enable-cache: false
+
+      # Upstream regenerates the protobuf code first (`task build proto`); its
+      # proto-sync CI job keeps the committed output identical to that.
+      - name: Build the goneonize shared library
+        working-directory: neonize/goneonize
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -buildmode=c-shared -ldflags=-s -o neonize-linux-riscv64.so
+          mv neonize-linux-riscv64.so ../neonize/
+
+      - name: Build wheel
+        working-directory: neonize
+        run: uv build --wheel
+
+      # Upstream wheels ship only neonize's LICENSE, but the shared library
+      # statically links every Go module of goneonize's build graph.
+      - name: Add the bundled Go modules' licences to the wheel
+        working-directory: neonize
+        run: |
+          set -euo pipefail
+          (cd goneonize && go mod vendor)
+          uvx --from wheel==0.46.3 wheel unpack -d unpacked dist/*.whl
+          licenses="unpacked/neonize-${NEONIZE_VERSION}/neonize-${NEONIZE_VERSION}.dist-info/licenses"
+          cd goneonize/vendor
+          find . -type f \( -name 'LICENSE*' -o -name 'LICENCE*' -o -name 'COPYING*' -o -name 'NOTICE*' \) -printf '%P\n' |
+            while read -r f; do
+              install -D -m 644 "$f" "../../${licenses}/goneonize/vendor/$f"
+            done
+          cd ../..
+          rm dist/*.whl
+          uvx --from wheel==0.46.3 wheel pack -d dist "unpacked/neonize-${NEONIZE_VERSION}"
+
+      # Upstream's tools/repack.py retags as manylinux2014_<arch>, which has no riscv64.
+      - name: Retag the wheel manylinux_2_39_riscv64
+        working-directory: neonize
+        run: uvx --from wheel==0.46.3 wheel tags --remove --python-tag py310 --platform-tag manylinux_2_39_riscv64 dist/*.whl
+
+      - name: Check the wheel ships the riscv64 goneonize library and its licences
+        run: |
+          python3 - neonize/dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          version = os.environ["NEONIZE_VERSION"]
+          whl = sys.argv[1]
+          assert whl.endswith(f"/neonize-{version}-py310-none-manylinux_2_39_riscv64.whl"), whl
+          with zipfile.ZipFile(whl) as zf:
+              names = zf.namelist()
+              header = zf.read("neonize/neonize-linux-riscv64.so")[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+              licenses = f"neonize-{version}.dist-info/licenses/"
+              for want in ("LICENSE", "goneonize/vendor/go.mau.fi/libsignal/LICENSE",
+                           "goneonize/vendor/go.mau.fi/whatsmeow/LICENSE",
+                           "goneonize/vendor/github.com/mattn/go-sqlite3/LICENSE"):
+                  assert licenses + want in names, want
+              print(whl, sum(n.startswith(licenses) for n in names), "licence files")
+          EOF
+
+      - name: Archive the GPL sources
+        run: tar -cf gpl-sources.tar --exclude-vcs --exclude=neonize/dist --exclude=neonize/unpacked --exclude='neonize/neonize/neonize-linux-riscv64.*' neonize
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: neonize-${{ env.NEONIZE_VERSION }}-py310-none-manylinux_riscv64
+          path: neonize/dist/*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: neonize-${{ env.NEONIZE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test neonize ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      NEONIZE_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+
+    steps:
+      - name: Checkout neonize ${{ env.NEONIZE_VERSION }} tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: krypton-byte/neonize
+          ref: ${{ env.NEONIZE_VERSION }}
+          sparse-checkout: tests
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: neonize-${{ env.NEONIZE_VERSION }}-py310-none-manylinux_riscv64
+          path: dist
+
+      # python-magic, imported by neonize.client, dlopens libmagic.
+      - name: Install libmagic
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libmagic1t64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --find-links dist "neonize==${NEONIZE_VERSION}" pytest
+
+      # neonize downloads the library from GitHub when it is missing from the package.
+      - name: Check the bundled library is installed
+        run: |
+          python - <<'EOF'
+          import importlib.util, pathlib
+          spec = importlib.util.find_spec("neonize")
+          lib = pathlib.Path(spec.submodule_search_locations[0]) / "neonize-linux-riscv64.so"
+          assert lib.is_file(), lib
+          print(lib)
+          EOF
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: FFI smoke test (binder loads built library)
+        run: |
+          python -c "
+          from neonize.client import NewClient
+          from neonize.aioze.client import NewAClient
+          assert hasattr(NewClient, 'reject_call') and hasattr(NewAClient, 'reject_call')
+          from neonize.proto.Neonize_pb2 import JoinedGroup
+          j = JoinedGroup()
+          assert not j.HasField('Sender')
+          print('FFI smoke test OK')
+          "
+
+      # tests/test_binder.py sets SPHINX=1 for the whole session above, which skips
+      # the one test that calls into the library.
+      - name: Run the live library test
+        run: python -m pytest tests/test_whatsmeow_update.py -q -k pair_phone -rs
+
+  publish:
+    name: Publish neonize ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: neonize-${{ matrix.version }}-py310-none-manylinux_riscv64
+      gpl-sources-artifact: neonize-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: neonize and its Go modules, including go.mau.fi/libsignal (GPL-3.0)
