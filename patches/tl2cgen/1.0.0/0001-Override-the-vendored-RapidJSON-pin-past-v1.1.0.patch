@@ -1,0 +1,54 @@
+From f922b28cf9739a27639c0d6c0e69e365c37329dd Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH] Override the vendored RapidJSON pin past v1.1.0
+
+cmake/ExternalLibs.cmake FetchContents RapidJSON at GIT_TAG v1.1.0, both here
+and (identically) in the Treelite dependency this file also FetchContents.
+v1.1.0's GenericStringRef declares a copy-assignment operator that assigns
+to its own const length member, which GCC 14 (manylinux_2_39_riscv64 ships
+14.3.1) rejects outright as an error, not a warning -- reproduces on any
+sufficiently new GCC/Clang, nothing riscv64-specific about it. Upstream fixed
+this 2 commits after v1.1.0 by deleting the operator entirely
+(Tencent/rapidjson@862c39be371278a45a88d4d1d75164be57bb7e2d).
+
+Because Treelite's own cmake/ExternalLibs.cmake declares the same
+RapidJSON FetchContent dependency (unconditionally, with no `if (NOT TARGET
+rapidjson)` guard) and is pulled in *before* this file's own RapidJSON
+block runs, this file's own declaration never executes -- Treelite's wins
+and is what actually gets built, pin and all. Pre-declaring RapidJSON here,
+before the Treelite section, uses CMake's documented FetchContent override
+rule (a parent's declaration of a dependency's shared dependency takes
+precedence over the one that dependency would declare itself, as long as
+the parent declares first) to carry the fixed commit through to both
+Treelite's and TL2cgen's own use of RapidJSON with a single change.
+
+Upstream-Status: To upstream [not yet submitted; same v1.1.0 pin exists in
+TL2cgen 1.0.0 and in Treelite 4.1.2, the exact version TL2cgen's own CMake
+FetchContents, so this is an upstream gap shared by both repos, not a
+drive-by fix in either one]
+---
+ cmake/ExternalLibs.cmake | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/cmake/ExternalLibs.cmake b/cmake/ExternalLibs.cmake
+index 0000000..0000000 100644
+--- a/cmake/ExternalLibs.cmake
++++ b/cmake/ExternalLibs.cmake
+@@ -1,5 +1,14 @@
+ include(FetchContent)
+
++# Pre-declare RapidJSON past v1.1.0 so the fix carries through to Treelite's
++# own (unguarded, earlier-running) FetchContent of the same dependency below.
++# See CLAUDE.md / this patch's commit message for why.
++FetchContent_Declare(
++  RapidJSON
++  GIT_REPOSITORY https://github.com/Tencent/rapidjson
++  GIT_TAG 862c39be371278a45a88d4d1d75164be57bb7e2d
++)
++
+ # Treelite
+ set(TREELITE_VERSION 4.1.2)
+ find_package(Treelite ${TREELITE_VERSION})
+--
+2.50.1

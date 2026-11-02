@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's Linux wheel job, which drives cibuildwheel straight from
+# the python/ subdirectory (hatchling custom build hook compiles libtl2cgen.so
+# via CMake and tags the wheel py3-none-<platform> itself, no manual cmake
+# invocation or retagging needed):
+#   https://github.com/dmlc/tl2cgen/blob/1.0.0/ops/build-linux.sh
+name: Build tl2cgen wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tl2cgen.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tl2cgen.yml'
+      - 'docs/packages/tl2cgen.yaml'
+      - 'patches/tl2cgen/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tl2cgen.yml'
+      - 'docs/packages/tl2cgen.yaml'
+      - 'patches/tl2cgen/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Pinned explicitly so the gpl_sources job pulls the same image the wheel's
+  # vendored libgomp came from.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tl2cgen
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tl2cgen ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      TL2CGEN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout tl2cgen ${{ env.TL2CGEN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dmlc/tl2cgen
+          ref: ${{ env.TL2CGEN_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # cmake/ExternalLibs.cmake FetchContents RapidJSON at the same v1.1.0
+      # pin Treelite (also FetchContent'd here) uses; v1.1.0 fails to compile
+      # under GCC 14. See the patch for the override mechanism.
+      - name: Patch tl2cgen source
+        run: git apply python-wheels/patches/tl2cgen/${{ env.TL2CGEN_VERSION }}/0001-*.patch
+
+      # hatchling's default license-files glob is rooted at pyproject.toml's
+      # own directory (python/), which has no LICENSE of its own -- only the
+      # repository root does.
+      - name: Stage licence text for packaging
+        run: cp LICENSE python/LICENSE
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # The custom hatchling build hook tags the wheel py3-none-<platform>
+          # itself (sysconfig.get_platform()), so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # CMAKE_POLICY_VERSION_MINIMUM covers the vendored fmtlib's old cmake_minimum_required.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ CMAKE_POLICY_VERSION_MINIMUM=3.5
+          CIBW_TEST_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy,scipy
+          CIBW_TEST_SOURCES: tests/example_data
+          # test_basic.py itself is not run: check_predictor() builds its DMatrix
+          # from a SciPy CSR matrix via np.array(..., copy=False, dtype=cast),
+          # which numpy 2 (the only line with a riscv64 wheel) rejects outright
+          # on any platform -- a tl2cgen/numpy2 gap, not a riscv64 one.
+          # DMatrix-from-dense-ndarray with no dtype override asks for no such cast.
+          CIBW_TEST_COMMAND: |
+            python3 - <<'PYEOF'
+            import numpy as np
+            import treelite, tl2cgen
+
+            model = treelite.frontend.load_xgboost_model_legacy_binary(
+                'tests/example_data/mushroom/mushroom.model')
+            tl2cgen.export_lib(model, toolchain='gcc', libpath='/tmp/mushroom.so', verbose=True)
+            predictor = tl2cgen.Predictor(libpath='/tmp/mushroom.so', verbose=True)
+            data = np.random.rand(5, predictor.num_feature).astype('float32')
+            out = predictor.predict(tl2cgen.DMatrix(data))
+            assert out.size == 5 and np.isfinite(out).all(), out
+            print(out.flatten())
+            PYEOF
+
+      - name: Check the wheel carries libtl2cgen and a vendored libgomp
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for want in ("tl2cgen/lib/libtl2cgen.so", "libgomp"):
+              if not any(want in n for n in names):
+                  raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
+          print("\n".join(n for n in names if ".so" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tl2cgen-${{ env.TL2CGEN_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for tl2cgen ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      TL2CGEN_VERSION: ${{ matrix.version }}
+
+    steps:
+      # auditwheel vendors the image's libgomp.so.1 into the wheel.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tl2cgen-${{ env.TL2CGEN_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish tl2cgen ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tl2cgen-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: tl2cgen-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
