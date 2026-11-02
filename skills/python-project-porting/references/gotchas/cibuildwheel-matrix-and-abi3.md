@@ -23,6 +23,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
 - **245** — `actions/checkout` must run before `actions/download-artifact` in the same
 - **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
+- **672** — A `before-build` hook that `uv pip install --require-hashes`s from a PEP 751
+  `pylock.toml` fails outright on riscv64 if that lock file's `environments` never lists a
+  `riscv64` marker (the turbohtml PGO case).
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -1248,3 +1251,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       Error` names a Python version that belongs to an *earlier* entry in `CIBW_BUILD`
       (check the identifiers' build order, gotcha 96/633), and the failing configure has no
       compiler-identification lines, suspect a shared build dir before suspecting the image.
+
+672. **A `before-build` hook that `uv pip install --require-hashes`s from a PEP 751
+    `pylock.toml` fails outright on riscv64 if that lock file's `environments` list never
+    includes a `riscv64` marker (the turbohtml PGO case; see `build-turbohtml.yml`).**
+    turbohtml's own `[tool.cibuildwheel] linux.before-build` trains a profile-guided build by
+    running `uv pip install --preview-features pylock --require-hashes --system --python
+    python --requirements {project}/pylock.pgo.toml --group pgo` before the real build. That
+    lock file's `environments` array enumerates only the marker combinations upstream's own
+    hosted CI builds on — linux x86_64/aarch64, darwin arm64, win32 AMD64/ARM64 — because `uv
+    lock` only records environments it has actually resolved against; `platform_machine ==
+    "riscv64"` is not one of them. `--require-hashes` makes uv refuse to synthesize a
+    resolution outside the recorded set, so the install fails immediately with a
+    no-compatible-environment error, before the PGO training run or the real build ever
+    starts, on every interpreter.
+    - **Not an extension-portability problem** — the C core itself has no riscv64-specific
+      code at all (every SIMD path is gated `#if defined(__aarch64__) || defined(__SSE2__)`
+      with a portable scalar fallback the project's own CI already exercises as a dedicated
+      `scalar`/`TH_FORCE_SCALAR` job); a plain `python -m build`/`pip wheel` from the checkout
+      builds and imports cleanly on an unrelated architecture precisely because that path
+      never touches `pylock.pgo.toml` — only cibuildwheel's `before-build` hook does.
+    - **The fix is the same shape as the project's own PyPy override**: turbohtml already
+      carries a `[[tool.cibuildwheel.overrides]] select = "pp*-manylinux*"` block that drops
+      `before-build` and the `-Db_pgo=use` config-setting for a different reason (PyPy's
+      cpyext overhead would train the wrong workload). Add a sibling override selecting
+      `*-manylinux_riscv64 *-musllinux_riscv64` that drops the same two settings, keeping
+      `-Db_lto=true`/`-Dstrip=true`. One patch, `Upstream-Status: Inappropriate` (the lock
+      file's own environment list is upstream's project choice for their CI matrix, not a
+      bug) — not worth a `CIBW_BEFORE_BUILD`/`CIBW_CONFIG_SETTINGS` env-var override instead,
+      since replicating a platform-scoped `config-settings.setup-args` *list* through the
+      flat `CIBW_CONFIG_SETTINGS` env var risks the build frontend not accumulating repeated
+      `-C setup-args=` flags the way the TOML array does.
+    - **General lesson**: before trusting any upstream `before-build`/`before-all` hook that
+      installs from a lock file (`pylock.toml`, `uv.lock`, `poetry.lock`, a pip
+      `--constraint` file with hashes) verbatim on riscv64, check whether that lock file was
+      actually resolved for the target triple — a hash-pinned install has no fallback path
+      the way an unconstrained `pip install` does.

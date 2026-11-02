@@ -693,6 +693,11 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   `CMakeCache.txt` and `find_package(Python ...)` fails reporting the *previous*
   interpreter's version, not the one just hinted — fix with
   `CIBW_BEFORE_BUILD: rm -rf {package}/build`, no source patch needed (the pypcode case).
+- **672** — A `before-build` hook that `uv pip install --require-hashes`s from a PEP 751
+  `pylock.toml` fails outright on riscv64 if that lock file's `environments` list never
+  includes a `riscv64` marker, before the real build ever starts — add a riscv64
+  `[[tool.cibuildwheel.overrides]]` that drops the hook, the same shape as a PyPy override
+  dropping it for a different reason (the turbohtml PGO case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
