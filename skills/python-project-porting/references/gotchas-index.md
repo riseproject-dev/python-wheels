@@ -1210,6 +1210,7 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
 - **660** — A setuptools SWIG extension built from an old tag can ship the `.so` without its
+- **673** — A scikit-build-core `if.failed = true` override can silently ship a pure-Python
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
