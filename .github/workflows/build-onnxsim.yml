@@ -61,6 +61,15 @@ jobs:
         # whose entries share no key with the base matrix collapses onto a
         # single combination instead of adding one job per entry.
         python: [cp311, cp312]
+        # pytest_k also drops four tests that cannot pass here, all outside what
+        # upstream's own wheel legs run:
+        # - test_symbolic_batch_dim_is_analysed_at_batch_one imports torch without
+        #   the needs_torch guard its neighbours have (ModuleNotFoundError);
+        # - test_workaround_fixes_default_optimization_for_plain_matmul asserts that
+        #   onnxruntime still has the MatMulNBits bug the workaround targets, and
+        #   the onnxruntime on our registry is newer than that;
+        # - the two test_qat tests compare against a golden loss value and a golden
+        #   model hash recorded on x86_64 (6.47 expected, 5.83 here).
         include:
           - python: cp311
             # No riscv64 onnxruntime wheel on cp311; the rest of the suite still
@@ -71,10 +80,19 @@ jobs:
             # batch statistics into the inference output, so the equivalence check
             # rejects the correctly fused Conv; same failure on x86_64 without
             # onnxruntime. Upstream CI always installs onnxruntime.
-            pytest_k: not test_fuse_conv_bn_into_conv and not test_fuse_convtranspose_bn
+            pytest_k: >-
+              not test_fuse_conv_bn_into_conv and not test_fuse_convtranspose_bn
+              and not test_symbolic_batch_dim_is_analysed_at_batch_one
+              and not test_workaround_fixes_default_optimization_for_plain_matmul
+              and not test_the_full_batch_default_is_the_graph_it_always_was
+              and not test_activation_quantization_off_leaves_the_weight_only_pass_untouched
           - python: cp312
             onnxruntime: onnxruntime
-            pytest_k: ''
+            pytest_k: >-
+              not test_symbolic_batch_dim_is_analysed_at_batch_one
+              and not test_workaround_fixes_default_optimization_for_plain_matmul
+              and not test_the_full_batch_default_is_the_graph_it_always_was
+              and not test_activation_quantization_off_leaves_the_weight_only_pass_untouched
 
     env:
       ONNXSIM_VERSION: ${{ matrix.version }}
@@ -111,12 +129,18 @@ jobs:
           # CIBW_BEFORE_BUILD only pip-installs cmake/ninja for its manylinux_2_28
           # x86_64/aarch64 images.
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py builds RelWithDebInfo so the sanitizer job gets symbols, and
+          # upstream strips the DWARF again when repairing the wheel. Compiling and
+          # linking that debug info is what keeps the extension build at about 5
+          # hours here, so build Release (same -O level family and -DNDEBUG, no -g);
+          # the last -DCMAKE_BUILD_TYPE on the command line wins.
           CIBW_ENVIRONMENT: >-
             CMAKE_ARGS="
             -DONNX_USE_PROTOBUF_SHARED_LIBS=OFF
             -DProtobuf_USE_STATIC_LIBS=ON
             -DONNX_USE_LITE_PROTO=ON
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            -DCMAKE_BUILD_TYPE=Release
             "
             ONNXSIM_RELEASE=${{ env.ONNXSIM_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
@@ -138,7 +162,9 @@ jobs:
           # so ignore the files themselves. 0.8.1 added six more torch-importing
           # files (test_gan, test_graph_grad_torch_autograd, test_pytorch_export_simple,
           # test_rknn3_compat, test_tflite_export_torchvision, test_torch_export_integration).
-          CIBW_TEST_REQUIRES: pytest pytest-xdist ${{ matrix.onnxruntime }}
+          # pytest<9.2: from 9.2 pytest.approx() rejects a numpy float32 tolerance
+          # (test_calibration_streaming's abs=2 * step).
+          CIBW_TEST_REQUIRES: pytest<9.2 pytest-xdist ${{ matrix.onnxruntime }}
           # Since 0.8.0 tests/ holds ~900 files, mostly the Axera/quantization/pruning
           # suites, and at the pace of a riscv64 runner they cannot finish inside the
           # 6 hour job limit (13% after 6 hours, every attempt). Upstream's own wheel
