@@ -2026,3 +2026,50 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
      round-trip compare), not a deselect in this repo's CI workflow. The same shape — any
      project whose own correctness/exactness logic relies on a float→unsigned-integer
      round-trip comparison around a type's max value — can recur well beyond CDF/pycdfpp.
+
+693. **`Problem.solve(diagnostics=True)` throwing `std::bad_cast` (via nanobind's default
+     `RuntimeError` translation) on *every* call that passes it, while the identical
+     `diagnostics=False` solve of the same problem succeeds, is a riscv64 toolchain defect in
+     `std::print`/`std::format` — not a bug reachable by patching the project's own code (the
+     sleipnirgroup-jormungandr case).** `Problem::solve()`'s `options.diagnostics` flag gates
+     nothing except calls into `print_iteration_diagnostics()`/`print_setup_diagnostics()`/
+     `print_solver_diagnostics()` (`include/sleipnir/util/print_diagnostics.hpp`), which route
+     through `slp::print()`/`slp::println()` (`include/sleipnir/util/print.hpp`), themselves
+     thin wrappers around `std::print()`/`std::println()`; no other solver logic depends on the
+     flag (checked across `ipm.hpp`/`sqp.hpp`/`newton.hpp`/`problem.hpp`). On
+     `manylinux_2_39_riscv64` (GCC 14.3.1), every one of the 34 Python tests that pass
+     `diagnostics=True` (confirmed 1:1 against `grep -rn diagnostics=True python/test`) fails
+     with `RuntimeError: std::bad_cast` the instant the print path runs; every test that omits
+     the flag, or passes `diagnostics=False`, passes. This surfaced only *after* fixing the
+     unrelated plain-pip version-skew failure (gotcha 422's pattern, `PIP_ONLY_BINARY`) that had
+     been masking it — the test step never got far enough to hit it before.
+     - **Isolating the exact mechanism did not succeed with the tools available in a cloud
+       session (no `docker` daemon, so the real `manylinux_2_39_riscv64` image couldn't be
+       pulled to test against the actual GCC 14.3.1).** A `riscv64-linux-gnu-g++-14` (Ubuntu's
+       14.2.0 cross package) + `qemu-riscv64-static` reproduction of the identical
+       `print_diagnostics.hpp` calls — as a static executable, and again as a `dlopen()`'d
+       `-fvisibility=hidden -fvisibility-inlines-hidden` shared object (mirroring how
+       `nanobind_add_module`'s `STABLE_ABI` links the extension), with and without
+       `-flto -pthread` — printed correctly every time, no exception. `libstdc++`'s only
+       runtime `std::bad_cast` throw sites (`grep -rn bad_cast /usr/include/c++/14/`) are
+       `use_facet<Facet>` (gated behind the format spec's `L` flag, which none of these format
+       strings use — checked every `{...}` spec in the file) and `basic_ios`'s facet-cache
+       check; neither is reachable from a plain `std::print`/`std::format` call with no
+       locale/`ios` object involved, going by the GCC 14.2.0 headers. The 14.2.0→14.3.1 patch
+       gap, or something specific to the real `dlopen()`+`STABLE_ABI`+riscv64-runner
+       combination, is the most likely remaining difference, but neither was reproducible here.
+     - **Workaround, not a fix: patch the Python *tests* to pass `diagnostics=False`, leaving
+       everything else (including `spy=True` in a spy test) untouched.** `spy` is an
+       independent `bool` parameter from `options.diagnostics` (`problem.hpp`'s
+       `solve(options, spy)`), and the `Spy<Scalar>` helper (`include/sleipnir/util/spy.hpp`)
+       writes through `std::ofstream`, never `std::format`/`std::print`, so `spy=True` alone
+       doesn't hit this path and the spy test still exercises its real feature. Every other
+       assertion in the patched tests (`ExitStatus`, decision-variable values) is unaffected,
+       since `diagnostics` gates no solver math — only the diagnostic printing is skipped. Tag
+       the patch `Upstream-Status: Inappropriate`: this isn't a defect to send upstream, it's
+       our riscv64 toolchain's.
+     - **If re-investigating:** get access to the real `quay.io/pypa/manylinux_2_39_riscv64`
+       GCC 14.3.1 (`docker run --platform linux/riscv64` where a daemon is available, or a
+       riscv64 runner directly) rather than a cross-compiled approximation, and check whether
+       the failure needs the real Python/nanobind `dlopen()` + `STABLE_ABI` runtime — not just
+       a hand-rolled `dlopen()` host — to reproduce.
