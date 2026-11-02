@@ -32,6 +32,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
   lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
 - **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
   path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
+- **682** — `build-system.requires` can carry packages that only enable an optional runtime
+  feature the wheel being built does not even ship — on riscv64 that is still a doomed
+  from-source build, not a no-op (the eclipse-sumo case).
 
 ---
 
@@ -721,3 +724,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       the pin is the generic answer. Upstreams that moved to `[tool.setuptools_scm]
       version_file = '<pkg>/...'` (pyarrow 25.0.1's scikit-build-core `pyproject.toml`)
       never hit it.
+
+682. **`build-system.requires` can carry packages that only enable an optional *runtime*
+    feature the wheel being built does not even ship — on riscv64 that is still a doomed
+    from-source build, not a no-op (the eclipse-sumo case; see `build-eclipse-sumo.yml`).**
+    eclipse-sumo's `pyproject.toml` lists `lxml`, `numpy`, `pandas` and `matplotlib` in
+    `[build-system] requires` with upstream's own comment: "all dependencies below (except
+    for scikit) are just to enable the tool detection in netedit" — a GUI tool this port's
+    `CHECK_OPTIONAL_LIBS=OFF`/`ENABLE_FOX=OFF` configuration excludes from the wheel
+    entirely (confirmed by grepping the checkout: nothing under `tools/build_config/sumo`,
+    the only subtree this wheel packages, imports any of the four). None of the four have a
+    riscv64 wheel on PyPI, so PEP 517 build isolation source-builds the whole stack before
+    `scikit-build-core` ever runs, and it dies two hours in — `numpy`/`pandas`/`matplotlib`/
+    `contourpy` all build fine, but matplotlib's own dependency **Pillow** does not:
+    `RequiredDependencyException: jpeg` / "The headers or library files could not be found
+    for jpeg" — because this workflow's `CIBW_BEFORE_ALL_LINUX` deliberately skips upstream's
+    `install_dependencies.sh` (which installs `libjpeg-turbo-devel` for the GUI/FOX leg we
+    don't build).
+    - **The fix is not "install `libjpeg-turbo-devel`"** — that would make a multi-hour
+      from-source build of numpy/pandas/matplotlib/Pillow succeed just to throw the result
+      away unused, and adds a GUI-only system package to a headless build for a feature this
+      wheel cannot expose. The narrow fix is a patch dropping the unused entries down to
+      `requires = ["scikit-build-core>=0.10"]` (`patches/eclipse-sumo/1.28.0/`,
+      `Upstream-Status: Inappropriate` — riscv64-only, since x86_64/aarch64/mac/win all have
+      prebuilt wheels for the four and never hit this).
+    - **Check what a `build-system.requires` entry is actually *for* before patching around
+      its absence.** `[project] dependencies` (the wheel's real runtime deps) is the
+      authoritative list; an entry only in `[build-system] requires` with no matching
+      CMake/scikit-build-core usage (`grep` the checkout's `CMakeLists.txt`/`cmake/` for the
+      package name) is either a genuine build-time tool or, as here, upstream copying its
+      full-GUI-build dependency list into every configuration regardless of what that
+      configuration ships.
+    - Same family as gotcha 422 (a from-source build dying on Pillow), but a different root
+      cause: 422 is a missing `PIP_EXTRA_INDEX_URL` on the build container; this is an
+      upstream `requires` entry that is simply dead weight for the wheel shape being built.

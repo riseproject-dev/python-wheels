@@ -1335,6 +1335,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
 - **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
   path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
+- **682** — `build-system.requires` can carry packages that only enable an optional runtime
+  feature the wheel being built does not even ship — on riscv64 that is still a doomed
+  from-source build, not a no-op (the eclipse-sumo case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
