@@ -45,6 +45,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
   without resolving their LFS objects first.
 - **546** — A project can ship its C++ dependency-manager cache inside the sdist, making the
   from-sdist build hermetic where a from-checkout build is not.
+- **683** — `CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file into `{project}` dirties
+  a `setuptools-git-versioning` checkout via untracked files alone.
 
 ---
 
@@ -564,6 +566,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       mechanism dirtying the tree here is the same `git apply` gotcha 31 warns about for
       `setuptools_scm`; the fix differs only because `versioneer` offers no pretend-version
       variable to short-circuit its own git calls the way `setuptools_scm` does.
+
+683. **`CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file straight into `{project}`
+    dirties a `setuptools-git-versioning` checkout even though nothing is `git apply`'d or
+    committed (the pymp3 case).** Gotchas 31 and 315 are both about a *patch* dirtying a
+    tracked file; this is a third, lighter way to poison the version, and it needs no patch
+    at all. pymp3's `CIBW_BEFORE_ALL_LINUX` `cp`s `libmad`'s and `lame`'s vendored `COPYING`
+    files to `{project}/LICENSE.libmad` and `{project}/LICENSE.lame` so setuptools' default
+    license glob picks them up (gotcha 44) — new, untracked files, never `git add`ed. The
+    build still succeeds and the wheel still carries both licenses, but the version embedded
+    in its metadata comes out as `0.2.0.post0+git.<sha>.dirty` instead of the tagged `0.2.0`,
+    breaking gotcha 18's three-way match (`update_doc.py` then refuses to publish: "version
+    ... is not declared in the package YAML"). The reason gotchas 31/315's usual read of
+    "dirty" doesn't apply: pymp3 uses `setuptools-git-versioning`, not `setuptools_scm` or
+    `versioneer`, and its `is_dirty()` runs `git status --short` — which, unlike
+    `git describe --dirty`, reports untracked files (`??`) as dirty too, not just modified
+    tracked ones. Also unlike `setuptools_scm`, `setuptools-git-versioning` has no
+    `SETUPTOOLS_SCM_PRETEND_VERSION`-style environment escape hatch at all (confirmed by
+    reading its source: the only `os.environ` read is template `{env:VAR}` substitution, not
+    a version override).
+    - **Fix is cheaper than either 31 or 315: make the new files invisible to
+      `git status`, not patched-around.** Append their names to `{project}/.git/info/exclude`
+      *before* copying them in:
+      ```yaml
+      CIBW_BEFORE_ALL_LINUX: >-
+        ... &&
+        printf '%s\n' LICENSE.libmad LICENSE.lame >> {project}/.git/info/exclude &&
+        cp /tmp/libmad/COPYING {project}/LICENSE.libmad &&
+        cp /tmp/lame/COPYING {project}/LICENSE.lame
+      ```
+      `.git/info/exclude` is the repo-local, untracked-by-git twin of `.gitignore` — it
+      changes nothing Python/setuptools ever reads (the files still land on disk and still
+      glob into the wheel), it only changes what `git status --short`/`git diff` report, so
+      `is_dirty()` goes back to `False` and the tag's own version (`0.2.0`) comes through
+      clean. Verified standalone: a throwaway repo tagged and then given one untracked file
+      reports `is_dirty() == True`; adding that filename to `.git/info/exclude` flips it to
+      `False` with the file's content completely untouched.
+    - **Costs nothing to catch**: a local `pip wheel .` after the `CIBW_BEFORE_ALL_LINUX`
+      equivalent prints the wheel filename, so a stray `.postN+git....dirty` is visible
+      before it ever reaches CI (same local-validation habit as gotcha 31).
+    - **Generalizes beyond LICENSE staging**: anything a `CIBW_BEFORE_ALL*` step writes
+      into `{project}` — a generated header, a staged vendor tree, a stamped version file —
+      dirties a `setuptools-git-versioning` (or any `git status`-based) checkout the same
+      way, even when nothing is ever `git add`ed or committed.
 
 319. **A release tag can exist, be reachable, and check out cleanly, yet still be the
     wrong commit — because it is not even an ancestor of the default branch (the

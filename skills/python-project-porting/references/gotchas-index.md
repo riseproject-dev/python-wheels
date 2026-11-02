@@ -626,6 +626,11 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   have no git-tag counterpart at all, several PyPI versions sharing one tag — strip the
   trailing `.<N>` segment to recover the tag, and replay upstream's own version-stamping
   release script rather than inventing a scheme (the ufal.udpipe case).
+- **683** — `CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file straight into `{project}`
+  dirties a `setuptools-git-versioning` checkout even though nothing is `git apply`'d or
+  committed — its dirty check is `git status --short`, which (unlike `git describe --dirty`)
+  flags untracked files too; `.git/info/exclude` the staged filenames before copying them in
+  (the pymp3 case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
