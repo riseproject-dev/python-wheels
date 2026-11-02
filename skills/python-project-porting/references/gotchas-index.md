@@ -541,6 +541,10 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   published sdist ships none of the extension's own C++ source at all — `pip wheel <sdist>
   --no-deps --no-build-isolation` on any host is what actually proves a build is attempted,
   not the requires list (the mplib case).
+- **670** — A public git repo can be only the "core" submodule of a private outer repo, and
+  the real published wheel can be built from the outer repo, not the public one — a
+  `find_package()`/`FetchContent` audit of the public tree misses plugins whose source (and
+  a `proprietary/` directory reference) only exists in the private half (the ovito case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

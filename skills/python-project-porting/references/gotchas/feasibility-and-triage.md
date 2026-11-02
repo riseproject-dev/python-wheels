@@ -5868,3 +5868,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      pin — which only ever shipped `manylinux1_x86_64`/macOS/Windows wheels — is not itself
      fatal: it is gotcha 346's exact shape, fixed the same way `build-pymupdfb.yml` fixes
      it.)
+
+670. **A public git repo can be only the "core" submodule of a private outer repo, and the
+     real published wheel can be built from the outer repo, not the public one (the ovito
+     case).** gitlab.com/stuko/ovito looks like a complete, buildable project: a real
+     CMakeLists.txt tree, GPL-3/MIT dual license, no vendored blobs, and every `find_package()`
+     it calls (Qt6, Boost, OpenSSL, SQLite3; HDF5/NetCDF-C/zstd pulled in as git submodules and
+     statically linked when `OVITO_BUILD_PYPI=ON`) resolves against this repo's existing
+     Rocky-10-riscv64 precedent (shiboken6/pyside6-essentials already build Qt6-dependent
+     extensions there). That tree alone would be a feasible, if large, port. But the actual
+     PyPI `ovito` wheel ships far more than this repo can produce: inspecting the real
+     manylinux_2_39_aarch64 wheel's zip central directory with `ci_scripts/wheel_contents.py`
+     (no download needed) shows compiled plugins for Intel's OSPray/OpenVKL/Embree4/rkcommon/
+     OpenImageDenoise and NVIDIA's ANARI/VisRTX ray-tracing backends, none of which is reachable
+     from any `find_package()`/`FetchContent_Declare()` anywhere in the public CMake tree.
+     `cmake/OvitoTesting.cmake` names the reason directly — a comment points at
+     `proprietary/ovito/anari/CMakeLists.txt` as the ANARI plugin's source location — and
+     `tests/README.md` confirms the shape outright: "These tests live in the `ovito/` submodule
+     (the open-source core repository). Tests covering proprietary plugins live in
+     `proprietary/tests/` in the outer repo." The `proprietary/` directory does not exist in
+     this checkout (no folder, no `.gitmodules` entry, no git history for it at all) — the
+     public repo is itself only the `ovito/` submodule of a private "outer" repo that OVITO
+     GmbH builds the real wheel from, and the ray-tracing plugins baked into that wheel live
+     exclusively in the private half. README.md/CONTRIBUTING.md say the same thing from the
+     product side: this repo builds "OVITO Basic" under GPL-3; the real wheel's own
+     `dist-info/METADATA` instead declares `License-Expression: MIT` and ships Pro-grade
+     renderers, so the artifact being matched is provably not a build of the public repo alone.
+     There is also no public build recipe to mirror even for the part that is public: the
+     repo's own `.gitlab-ci.yml` only runs a Debug `cmake --build . --target install` +
+     `ovito --nogui` smoke test, never packages a wheel, and PyPI ships no sdist for `ovito` to
+     fall back on either. This is gotcha 157/246/582's closed-source-vendor-inside-an-open-
+     looking-package pattern one level up: instead of one vendored binary blob, it's an entire
+     private sibling repo supplying the plugins that make the published artifact what it is.
+     A from-source build of the public repo alone would produce a materially different,
+     degraded `ovito` that silently drops its advertised ray-tracing renderers — not an
+     equivalent artifact under the same name. Verdict: `parked`. Revisit if OVITO GmbH ever
+     publishes the `proprietary/` outer repo, or ships riscv64 wheels itself, or splits a
+     Basic-only (ANARI/OSPray-free) artifact out under a different name.
