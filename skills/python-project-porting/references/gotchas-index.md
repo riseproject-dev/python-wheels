@@ -1245,6 +1245,11 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
   side effect of the install step `build-vtk.yml` already runs; tar it up and
   `upload-artifact` it separately rather than rebuilding anything or touching the published
   wheel (the vtk / cadquery-ocp case).
+- **691** — A non-relocatable native-deps build (one dependency's exported CMake config
+  records another's install path as an absolute string, e.g. netCDF recording HDF5's path)
+  must be built at the *same literal absolute path* the later job extracts it into when the
+  deps build is split into its own job — a tarball makes the bytes portable, not the baked-in
+  paths (the meshioplusplus / netCDF case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

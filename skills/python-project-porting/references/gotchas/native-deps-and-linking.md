@@ -61,6 +61,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **661** — `VTK_INSTALL_SDK=ON`'s headers/cmake-config output is a free side effect of a
   build step that already runs; tar it up and upload it as its own artifact rather than
   rebuilding anything or touching the published wheel (the vtk / cadquery-ocp case).
+- **691** — Splitting a non-relocatable native-deps build into its own job breaks CMake
+  `find_package()` for the later build job unless both jobs agree on the same literal
+  absolute install path (the meshioplusplus / netCDF case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -923,3 +926,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       artifact with a lengthened `retention-days` is the additive option — note in the PR that
       it is time-limited and will need re-cutting (or a proper publish path) once the
       downstream port actually resumes.
+
+691. **Splitting a non-relocatable native-deps build into its own job breaks CMake
+     `find_package()` for the later build job unless both jobs agree on the same literal
+     absolute install path (the meshioplusplus / netCDF case).** meshioplusplus vendors
+     upstream's `build-permissive-libs.sh`, whose own header warns the install prefix "is not
+     relocatable" because netCDF's generated `netCDFConfig.cmake` records its dependencies'
+     paths (e.g. HDF5's) as absolute strings, not ones computed relative to the config file's
+     own location. Splitting the deps build into its own job (to amortize it across the
+     `cp312`/`cp313`/`cp314` matrix) built them with `-DCMAKE_INSTALL_PREFIX=/project/deps`
+     (the deps job's own `GITHUB_WORKSPACE` bind-mount), tarred that up, and untarred it into
+     `/opt/meshioplusplus-deps` in the separate `cibuildwheel` container the matrix jobs run
+     in — a different absolute path than the one baked into the CMake config files. Every
+     matrix leg's CMake configure step failed identically: `netCDFConfig.cmake: File or
+     directory /project/deps referenced by variable netCDF_INSTALL_PREFIX does not exist!`
+     - **The fix is to build at the same absolute path the later job extracts into, not to
+       patch the dependency's CMake files.** Bind-mount the deps job's `docker run` so the
+       library is built directly at `/opt/meshioplusplus-deps` (the literal path
+       `CIBW_BEFORE_ALL_LINUX` later untars the same tarball into), instead of building at
+       one path and relying on the tarball to make it "portable" — a non-relocatable prefix
+       has no portable form, only a consistent one.
+     - **This generalizes beyond netCDF.** Any native dependency built in a separate "deps"
+       job from the one that links it — the build-once-C++/dep-wheel-pattern shape gotcha 17
+       describes — needs its install prefix checked for this before splitting jobs: a
+       CMake/pkg-config/`*-config.cmake` file that embeds an absolute path for *any* of its
+       own dependencies (common when one dependency's `find_package()` result is baked into
+       another's exported config, as HDF5's is into netCDF's) will fail the same way the
+       moment the prefix moves, even though the library's own files land at the expected
+       path.
