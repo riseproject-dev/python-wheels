@@ -1387,6 +1387,11 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   source package ahead of the installed wheel, so `pytest {project}/tests` silently tests
   the pure-Python fallback; stage `tests` + `pyproject.toml` with `test-sources` as in gotcha
   25 (the munkres case).
+- **680** — `--doctest-modules --pyargs <pkg>` collects a `cffi_modules` project's own
+  `*_build.py` helper alongside the real doctests, and it crashes with `FileNotFoundError` on
+  the installed wheel (the header it reads at import time is build-time-only, not shipped) —
+  target the module file directly, resolved off the installed path, instead (the imagequant
+  case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
