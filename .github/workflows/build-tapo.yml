@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/mihai-dinculescu/tapo/blob/v0.12.2/.github/workflows/tapo-py.yml
+name: Build tapo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tapo.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tapo.yml'
+      - 'docs/packages/tapo.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tapo.yml'
+      - 'docs/packages/tapo.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tapo
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tapo ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # tapo-py's pyo3 dependency has a plain extension-module feature (no
+        # abi3-pyNN), so every interpreter needs its own build, same as
+        # upstream's own per-interpreter PyPI wheel matrix.
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      TAPO_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout tapo v${{ env.TAPO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mihai-dinculescu/tapo
+          ref: v${{ env.TAPO_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: tapo-py
+          target: riscv64gc-unknown-linux-gnu
+          # aws-lc-sys (pulled in by reqwest's rustls stack) ships prebuilt
+          # riscv64gc bindings, and cmake is already in the manylinux image.
+          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+
+      - name: Check wheel contents
+        run: |
+          python3 - tapo-py/dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"tapo-{os.environ['TAPO_VERSION']}-"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.startswith("tapo/tapo.") and n.endswith(".so") for n in names), names
+          print(whl, "ok")
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream's own CI (tapo-py.yml) builds and publishes wheels with no
+      # Python test step at all, and tapo-py ships no test suite of its own:
+      # every example under tapo-py/examples needs a real Tapo device on the
+      # local network. This mirrors that -- a straight import proves the
+      # extension loads.
+      - name: Smoke test
+        run: |
+          uv pip install tapo-py/dist/*.whl
+          python -c "import tapo; print(tapo.__doc__)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tapo-${{ env.TAPO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: tapo-py/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tapo ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tapo-${{ matrix.version }}-*-manylinux_riscv64
