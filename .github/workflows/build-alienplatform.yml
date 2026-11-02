@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/alienplatform/alien/blob/b33b2c81540e1faeee91ef682f3e022039420bac/.github/workflows/python-bindings.yml
+# (the `wheels` job's `--no-default-features --features all-platforms,platform-sdk`
+# build; those two features are also the crate's own [features] default in
+# crates/alien-bindings-python/Cargo.toml, so plain cibuildwheel/maturin needs
+# no extra feature flags to match it).
+name: Build alienplatform wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/alienplatform.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-alienplatform.yml'
+      - 'docs/packages/alienplatform.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-alienplatform.yml'
+      - 'docs/packages/alienplatform.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # alienplatform publishes no git tags (continuous, trunk-based releases via
+  # release-plz); this is the commit whose root Cargo.toml carries
+  # `version = "3.3.49"`, matching the PyPI release exactly. A future version
+  # bump needs this updated by hand the same way (gotcha 103's shape).
+  ALIENPLATFORM_REF: b33b2c81540e1faeee91ef682f3e022039420bac
+  # Matches rust-toolchain.toml at that commit.
+  RUST_TOOLCHAIN: "nightly-2026-10-03"
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: alienplatform
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build alienplatform ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3 carries an explicit abi3-py310 feature (Cargo.toml), so maturin
+        # always tags the wheel cp310-abi3 regardless of which interpreter
+        # compiles it - matching the one Linux wheel upstream publishes per
+        # arch. cp313/cp314 reuse+retest the cp312-built wheel
+        # (cibuildwheel's find_compatible_wheel). No cp314t: abi3 wheels
+        # aren't compatible with the free-threaded ABI, and upstream ships no
+        # free-threaded build either.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      ALIENPLATFORM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout alienplatform ${{ env.ALIENPLATFORM_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alienplatform/alien
+          ref: ${{ env.ALIENPLATFORM_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/alien-bindings-python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # alien-bindings-python ships no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container.
+          # package-dir is the crate subdirectory, but Cargo still resolves
+          # the enclosing workspace root (Cargo.lock) by walking up from
+          # there, so no extra workspace checkout step is needed.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain ${{ env.RUST_TOOLCHAIN }}
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            RUSTUP_TOOLCHAIN=${{ env.RUST_TOOLCHAIN }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Base `import alienplatform` only loads the compiled extension:
+          # grpcio/protobuf are the optional [worker] extra, imported lazily
+          # inside worker_runtime.py's functions, never at module load.
+          # storage()/kv()/etc. build a lazy handle synchronously with no
+          # network or credential access, so this is a safe smoke test -
+          # matching upstream's own wheels job, which runs no test command at
+          # all against this feature set (its pytest suite only covers a
+          # separate --features local build, see python-bindings.yml's `test`
+          # job).
+          CIBW_TEST_COMMAND: >-
+            python -c "import alienplatform;
+            s = alienplatform.storage('files');
+            print('alienplatform OK:', type(s).__name__)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: alienplatform-${{ env.ALIENPLATFORM_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish alienplatform ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: alienplatform-${{ matrix.version }}-*-manylinux_riscv64
