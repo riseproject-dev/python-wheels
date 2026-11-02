@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own release pipeline
+# (putitoutthere.toml's `dirsql-py` package: maturin, cibuildwheel-free,
+# `manylinux = "2_28"`), narrowed to riscv64. No riscv64 manylinux image goes
+# as low as 2_28 (every riscv64 port in this repo uses manylinux_2_39_riscv64),
+# so that is the one deviation from upstream's own floor.
+name: Build dirsql wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dirsql.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dirsql.yml'
+      - 'docs/packages/dirsql.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dirsql.yml'
+      - 'docs/packages/dirsql.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dirsql
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build dirsql ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      DIRSQL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dirsql-py-v${{ env.DIRSQL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: thekevinscott/dirsql
+          ref: dirsql-py-v${{ env.DIRSQL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/python
+          output-dir: wheelhouse/
+        env:
+          # pyo3's abi3-py310 feature (packages/python/Cargo.toml) is on
+          # unconditionally, so one abi3 wheel serves every interpreter it
+          # claims -- built on cp310 (the requires-python floor) and
+          # re-tested on the newer ones via find_compatible_wheel.
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # packages/python's [tool.maturin] ships no system deps; the Rust
+          # toolchain its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest pytest-describe pytest-asyncio
+          # Binding tier: real PyO3 core, real filesystem, no server/network
+          # fixtures -- mirrors upstream's own `binding` CI job.
+          CIBW_TEST_SOURCES: packages/python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import dirsql._dirsql as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            cd packages/python/tests &&
+            python -m pytest -v integration/binding
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dirsql-${{ env.DIRSQL_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dirsql ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dirsql-${{ matrix.version }}-*-manylinux_riscv64
