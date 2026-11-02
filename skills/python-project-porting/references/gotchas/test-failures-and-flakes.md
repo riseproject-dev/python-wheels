@@ -1997,3 +1997,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       covers the case where the project's tests read stderr. Any OpenUSD-based port
       (usd-core, usd-exchange, a future OpenUSD consumer) built on these runners prints the
       warning unless it carries this patch.
+
+671. **A test that compares a round-tripped float→unsigned-int cast to catch lossy
+     conversions can pass on x86_64 and genuinely fail on riscv64, because the cast's
+     overflow behavior is C99 undefined behavior that RISC-V's `fcvt.wu.s`/`fcvt.wu.d`
+     resolve differently (the pycdfpp case).** pycdfpp's `_exactly_as`/`_keeps_every_value`
+     helper (`pycdfpp/__init__.py`) decides whether a value can losslessly become a given
+     CDF numeric type by converting it and converting back (`converted.astype(values.dtype)`)
+     and comparing to the original, raising if anything changed. Its own test suite feeds it
+     `uint32` `4294967295` (`UINT32_MAX`) against `CDF_FLOAT`: `float32(4294967295)` rounds to
+     the nearest representable value, `4294967296.0` (ordinary IEEE-754 round-to-nearest-even,
+     identical on every architecture — this is *not* the bug). The actual divergence is the
+     next step, converting that `4294967296.0` back to `uint32`, which overflows the target
+     type and is undefined behavior in C99. Installing the real upstream `pycdfpp==0.19.0`
+     wheel with the matching numpy version and running the identical cast on x86_64 gives `0`
+     (numpy's codegen truncates/wraps on overflow there), which correctly differs from the
+     original `4294967295` and makes the helper raise as the test expects. RISC-V's F/D
+     extension specifies `fcvt.wu.s`/`fcvt.wu.d` as *saturating* on overflow — clamping to the
+     type's max representable value, `4294967295` for `uint32` — so the round-tripped value on
+     riscv64 comes back identical to the original, the helper wrongly concludes nothing was
+     lost, and the test's expected `ValueError` never fires. Confirmed this is a real
+     architecture difference, not a flaky/pre-existing upstream test bug, before concluding
+     anything: the test passes cleanly against the genuine x86_64 wheel with the exact riscv64
+     CI's numpy version, so it is not something that was already broken upstream. Do not
+     "fix" this by patching the test to skip the assertion — that hides a narrow but real
+     riscv64-specific correctness gap in the project's own round-trip-compare exactness check,
+     which belongs in an upstream issue/fix (e.g. an explicit bounds check instead of a
+     round-trip compare), not a deselect in this repo's CI workflow. The same shape — any
+     project whose own correctness/exactness logic relies on a float→unsigned-integer
+     round-trip comparison around a type's max value — can recur well beyond CDF/pycdfpp.

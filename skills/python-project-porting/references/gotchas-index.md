@@ -1435,6 +1435,11 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   passing clean on either side, is a per-input library bug, not corrupted GDAL global state
   left over from an earlier failed test; `--timeout-method=thread` can't interrupt a
   blocking GIL-held C call, so only the job's own wall clock ends the hang (pyramids-gis).
+- **671** — A test that round-trips a float→unsigned-int cast to catch lossy conversions can
+  pass on x86_64 and genuinely fail on riscv64: the overflow is C99 undefined behavior, and
+  RISC-V's `fcvt.wu.s`/`fcvt.wu.d` saturate instead of wrapping, so a real architecture
+  difference — not a flaky or pre-existing upstream test bug — defeats the round-trip
+  comparison (the pycdfpp case).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
