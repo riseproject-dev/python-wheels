@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `test-python` job of
+# https://github.com/SynthGL/wolfxl-oss/blob/v2.0.36/.github/workflows/ci.yml
+name: Build wolfxl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/wolfxl.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wolfxl.yml'
+      - 'docs/packages/wolfxl.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wolfxl.yml'
+      - 'docs/packages/wolfxl.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: wolfxl
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build wolfxl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 (pyo3 has no abi3-pyNN feature here), so one wheel per interpreter.
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      WOLFXL_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout wolfxl-oss v${{ env.WOLFXL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SynthGL/wolfxl-oss
+          ref: v${{ env.WOLFXL_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wolfxl and test dependencies
+        run: |
+          uv pip install wolfxl --no-index --find-links dist --force-reinstall
+          uv pip install pytest pytest-xdist openpyxl Pillow
+
+      - name: Test import
+        run: |
+          python -c "import wolfxl._rust as m; assert m.__file__.endswith('.so'), m.__file__; print('Import successful')"
+
+      - name: Run offline workbook editing study tests
+        run: python -m unittest discover -s study/agent-edit -p 'test_*.py' -v
+
+      - name: Run Python tests
+        run: |
+          pytest tests -q -n auto --dist worksteal \
+            --ignore=tests/vendored_openpyxl \
+            --ignore-glob='tests/test_ooxml_*.py' \
+            --ignore-glob='tests/test_*audit*.py' \
+            --ignore-glob='tests/test_*benchmark*.py' \
+            --ignore-glob='tests/test_release_*.py' \
+            --ignore-glob='tests/test_*sota*.py' \
+            --ignore=tests/test_compatibility_matrix_render.py \
+            --ignore=tests/test_external_oracle_preservation.py \
+            --ignore=tests/test_import_release_artifact_proof_reports.py \
+            --ignore=tests/test_openpyxl_compat_oracle.py \
+            --ignore=tests/test_openpyxl_corpus_runner_summary.py \
+            --deselect=tests/test_calc_functions.py::TestWhitelist::test_public_formula_counts_match_whitelist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wolfxl-${{ env.WOLFXL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish wolfxl ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: wolfxl-${{ matrix.version }}-*-manylinux_riscv64
