@@ -350,6 +350,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   non-PyPI GitHub repo's own release assets at build time, with that sibling's release matrix
   (not the package's own tree) missing riscv64 (the pydivert/ebpfdivert case).
 - **676** — A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions
+  of the same-named PyPI project signals a full-language rewrite, even when the project's own
+  PyPI summary never updates to say so (the nb-clean case).
+- **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
+  a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
+  with no riscv64 entry (the scrapli/libscrapli case).
 
 ---
 
@@ -6025,3 +6030,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      the project's name, description, or earlier-version behaviour. Mirrors upstream's own
      `wheels.yml` `wheels` job (`PyO3/maturin-action`, `target: riscv64gc-unknown-linux-gnu`,
      `manylinux: '2_39'`) — the same proven shape as `build-ripgrep.yml`.
+
+677. **Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be a
+     *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
+     with no riscv64 entry, not just a `bindings = "bin"` crate in the same tree (the scrapli
+     case; see `build-scrapli.yml`).** scrapli ("screen scraping client for network devices")
+     shipped a plain `py3-none-any` wheel through 2026.02.20, then flipped at its 2.0 rewrite
+     (PyPI 2026.10.3 onward) to five `py3-none-<platform>` wheels 15-50x larger than before,
+     PyPI summary unchanged. Cloning the real upstream at the matching semver tag (note:
+     upstream switched its git tags from calver to semver at the same boundary, with no
+     algorithmic mapping back to the calver PyPI version it releases under — the mapping has
+     to be hardcoded per release, same idiom as gotcha 3/`build-rtoml.yml`) shows `setup.py`
+     downloads or builds a precompiled `libscrapli` shared object (github.com/scrapli/libscrapli,
+     a *different* repo, built with Zig) and loads it via `ctypes` at import time — no C
+     extension, no Rust, but just as compiled as either. Two wrinkles past 145/676: (1) the
+     wrapper's own `setup.py` *and* its runtime `ffi.py` both hardcode the arch allow-list
+     (`platform.machine()` in `{x86_64, aarch64}` or raise) in two places, so recognizing
+     riscv64 needs patching both the build-time and import-time copies, not just one; (2) the
+     target list that is actually missing riscv64 lives in the *sibling* repo's `build.zig`,
+     which this repo never checks out as the package under build — fetch it at build time
+     into a directory on the runner (not inside the checked-out package tree), patch it there,
+     and point the wrapper's own build-path override env var at that directory so its setup.py
+     skips its normal clone and builds from the patched copy instead. cibuildwheel's Linux
+     containers bind-mount the whole runner filesystem at `/host` (`oci_container.py`,
+     `--volume=/:/host`) specifically so a `CIBW_ENVIRONMENT` value can reach a path like this
+     that sits outside the project directory being built. Mirrors upstream's own
+     `publish.yaml` (loops a `LIBSCRAPLI_ZIG_TRIPLE` env var over per-platform zig builds,
+     done here via cibuildwheel's riscv64 image instead of their shell loop).

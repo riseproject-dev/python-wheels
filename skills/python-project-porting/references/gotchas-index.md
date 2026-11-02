@@ -558,6 +558,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **676** — A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions
   of the same-named PyPI project signals a full-language rewrite, even when the project's own
   PyPI summary never updates to say so (the nb-clean case).
+- **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
+  a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
+  with no riscv64 entry (the scrapli/libscrapli case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
