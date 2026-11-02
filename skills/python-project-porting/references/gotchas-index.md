@@ -565,6 +565,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   still not be buildable from the exact commit a binding vendors: check the enabling fix's
   landing date against the pin's date, not just whether the backend directory exists (the
   pythonmonkey/SpiderMonkey case).
+- **681** — `MANIFEST.in` can vendor a precompiled binary into every wheel with no platform
+  check at all, not even a mismatched tag — a plain glob that copies whatever `.so` files are
+  checked into the source tree regardless of which architecture compiled them (the prody case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

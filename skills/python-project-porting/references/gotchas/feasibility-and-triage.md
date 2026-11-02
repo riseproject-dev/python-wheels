@@ -355,6 +355,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
   a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
   with no riscv64 entry (the scrapli/libscrapli case).
+- **681** — `MANIFEST.in` can vendor a precompiled binary into every wheel with no platform
 
 ---
 
@@ -6101,3 +6102,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      Linux distro ships a riscv64 Firefox/SpiderMonkey build (independent real-hardware proof) or
      this fleet gains a way to rehearse the Mozilla build locally before spending CI runner-hours
      on it.
+
+681. **`MANIFEST.in` can vendor a precompiled binary into every wheel with no platform check
+    at all — not even a mismatched tag to catch it (the prody case; see `build-prody.yml`).**
+    Gotchas 35/81/145 are about a *platform-tagged* wheel whose tag is honest or dishonest
+    about what it holds. This is a different, cheaper-to-miss shape: a package that has
+    nothing to do with per-platform wheel tags at all, where `MANIFEST.in` carries a plain
+    glob like `include prody/*/*/*/*.so` that matches whatever `.so` files happen to be
+    checked into the source tree, regardless of which architecture they were compiled for.
+    ProDy 2.6.1 checks in `prody/proteins/hpbmodule/hpb_Python{2.7,3.8-3.12}/hpb.so` —
+    x86_64 ELF binaries (`file` confirms it), one per supported CPython minor version, kept
+    purely as a convenience so `setup.py`'s own `shutil.copy(...)`/`except FileNotFoundError:
+    pass` can skip compiling `hpb.so` from source on Linux. That copy step is arch-aware by
+    accident (it silently no-ops when the file for the *running* Python's version is absent),
+    but `MANIFEST.in`'s glob is not: it has no idea the build is for riscv64, so it dutifully
+    bundles every one of those x86_64 blobs into the sdist and from there into the wheel on
+    any architecture, cibuildwheel included. Nothing in the build fails — `pip wheel` succeeds
+    on riscv64 exactly as it does on x86_64, because nothing at build time ever loads the
+    blob — so this is invisible to every check that only watches for compile/link errors.
+    - **The tell is a "precompiled fallback" comment plus a *directory tree* of per-version
+      blobs, not a single file.** One blob per interpreter minor version (rather than one
+      blob total) is the signature of "we could not be bothered to recompile this across
+      Python versions either," which is also a signal the project never rebuilds it per
+      architecture.
+    - **Check with `file`, not by reading the code.** `unzip -l` the real published wheel,
+      then `file` every `.so` it contains: a mix of "real" per-interpreter-tagged extensions
+      (`rtbtools.cpython-312-x86_64-linux-gnu.so`) alongside bare-named ones with no
+      interpreter/arch tag at all (`hpb.so`) is the pattern — the untagged name is itself a
+      hint that nothing in the toolchain treats it as a normal per-ABI extension module.
+    - **Exploit the package's own graceful-missing path instead of patching it.** ProDy's
+      `calcSASA()`/`calcHydrophobicOverlapingAreas()` already wrap the optional import in
+      `try/except ImportError: raise ImportError('Please provide hpb.so file.')` — the exact
+      behavior you want when the blob cannot run on this architecture. `rm -f
+      prody/proteins/hpbmodule/hpb_Python*/hpb.so` in `CIBW_BEFORE_BUILD`, before
+      `MANIFEST.in`'s glob ever runs, makes the copy step's own `FileNotFoundError` fire
+      instead of silently shipping a foreign-arch binary with a native-looking name next to
+      real riscv64 `.so` files, which is worse than a build failure because nothing flags it
+      until a user actually calls the one function that needs it.
