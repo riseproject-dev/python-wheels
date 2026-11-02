@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/huggingface/kernels/blob/v0.18.0/.github/workflows/publish_kernels.yml
+# and the test steps of its test_kernels.yaml.
+name: Build kernels wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/kernels.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kernels.yml'
+      - 'docs/packages/kernels.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kernels.yml'
+      - 'docs/packages/kernels.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: kernels
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build kernels ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp38-abi3, cp314t]
+        include:
+          # kernels/Cargo.toml declares pyo3 with abi3-py38 unconditionally, so one
+          # abi3 wheel (built on this repo's cp312 floor) is re-tested on each newer
+          # interpreter; free-threaded CPython gets its own wheel, as upstream's does.
+          - tag: cp38-abi3
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    env:
+      KERNELS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout kernels v${{ env.KERNELS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: huggingface/kernels
+          ref: v${{ env.KERNELS_VERSION }}
+          persist-credentials: false
+
+      # maturin globs LICEN[CS]E* relative to kernels/pyproject.toml, so upstream's
+      # own wheels carry no licence file at all.
+      - name: Stage the licence beside kernels' pyproject.toml
+        run: cp LICENSE kernels/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: kernels
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # sigstore's Rust deps: without this pip picks a newer PyPI sdist over
+          # the registry's riscv64 wheel and builds it from source.
+          CIBW_TEST_ENVIRONMENT: >-
+            HF_HUB_DOWNLOAD_TIMEOUT=60
+            PIP_ONLY_BINARY=cryptography,rfc3161-client
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-benchmark mktestdocs mypy setuptools torch
+            einops matplotlib numpy tabulate
+          CIBW_TEST_SOURCES: kernels/tests kernels/pytest.ini kernels/pyproject.toml
+          # test_tvm_ffi.py is ignored: kernels-test/relu-tvm-ffi has x86_64 builds
+          # only, and apache-tvm-ffi has no riscv64 wheel for cp313/cp314.
+          CIBW_TEST_COMMAND: >-
+            python -c "import kernels._rust as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            files = md.files('kernels');
+            assert any(str(p).endswith('licenses/LICENSE') for p in files), files" &&
+            cd kernels &&
+            python -m mypy.stubtest kernels._rust &&
+            python -m pytest -v -rfEs tests --ignore tests/test_tvm_ffi.py &&
+            python -m pip uninstall -y torch &&
+            python -c "import kernels" &&
+            kernels versions kernels-community/activation
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kernels-${{ env.KERNELS_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish kernels ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: kernels-${{ matrix.version }}-*-manylinux_riscv64
