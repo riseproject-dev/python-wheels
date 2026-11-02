@@ -50,6 +50,12 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # tag is a real matrix dimension (not just an `include:` key) so that each
+        # `include:` entry below *updates* its matching combination instead of both
+        # competing to add the same new key to the one combination there would
+        # otherwise be - see CLAUDE.md gotcha 402 (build-primp.yml/build-arro3-core.yml
+        # shipped only their cp314t wheel this way, with the abi3 leg never built at all).
+        tag: [cp310-abi3, cp314t]
         include:
           # pyo3's abi3-py310 feature is on unconditionally (Cargo.toml), so one
           # abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3 under
@@ -91,8 +97,13 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_SOURCES: tests samples
+          # mft is a pure-Rust maturin crate (no mft/ dir, no [tool.maturin]
+          # python-source in the checkout), so maturin ships it behind a generated
+          # mft/__init__.py re-export shim around a compiled mft.mft submodule -
+          # mft.__file__ is that shim's .py, not the extension, on every leg
+          # (CLAUDE.md gotcha 559/308). Probe the submodule via sys.modules instead.
           CIBW_TEST_COMMAND: >-
-            python -c "import mft; assert mft.__file__.endswith('.so'), mft.__file__" &&
+            python -c "import mft, sys; assert sys.modules['mft.mft'].__file__.endswith('.so'), sys.modules['mft.mft'].__file__" &&
             python -m pytest tests -v
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
