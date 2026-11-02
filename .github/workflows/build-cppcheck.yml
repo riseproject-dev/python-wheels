@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/msclock/cppcheck-wheel/blob/v1.5.3/.github/workflows/release.yml
+name: Build cppcheck wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cppcheck.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cppcheck.yml'
+      - 'docs/packages/cppcheck.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cppcheck.yml'
+      - 'docs/packages/cppcheck.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cppcheck
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build cppcheck ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      CPPCHECK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cppcheck-wheel v${{ env.CPPCHECK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: msclock/cppcheck-wheel
+          ref: v${{ env.CPPCHECK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # wheel.py-api = "py3", so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces pyproject.toml's own [tool.cibuildwheel.linux] before-build: its
+          # `pip install cmake==4.4.4`/`ninja==1.13.2` pins have no riscv64 wheel on
+          # PyPI or this registry, and vcpkg (bootstrapped in-tree, builtin-baseline
+          # 2026-10-04) has no prebuilt cmake/ninja/git for riscv64 either, so it
+          # needs VCPKG_FORCE_SYSTEM_BINARIES plus real binaries on PATH - the
+          # manylinux_riscv64 image's own dnf packages, same as build-ale-py.yml.
+          CIBW_BEFORE_BUILD_LINUX: >-
+            dnf install -y --setopt=install_weak_deps=False
+            zip perl-IPC-Cmd pkgconf-pkg-config cmake ninja-build &&
+            cmake --version && ninja --version
+          # Repeats pyproject.toml's own `environment` table: CIBW_ENVIRONMENT replaces
+          # rather than merges with it (gotcha 107). vcpkg's upstream overrides table
+          # only sets VCPKG_FORCE_SYSTEM_BINARIES for the Linux arches it already knows
+          # about (x86_64/aarch64/armv7l/ppc64le/s390x/i686), not riscv64.
+          CIBW_ENVIRONMENT: >-
+            VCPKG_FORCE_SYSTEM_BINARIES=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Verify the wheel ships the cppcheck binary
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          print("\n".join(n for n in names if "/Cppcheck/" in n))
+          assert any(n.endswith("/Cppcheck/cppcheck") for n in names), names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cppcheck-${{ env.CPPCHECK_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cppcheck ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cppcheck-${{ matrix.version }}-*-manylinux_riscv64
