@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-wheels` job of
+# https://github.com/Canner/WrenAI/blob/wren-core-py-v0.8.2/.github/workflows/publish-wren-core-py.yml
+name: Build wren-core-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/wren-core-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wren-core-py.yml'
+      - 'docs/packages/wren-core-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wren-core-py.yml'
+      - 'docs/packages/wren-core-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: wren-core-py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    # Cargo.toml carries `abi3-py311` unconditionally, so one wheel serves
+    # every GIL-ful interpreter >=3.11; our registry has no riscv64 pyarrow
+    # (a test-only dependency here) below cp312, so the build floor is
+    # cp312 instead -- the wheel is still tagged cp311-abi3 regardless of
+    # which interpreter compiles it (CLAUDE.md gotcha 96).
+    name: Build wren-core-py ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      WREN_CORE_PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      # wren-core-py is not itself a Cargo workspace member; it path-depends
+      # on ../wren-core/core and ../wren-core-base, both siblings in the
+      # Canner/WrenAI monorepo, so the checkout root has to be the repo
+      # root, not core/wren-core-py itself.
+      - name: Checkout WrenAI wren-core-py-v${{ env.WREN_CORE_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Canner/WrenAI
+          ref: wren-core-py-v${{ env.WREN_CORE_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: core/wren-core-py
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          # No [tool.cibuildwheel] table upstream, so the Rust toolchain
+          # maturin needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=pyarrow,numpy
+          CIBW_TEST_REQUIRES: pytest pyarrow
+          CIBW_TEST_SOURCES: core/wren-core-py/tests
+          CIBW_TEST_COMMAND: python -m pytest core/wren-core-py/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wren-core-py-${{ env.WREN_CORE_PY_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish wren-core-py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: wren-core-py-${{ matrix.version }}-*-manylinux_riscv64
