@@ -954,3 +954,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        another's exported config, as HDF5's is into netCDF's) will fail the same way the
        moment the prefix moves, even though the library's own files land at the expected
        path.
+
+692. **A vcpkg port's own per-architecture feature denylist can simply predate riscv64 and
+     say nothing about it, which reads as "untested" rather than the "silently unsupported"
+     it actually is (the cppcheck/pcre case).** `cppcheck-wheel` vendors an overlay vcpkg
+     port for PCRE 8.45 (legacy PCRE1) whose `portfile.cmake` already turns `PCRE_SUPPORT_JIT`
+     off for architectures its bundled JIT doesn't cover:
+     `if(VCPKG_TARGET_ARCHITECTURE MATCHES "(loongarch|^s390)")`. The build failed on riscv64
+     anyway: `pcre_jit_compile.c:65:2: error: #error Unsupported architecture`, from
+     `pcre_jit_compile.c`'s own `#if SLJIT_CONFIG_UNSUPPORTED` guard around the
+     `SLJIT_CONFIG_AUTO` arch-detection block it `#include`s `sljit/sljitLir.c` through.
+     - **The denylist isn't stale, it's just never been asked the question.** `loongarch` and
+       `s390` were added because someone hit this exact `#error` porting *to* those arches;
+       riscv64 was never added because upstream has no riscv64 wheel to test, not because
+       riscv64 is fine. Don't read an architecture's absence from a hand-maintained allow/deny
+       list as a signal either way — check the thing the list is gating.
+     - **Gotcha 231's check answers it directly: `ls`/`grep` the bundled code generator's own
+       source tree for an arch-named backend file.** Unzipping the pcre-8.45 tarball and
+       listing `sljit/sljitNative*.c` shows X86, ARM (32/64/T2), MIPS (32/64), PPC (32/64),
+       SPARC and TILEGX — no RISC-V file at all, confirming this specific sljit fork (frozen
+       with the rest of legacy PCRE1, last released 2021) genuinely cannot build for riscv64
+       and that disabling JIT is correct, not a workaround for a config quirk. This is the
+       mirror image of gotcha 231's blosc2/minicc finding (a bundled JIT that *does* have a
+       real riscv64 backend file, so don't assume unsupported) — here the file-listing check
+       settles it the other way, and PCRE2's separately-maintained, newer sljit fork (gotcha
+       541's `pcre2-sys` case) having a real riscv64 backend is irrelevant: it diverged from
+       this one long before RISC-V support existed in either.
+     - **Fix: extend the existing denylist, don't patch the generated `#error` or try to add
+       a riscv64 sljit backend.** One line,
+       `"(loongarch|^s390)"` → `"(loongarch|^s390|riscv64)"`, patched into the vendored
+       overlay port via `patches/cppcheck/<version>/`, the same `git apply`-after-checkout
+       mechanism `build-ale-py.yml` uses for a patch against an upstream checkout outside this
+       repo. cppcheck itself has no runtime dependency on PCRE's JIT (JIT only accelerates
+       regex matching); turning it off is a build fix with no feature-level downside, matching
+       the proportionality already applied to loongarch/s390.

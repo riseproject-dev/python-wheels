@@ -1250,6 +1250,12 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
   must be built at the *same literal absolute path* the later job extracts it into when the
   deps build is split into its own job — a tarball makes the bytes portable, not the baked-in
   paths (the meshioplusplus / netCDF case).
+- **692** — A vcpkg port's own per-architecture feature denylist (e.g. a `JIT`-support flag
+  turned off for a short list of archs its bundled code generator doesn't cover) can simply
+  predate riscv64 and not mention it at all, reading as "supported" when it silently isn't —
+  `ls`/`grep` the bundled JIT's own source tree for an arch-named backend file (gotcha 231)
+  before trusting the list, then patch the list rather than the generated `#error`
+  (the cppcheck/pcre case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
