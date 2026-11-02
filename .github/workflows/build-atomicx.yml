@@ -17,11 +17,13 @@ on:
     paths:
       - '.github/workflows/build-atomicx.yml'
       - 'docs/packages/atomicx.yaml'
+      - 'patches/atomicx/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-atomicx.yml'
       - 'docs/packages/atomicx.yaml'
+      - 'patches/atomicx/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -96,7 +98,10 @@ jobs:
 
   # Free-threaded wheel: per-interpreter, no abi3 (pyo3 disables abi3 under
   # Py_GIL_DISABLED, same as `gil-abi3`'s own CI.yml --no-default-features leg).
-  # Only cp314t -- the riscv64 image has no cp313t interpreter (gotcha 11).
+  # Only cp314t -- the riscv64 image has no cp313t interpreter (gotcha 11). Targeting
+  # cp314t (upstream's own free-threaded CI only ever builds cp313t) needs
+  # patches/atomicx: upstream's pinned pyo3 0.23 hard-errors "newer than PyO3's maximum
+  # supported version (3.13)" on any arch for cp314t, so the patch bumps it to 0.30.
   build_freethreaded:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
@@ -117,6 +122,15 @@ jobs:
           repository: RuneBlaze/atomicx
           ref: ${{ env.ATOMICX_REF }}
           persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/atomicx/${{ env.ATOMICX_VERSION }}/*.patch
 
       - name: Check the checkout is the requested version
         run: grep -qx "version = \"${ATOMICX_VERSION}\"" Cargo.toml
