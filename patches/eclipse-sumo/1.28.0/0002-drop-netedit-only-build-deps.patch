@@ -1,0 +1,51 @@
+Upstream-Status: Inappropriate [riscv64 has no wheels for lxml/numpy/pandas/matplotlib; this build excludes netedit/GUI entirely (CLAUDE.md gotcha 682), so none of the four are ever imported]
+
+Upstream's build-system.requires lists lxml, numpy, pandas and matplotlib
+purely to enable netedit's optional runtime tool-detection ("all
+dependencies below (except for scikit) are just to enable the tool
+detection in netedit", per upstream's own comment). This workflow builds
+with ENABLE_FOX=OFF/ENABLE_PYTHON_BINDINGS=OFF and packages only
+tools/build_config/sumo (no netedit/GUI), which never imports any of the
+four.
+
+None of them has a riscv64 wheel on PyPI, so PEP 517 build isolation was
+source-building the entire stack before scikit-build-core even starts,
+and it failed two hours in: numpy/pandas/matplotlib/contourpy built fine,
+but matplotlib's own dependency Pillow does not, since this workflow's
+CIBW_BEFORE_ALL_LINUX deliberately skips upstream's
+install_dependencies.sh (which installs libjpeg-turbo-devel only for the
+GUI/FOX leg we don't build):
+
+  RequiredDependencyException: jpeg
+  The headers or library files could not be found for jpeg, a required
+  dependency when compiling Pillow from source.
+
+Installing libjpeg-turbo-devel would just make a multi-hour from-source
+build of a stack we never use succeed before throwing the result away.
+Dropping the four down to scikit-build-core alone removes dead weight for
+this wheel configuration and fixes the build.
+
+diff --git a/build_config/pyproject/eclipse-sumo.toml b/build_config/pyproject/eclipse-sumo.toml
+index 3693fdf5b5..37169fb000 100644
+--- a/build_config/pyproject/eclipse-sumo.toml
++++ b/build_config/pyproject/eclipse-sumo.toml
+@@ -1,11 +1,12 @@
+ [build-system]
+-# all dependencies below (except for scikit) are just to enable the tool detection in netedit
+-requires = [ "scikit-build-core>=0.10",
+-    "lxml",
+-    "numpy<2.3",
+-    "pandas<2.3",
+-    "matplotlib"
+-]
++# Upstream's lxml/numpy/pandas/matplotlib entries below only enable netedit's
++# optional runtime tool-detection; this wheel packages tools/build_config/sumo
++# only (no netedit/GUI - see build-eclipse-sumo.yml) and never imports them, so
++# they are dropped here rather than built from source: riscv64 has no
++# prebuilt wheels for any of them, and matplotlib's own build pulls in
++# Pillow, which then fails to compile without libjpeg headers we do not
++# install (CLAUDE.md gotcha 682).
++requires = ["scikit-build-core>=0.10"]
+ build-backend = "scikit_build_core.build"
+
+ [project]
