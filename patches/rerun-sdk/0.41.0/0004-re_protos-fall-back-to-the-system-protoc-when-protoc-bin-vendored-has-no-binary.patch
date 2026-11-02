@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Sat, 31 Oct 2026 00:00:00 +0000
+Subject: [PATCH] re_protos: fall back to the system protoc when
+ protoc-bin-vendored has no binary
+
+0.41.0's re_protos build script compiles the gRPC descriptor set with
+protoc_bin_vendored::protoc_bin_path()?, which returns an error on a
+target without a vendored binary (riscv64 included), failing the whole
+build before any Rust is compiled. Fall back to $PROTOC (or protoc on
+PATH) and to $PROTOC_INCLUDE (or /usr/include) when the vendored crate
+has nothing for the host; the vendored binary is still preferred
+wherever it exists.
+
+Upstream-Status: To upstream [not filed; this port may only touch riseproject-dev/python-wheels]
+---
+ crates/store/re_protos/build.rs | 11 ++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/crates/store/re_protos/build.rs b/crates/store/re_protos/build.rs
+index 0d0bb38..f5792dd 100644
+--- a/crates/store/re_protos/build.rs
++++ b/crates/store/re_protos/build.rs
+@@ -20,7 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?)
+         .join("rerun.v1alpha1.fds.bin");
+     let temporary = output.with_extension("tmp");
+-    let result = Command::new(protoc_bin_vendored::protoc_bin_path()?)
++    // protoc-bin-vendored ships no riscv64 binary; fall back to the protoc on PATH (or $PROTOC).
++    let protoc = protoc_bin_vendored::protoc_bin_path().unwrap_or_else(|_| {
++        PathBuf::from(std::env::var_os("PROTOC").unwrap_or_else(|| "protoc".into()))
++    });
++    let include = protoc_bin_vendored::include_path().unwrap_or_else(|_| {
++        PathBuf::from(std::env::var_os("PROTOC_INCLUDE").unwrap_or_else(|| "/usr/include".into()))
++    });
++    let result = Command::new(protoc)
+         .arg("--include_imports")
+         .arg("--include_source_info")
+         .arg("--descriptor_set_out")
+@@ -28,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+         .arg("-I")
+         .arg("proto")
+         .arg("-I")
+-        .arg(protoc_bin_vendored::include_path()?)
++        .arg(include)
+         .args(protos)
+         .output()?;
+     if !result.status.success() {
+-- 
+2.43.0
+
