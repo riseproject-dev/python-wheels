@@ -545,6 +545,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   the real published wheel can be built from the outer repo, not the public one — a
   `find_package()`/`FetchContent` audit of the public tree misses plugins whose source (and
   a `proprietary/` directory reference) only exists in the private half (the ovito case).
+- **674** — A latest release missing an arch every recent prior release shipped can be
+  upstream's own publish-pipeline flake, not a new structural gap — read the commit log
+  right after the release tag before porting (the ayafileio case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

@@ -343,6 +343,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **669** — A CMake extension's `pyproject.toml` can look fully buildable while the published
   sdist ships none of the extension's own source — `pip wheel` on any host, not the
   `requires` list, is what proves a build is even attempted (the mplib case).
+- **674** — A latest release missing an arch every recent prior release shipped can be
+  upstream's own publish-pipeline flake, not a new structural gap — read the commit log
+  right after the release tag before porting (the ayafileio case).
 
 ---
 
@@ -5905,3 +5908,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      equivalent artifact under the same name. Verdict: `parked`. Revisit if OVITO GmbH ever
      publishes the `proprietary/` outer repo, or ships riscv64 wheels itself, or splits a
      Basic-only (ANARI/OSPray-free) artifact out under a different name.
+
+674. **A latest release missing an arch every recent prior release shipped can be upstream's
+     own publish-pipeline flake, not a new structural gap — read the commit log right after
+     the release tag before porting (the ayafileio case).** ayafileio builds its own riscv64
+     wheels: `build_wheel_ci.yml` runs a dedicated `build-riscv64` job (cibuildwheel under
+     QEMU, split out from the `x86_64`/`aarch64`/macOS/Windows `build` job only because it is
+     "slower than everything else combined") and feeds it into the same `publish` job. PyPI's
+     JSON confirms this actually ships: every release from 1.4.3 through 2.0.3 carries a full
+     `manylinux_2_39_riscv64` set (cp310 through cp315/cp314t/cp315t). 2.0.4, the latest at
+     triage time, has the other 56 wheels and zero riscv64 ones; `pypi.riseproject.dev/simple/
+     ayafileio/` 404s. Read in isolation, that is indistinguishable from a brand-new,
+     in-scope packaging gap. It isn't: `git log` on the real upstream repo
+     (github.com/SaigyoujYuyuko/ayafileio) shows the `chore: release 2.0.4` tag commit
+     immediately followed, two days before this triage, by `fix: let successful soak gate
+     wheel builds`, `fix: require successful wheel builds before publishing`, `fix: run basic
+     tests for every release`, `fix: run release tests as a regular job` and `fix: support x86
+     wheels and parallelize soak` — i.e. the `publish` job used to gate on
+     `needs.build.result == 'success' || needs.build-riscv64.result == 'success'`, so a flaky
+     or slow QEMU riscv64 leg could fail silently and the release would still publish with
+     every other platform's wheels. 2.0.4's own changelog entry is a pure bugfix (Windows/
+     macOS concurrency fixes only, no CI changes), consistent with the riscv64 leg simply
+     flaking on that run rather than anything in the release breaking riscv64 support itself.
+     Porting this into pypi.riseproject.dev would duplicate a CI pipeline upstream already
+     owns and was actively hardening at the moment of triage, and would need deprecating
+     again the moment upstream's next tag republishes riscv64 wheels through its own pipeline.
+     Verdict: `parked`, not `ci-running`. Before treating "latest release missing arch X" as a
+     new gap, diff the latest release's wheel set against the *previous several* releases'
+     sets (not just whether riscv64 404s today) and read upstream's commit log right after the
+     release tag for its own release-pipeline fixes — a gap that was absent on 20+ consecutive
+     prior releases and appears on exactly the newest one is upstream's regression to fix, not
+     ours to backfill.
