@@ -526,8 +526,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     variable names gotcha 30 and friends use everywhere else in this repo, because most
     other test steps run inside cibuildwheel's `CIBW_TEST_ENVIRONMENT`, which shells out to
     plain `pip` and does read them. `uv`'s pip-compatible subcommand does not: it reads
-    `UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, and `UV_ONLY_BINARY` instead (`uv help pip
-    install` lists the `[env: UV_…]` name for every pip-shaped flag). With the `PIP_*` names
+    `UV_EXTRA_INDEX_URL` and `UV_INDEX_STRATEGY` instead. With the `PIP_*` names
     unrecognized, uv silently fell back to its defaults — default index only (public PyPI,
     no riscv64 wheels), no only-binary restriction — resolved `pyarrow==25.0.1` against
     PyPI's sdist, and source-built it. pyarrow's sdist needs the real Apache Arrow C++
@@ -539,21 +538,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     registry already had the exact riscv64 wheel needed
     (`pyarrow-25.0.1-cp312-cp312-manylinux_2_39_riscv64.whl`); it was simply never
     consulted.
-    - **The fix is renaming the three vars, not touching indexes or CMake.** Swap to
-      `UV_EXTRA_INDEX_URL` / `UV_ONLY_BINARY`, and add `UV_INDEX_STRATEGY:
-      unsafe-best-match` alongside them — uv's default `first-index` strategy stops at
-      the first index that lists the package *name* at all (here, PyPI, which lists
-      pyarrow but not a riscv64 build of it) and never reaches a second index for a
-      platform-specific wheel, the same reasoning build-matplotlib.yml's and
-      build-onnx.yml's `env:` blocks already document for their own `uv pip install`/
-      `uv pip download` steps.
+    - **CORRECTION (gotcha 678 found this the hard way on the kyrax port): `UV_ONLY_BINARY`
+      is NOT a real env var — it is a silent no-op.** This entry originally claimed `uv help
+      pip install` lists an `[env: UV_…]` binding "for every pip-shaped flag," and told
+      readers to rename `PIP_ONLY_BINARY` to `UV_ONLY_BINARY`. That is wrong for uv 0.11.32
+      and 0.13.6 (verified empirically: setting `UV_ONLY_BINARY=<pkg>` has zero effect on
+      resolution across repeated dry-runs, while the `--only-binary <pkg>` CLI flag
+      correctly rejects/backtracks). The index-related flags this entry also mentions
+      (`--extra-index-url` → `UV_EXTRA_INDEX_URL`, `--index-strategy` → `UV_INDEX_STRATEGY`)
+      **do** have working env bindings — only the build-control flags (`--only-binary`,
+      `--no-binary`, `--no-build`) don't. So the real fix for daft's own "Test wheel" step
+      is `UV_EXTRA_INDEX_URL` + `UV_INDEX_STRATEGY: unsafe-best-match` as env, **plus**
+      `--only-binary numpy,pandas,pyarrow` passed on the `uv pip install` command line
+      itself, not as a step `env:` entry. See gotcha 678 for the verification method and
+      for auditing other workflows that may have copied the now-corrected (wrong) guidance.
     - **Any bare `uv pip install`/`uv pip download` step is a signal to check this** —
       not just ones added fresh. cibuildwheel-driven steps (`CIBW_TEST_ENVIRONMENT`,
       `CIBW_ENVIRONMENT`) are unaffected since those still shell out to `pip`; the risk is
       specifically a workflow step that invokes `uv` directly (`setup-uv` + `uv pip
       install`, as build-daft.yml's and build-polars-runtime.yml's "Test wheel" steps do)
       and reuses the `PIP_*` names out of habit from the cibuildwheel case elsewhere in
-      the same file.
+      the same file — or, per gotcha 678, sets the build-control flags as `UV_*` env vars
+      believing (as this entry used to claim) that uv reads them there.
 
 291. **A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
     `PIP_ONLY_BINARY` for packages you never named, because *its* runtime deps are the ones
@@ -1025,3 +1031,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     - **Not image skew.** Each job pulls the image once in its own step, and the later
       `docker run` reuses the local copy without re-pulling. A floating tag cannot change
       between a job's build step and its test step, so pinning a digest does not fix this.
+
+678. **`UV_ONLY_BINARY` (and `UV_NO_BINARY`/`UV_NO_BUILD`) are not real `uv` env vars —
+    setting them is a silent no-op, unlike `UV_EXTRA_INDEX_URL`/`UV_INDEX_STRATEGY`, which
+    do work (corrects gotcha 244's own fix; the kyrax case).** Gotcha 244 told readers to
+    rename a `PIP_ONLY_BINARY` step `env:` entry to `UV_ONLY_BINARY` when a workflow invokes
+    `uv pip install` directly instead of going through cibuildwheel. That advice does not
+    work: verified empirically against real `uv` binaries (0.11.32 and 0.13.6) that setting
+    `UV_ONLY_BINARY=<pkg>` has zero effect on dependency resolution across repeated
+    dry-runs, while passing `--only-binary <pkg>` on the `uv pip install` command line
+    itself correctly rejects/backtracks a no-wheel-available package instead of silently
+    falling through to an sdist build. Reproduced the exact failure and the fix with
+    `uv pip install --python-platform riscv64-unknown-linux --python-version 3.14 pillow`
+    against the real `pypi.riseproject.dev` + public-PyPI indexes: without `--only-binary`
+    it resolves PyPI's latest (sdist-only on riscv64) and tries to build it from source
+    (failing on missing system headers, e.g. libjpeg); with it, it correctly backtracks to
+    whatever riscv64 wheel this registry actually has.
+    - **Only the build-control flags are unsupported as env vars — the index flags work
+      fine.** `--extra-index-url` → `UV_EXTRA_INDEX_URL` and `--index-strategy` →
+      `UV_INDEX_STRATEGY` are genuine, working bindings (gotcha 244's other half is
+      correct); it is specifically `--only-binary`/`--no-binary`/`--no-build` that uv's
+      `[env: UV_…]` documentation implies exist but don't actually take effect.
+    - **The fix is putting `--only-binary <pkgs>` on the command line, not in `env:`.**
+      Keep `UV_EXTRA_INDEX_URL`/`UV_INDEX_STRATEGY: unsafe-best-match` as step `env:` (those
+      still work), and move the only-binary constraint onto the actual `uv pip install ...`
+      invocation as a CLI flag.
+    - **This means build-daft.yml itself — gotcha 244's own motivating example — may still
+      have the exact bug that gotcha was written to fix**, since its "Test wheel" step sets
+      `UV_ONLY_BINARY` as `env:` rather than passing `--only-binary` on the command line.
+      Any other workflow that copied gotcha 244's old (wrong) guidance has the same latent
+      gap: a silently-ignored only-binary constraint that lets a version-skewed or
+      riscv64-wheel-less dependency fall through to an sdist build, which may or may not
+      fail depending on whether the manylinux image happens to carry that dependency's
+      native toolchain. Worth a dedicated audit pass over every workflow using
+      `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` as a step/job `env:` key.
