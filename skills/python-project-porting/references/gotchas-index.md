@@ -1369,6 +1369,10 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
 - **682** — `build-system.requires` can carry packages that only enable an optional runtime
   feature the wheel being built does not even ship — on riscv64 that is still a doomed
   from-source build, not a no-op (the eclipse-sumo case).
+- **689** — A monorepo's sibling Go-binary packages can each pin the same custom build tool
+  independently — fixing one project's `pyproject.toml` for riscv64 does not fix its siblings',
+  since `build-system.requires` resolves into a separate isolated build env per project (the
+  onyx-devtools-audit case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

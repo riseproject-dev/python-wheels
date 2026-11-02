@@ -33,6 +33,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
   path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
 - **682** — `build-system.requires` can carry packages that only enable an optional runtime
+- **689** — A monorepo's sibling Go-binary packages can each pin the same custom build tool
   feature the wheel being built does not even ship — on riscv64 that is still a doomed
   from-source build, not a no-op (the eclipse-sumo case).
 
@@ -758,3 +759,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     - Same family as gotcha 422 (a from-source build dying on Pillow), but a different root
       cause: 422 is a missing `PIP_EXTRA_INDEX_URL` on the build container; this is an
       upstream `requires` entry that is simply dead weight for the wheel shape being built.
+
+689. **A monorepo's sibling Go-binary packages can each pin the same custom build tool
+    independently — fixing one project's `pyproject.toml` for riscv64 does not fix its
+    siblings' (the onyx-devtools-audit case).** onyx-devtools (`tools/ods`) and
+    onyx-devtools-audit (`tools/ods-audit`) share one `hatch_build.py` build hook — the
+    latter's `pyproject.toml` points `[tool.hatch.build.targets.wheel.hooks.custom].path` at
+    `../ods/hatch_build.py` next door — that asks `manygo.is_goos()`/`is_goarch()` for the
+    wheel's platform tag from `GOOS`/`GOARCH`. onyx-devtools already needed manygo bumped
+    0.2.0 -> 0.3.0 for `is_goarch("riscv64")` to return true at all (otherwise hatchling
+    silently falls back to the build host's own interpreter-specific tag for a wheel that
+    holds a riscv64 binary), patched in `patches/onyx-devtools/0.13.0/`. But
+    `[build-system] requires` is read from each project's **own** `pyproject.toml`, resolved
+    into a separate PEP 517-isolated build environment per project — a shared build *hook*
+    (the Python code) does not imply a shared build *environment*. onyx-devtools-audit's own
+    `tools/ods-audit/pyproject.toml` still pinned `manygo==0.2.0` at the exact same upstream
+    tag, and needed the identical bump applied a second time, to a second file, in a second
+    `patches/<pkg>/<version>/` directory, even though the first fix had already landed and
+    the shared hook's code was already proven correct.
+    - **Check every sibling package's own `[build-system] requires` for a shared custom
+      build hook's pinned tool**, even when the hook's source file is known-good for
+      riscv64 already — the fix does not travel with the hook.
