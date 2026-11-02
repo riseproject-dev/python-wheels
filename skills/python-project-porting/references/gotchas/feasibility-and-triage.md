@@ -6188,3 +6188,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       from "a directory exists" to "it actually boots," the same distinction gotcha 679 draws
       — and confirm at that point whether the runner this repo builds on even has the `H`+AIA
       extensions to run it, which a passing compile alone will never prove.
+
+685. **A PyPI listing with no `home_page`/`project_urls` on any release, and a README that
+    says "not published to a package registry yet" despite dozens of real releases, reads
+    exactly like gotcha 157/372's closed-source-no-source-ever shape — but it can still be a
+    large, genuinely public monorepo whose PyPI metadata was simply never filled in (the
+    alienplatform case).** alienplatform's PyPI JSON (all 26 releases) has `home_page: null`,
+    `project_urls: null`, `author: null` on every single one — the three places gotcha
+    157/372's triage normally finds a vendor's marketing page or confirms there is truly
+    nothing — and the bundled long-description's own "Local development" section ("Build an
+    editable local-provider package from the repository root") is dated stale copy that still
+    says the package "is not published to a package registry yet," which reads as more
+    evidence of a closed, pre-release internal tool. A GitHub code/repo search for the PyPI
+    name alone did not surface anything either. What actually settled it was a plain web
+    search for the author string (`"Alien Software, Inc."` / its contact domain) plus the
+    package name together, which surfaced a Hacker News launch post naming the real
+    repository. `git ls-remote` on it worked with no authentication (a public repo), and its
+    `crates/alien-bindings-python` directory — Cargo.toml, pyproject.toml, src/ — matched the
+    wheel's own compiled payload exactly, with the workspace `Cargo.toml`'s `version` field
+    reading the same value as the PyPI release being triaged. **Don't let three independent
+    "no source host" fields plus a stale closed-source-sounding README substitute for an
+    actual web search before writing `not-feasible`/`parked`** — gotcha 157/372 are about
+    packages where that search (GitHub code search, the vendor's own site, `pip download
+    --no-binary` for a real sdist) comes up empty; here it didn't, because the publisher
+    simply never wired up PyPI's metadata fields, not because there was nothing to find.

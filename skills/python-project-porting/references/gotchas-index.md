@@ -573,6 +573,11 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
   but still CI-unverified by its own authors, and even a clean compile needs the host CPU's
   RISC-V Hypervisor extension plus AIA to actually boot a guest — a hardware gate below
   anything a patch or `CIBW_BEFORE_BUILD` step can route around (the boxlite/libkrun case).
+- **685** — A PyPI listing with no `home_page`/`project_urls` on any release, plus a README
+  that still says "not published to a package registry yet" despite dozens of real releases,
+  reads exactly like gotcha 157/372's closed-source-no-source-ever shape — but a plain web
+  search for the publisher's name/contact domain can still surface a large, genuinely public
+  monorepo whose PyPI metadata simply was never filled in (the alienplatform case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
