@@ -887,6 +887,12 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
   undefined; set `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static`,
   not `-lm`, plus `-C link-arg=-lgcc` for C deps' `__ffsdi2`; a hand-set
   `manylinux_2_17_riscv64` tag is uninstallable by uv, use 2_31 (the browser-use-core case).
+- **686** — Bumping a stale pyo3/numpy-rust pin inside a monorepo Cargo workspace hits the
+  sibling binding's `links = "python"` conflict first (give the crate its own empty
+  `[workspace]` to detach it) and a silent ndarray-major-version split second — the bumped
+  crate's own direct `ndarray` dep, and any crate it calls into directly, must land on the
+  same major numpy-rust's internal one uses, checked via `cargo tree -i ndarray@<ver>`, not
+  by reading either Cargo.toml alone (the DeepFilterLib/pyDF case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
