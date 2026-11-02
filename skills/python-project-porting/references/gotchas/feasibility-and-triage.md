@@ -6057,3 +6057,47 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      that sits outside the project directory being built. Mirrors upstream's own
      `publish.yaml` (loops a `LIBSCRAPLI_ZIG_TRIPLE` env var over per-platform zig builds,
      done here via cibuildwheel's riscv64 image instead of their shell loop).
+
+679. **An embedded engine's riscv64 support can be real in the upstream *source tree* and still
+     not be real for the *vendored commit a binding pins* — check the fix's landing date against
+     the pin's date, not just whether the backend directory exists (the pythonmonkey case).**
+     pythonmonkey embeds Mozilla SpiderMonkey (gotcha 335/340's embedded-engine family, one notch
+     harder: here the engine is vendored by *source commit*, not a prebuilt crate download).
+     `setup.sh` reads `mozcentral.version` (a bare mozilla-central git SHA), downloads the entire
+     `mozilla-firefox/firefox` monorepo archive at that commit (not a js-engine-only tarball —
+     the whole tree, browser/toolkit/testing included, for a build that only ever touches
+     `js/src`), applies ten upstream-workaround `sed` patches, then runs SpiderMonkey's own
+     `js/src/configure && make` — Mozilla's `moz.configure`/`mozbuild` meta-build system, not a
+     plain CMake/Meson project, with its own pinned Rust (1.85) + `cbindgen` + clang/LLVM
+     version requirements layered under pythonmonkey's *own* CMake+Rust build on top. This is
+     option (a) of the embedded-engine split, never option (b): there is no prebuilt SpiderMonkey
+     download to swap in per platform. `grep -rl riscv64 js/src/jit/riscv64/` shows a complete,
+     real IonMonkey/Baseline backend (`Assembler`/`CodeGenerator`/`Lowering`/`MoveEmitter`/
+     `Simulator`-riscv64.{h,cpp}), and `build/moz.configure/init.configure` and `js/moz.configure`
+     both recognize `riscv64`/`riscv64gc` as a canonical target CPU — so "does SpiderMonkey have
+     any riscv64 precedent at all" is yes, unlike taichi's LLVM-RuntimeDyld wall (gotcha 622).
+     The catch is version alignment: Mozilla's own Bugzilla meta-tracker for this port
+     ("[meta] Linux/riscv64 Port", bug 1717203) is still open, not shipped as a Tier-1/Tier-2
+     platform, with no official Firefox riscv64 build and no Linux distro (Debian/Fedora/Gentoo)
+     currently carrying one; the fix that specifically "allows build with JIT for riscv64" (bug
+     1957559) only landed for Firefox 139, and Gecko Profiler riscv64 support landed even later
+     (Firefox 160), tested on exactly one community board (Milk-V Jupiter) — this is active,
+     recent, lightly-validated upstream work, not a mature port. pythonmonkey 1.4.1's own
+     `mozcentral.version` pins `6bca861985ba51920c1cacc21986af01c51bd690`, a 2025-02-03
+     mozilla-central commit — dated *before* bug 1957559 landed its riscv64 JIT fixes (targeted
+     at Firefox 139, which released months later). Building the exact commit a binding vendors,
+     not whatever is newest on mozilla-central today, is therefore likely to hit the very bugs
+     the later fix addresses, or to fail configure/link outright on an architecture Mozilla's own
+     tree didn't yet support correctly at that SHA — unprovable without actually running the
+     build, and nothing here can run it: no riscv64 hardware exists to rehearse locally, this
+     sandbox's own auto-mode classifier denies executing build commands fetched from an external
+     repo (so even an x86_64 dry run of `setup.sh` against pythonmonkey's own checkout cannot be
+     used to pre-screen the Mozilla-specific patches), and there is no sibling SpiderMonkey/
+     mozbuild port anywhere in this repo to de-risk any piece of it. Parked as disproportionate
+     scope on the same bar as arcticdb/chdb-core/mplib (gotcha 475): not a hard architectural
+     wall, but a first-of-its-kind, unrehearsable, likely-multi-round bet against an upstream
+     port that is itself still in progress and unshipped. Revisit once pythonmonkey bumps
+     `mozcentral.version` past a riscv64-JIT-landing commit (post Firefox 139) *and* either a
+     Linux distro ships a riscv64 Firefox/SpiderMonkey build (independent real-hardware proof) or
+     this fleet gains a way to rehearse the Mozilla build locally before spending CI runner-hours
+     on it.

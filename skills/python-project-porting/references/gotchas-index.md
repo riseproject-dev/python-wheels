@@ -561,6 +561,10 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
   a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
   with no riscv64 entry (the scrapli/libscrapli case).
+- **679** — An embedded engine can have a real riscv64 backend in its upstream source tree and
+  still not be buildable from the exact commit a binding vendors: check the enabling fix's
+  landing date against the pin's date, not just whether the backend directory exists (the
+  pythonmonkey/SpiderMonkey case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
