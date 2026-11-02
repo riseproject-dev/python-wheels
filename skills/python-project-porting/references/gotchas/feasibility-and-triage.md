@@ -346,6 +346,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **674** — A latest release missing an arch every recent prior release shipped can be
   upstream's own publish-pipeline flake, not a new structural gap — read the commit log
   right after the release tag before porting (the ayafileio case).
+- **675** — A `py3-none-<platform>` wheel's native payload can be fetched from a *second*,
+  non-PyPI GitHub repo's own release assets at build time, with that sibling's release matrix
+  (not the package's own tree) missing riscv64 (the pydivert/ebpfdivert case).
 
 ---
 
@@ -5939,3 +5942,60 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      release tag for its own release-pipeline fixes — a gap that was absent on 20+ consecutive
      prior releases and appears on exactly the newest one is upstream's regression to fix, not
      ours to backfill.
+
+675. **A `py3-none-<platform>` wheel's native payload can be fetched from a *second*,
+     non-PyPI GitHub repo's own release assets at build time — not compiled by the package
+     being ported at all — and that sibling's release matrix, not anything in the package's
+     own tree, is what riscv64 is missing (the pydivert/ebpfdivert case).** pydivert 4.0.1
+     ships `py3-none-manylinux_2_28_{x86_64,aarch64}` wheels (plus `win_amd64`) containing one
+     arch-specific blob, `pydivert/bpf/libebpfdivert.so` — a real ELF, not a stub (confirmed
+     with `file` on the extracted aarch64 wheel). Its sdist has no C sources for this at all:
+     a hatchling build hook (`hatch_build.py`) runs `scripts/fetch_binaries.py`, which
+     `urllib.request.urlopen`s
+     `github.com/ffalcinelli/ebpfdivert/releases/download/v<ver>/ebpfdivert-v<ver>-linux-<arch>.tar.gz`
+     — release assets of a *different* repository (`ffalcinelli/ebpfdivert`, not on PyPI at
+     all) that pydivert merely pins a version of in `pyproject.toml`
+     (`[tool.pydivert.binaries] ebpfdivert = "0.0.5"`). Cloning that sibling repo shows it
+     genuinely compiles two things, and only one is the riscv64 wall:
+     - **The eBPF half is not the blocker.** `src/ebpfdivert.bpf.c`/`_events.bpf.c` are real
+       BPF programs (`clang -target bpf`, CO-RE via a committed `vmlinux.h`), and that
+       `-target bpf` is LLVM's architecture-independent virtual ISA, resolved against the
+       *running* kernel's BTF by libbpf at load time — the project's own `release.yml` tags
+       the compiled `.bpf.o` "architecture neutral" and uploads it once, from the `amd64` leg
+       only. Nothing here needs a riscv64-specific LLVM/BPF backend (contrast gotcha 425,
+       where the eBPF object genuinely *couldn't* be produced on riscv64 because `bpf-linker`
+       dlopens a shared `libLLVM` the riscv64 Rust dist doesn't ship — not the case for a
+       plain `clang -target bpf` invocation, which any ordinarily-built clang supports
+       regardless of host arch).
+     - **The real payload is an ordinary native `.so`** — `handle.c`/`ebpfdivert.c`/
+       `prefilter.c`/`wd_port.c` plus a statically-linked `libbpf` (vendored submodule) +
+       libelf/zstd/zlib, built with plain `gcc`/`make` inside
+       `quay.io/pypa/manylinux_2_28_$(uname -m)`. This part is riscv64-portable in principle
+       (nothing exotic — the same `manylinux_2_28`-style container and gcc toolchain this repo
+       already uses elsewhere), but `ebpfdivert`'s `release.yml` matrix is hardcoded to two
+       GitHub-hosted runners (`ubuntu-24.04` → amd64, `ubuntu-24.04-arm` → arm64) and
+       publishes exactly those two tarballs — there is no `linux-riscv64` asset at any
+       released tag (`v0.0.1`-`v0.0.5`), and nothing in pydivert's own tree can produce one.
+     - **pydivert's downloader fails hard, not gracefully, on top of that**: `fetch_binaries.py`'s
+       `_linux_arch()` maps only `x86_64`/`aarch64` and `raise RuntimeError(...)` on anything
+       else, and `hatch_build.py`'s `TARGETS` dict (which also sets the wheel's platform tag)
+       has no riscv64 key and `raise ValueError(...)` first — so even pydivert's own
+       `PYDIVERT_EBPFDIVERT_LOCAL` env var (meant to let a developer point at a locally-built
+       `.so`) is unreachable through a real `hatch build`/`pip wheel` invocation, unlike
+       gotcha 550's shfmt-py downloader, whose unknown-platform branch degrades to a `PATH`
+       search instead of raising.
+     - **Verdict: `blocked-on-dependency`, not a build-it-ourselves patch, even though the
+       userspace half looks locally portable.** Vendoring a `CIBW_BEFORE_BUILD` step that
+       clones `ffalcinelli/ebpfdivert` at the pinned tag and compiles `libebpfdivert.so` for
+       riscv64 ourselves (then patching `hatch_build.py`/`fetch_binaries.py` to accept the
+       local build) would mean this repo takes over authoring, testing (that project's own
+       `tests/test_bpf.c` loads the program into a real kernel with `sudo`) and maintaining a
+       packet-capture/injection eBPF loader for a project we don't own — an invented mechanism
+       with no analogue in pydivert's actual upstream CI (goal 2: nothing to hand back as a
+       precedent, since pydivert's own release process is "download a tarball", not "compile
+       ebpfdivert"), that never naturally resolves even once `ebpfdivert` ships riscv64 (goal
+       3: our hack bypasses the fetch entirely, so there is nothing for an upstream fix to
+       replace). Same rule as gotcha 399, one layer further out: the sibling whose own release
+       matrix needs the riscv64 leg isn't a registry dependency this repo could port instead,
+       it's a non-PyPI GitHub project outside this repo's scope — the fix belongs in
+       `ebpfdivert`'s `release.yml`, not in `build-pydivert.yml`.

@@ -548,6 +548,13 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **674** — A latest release missing an arch every recent prior release shipped can be
   upstream's own publish-pipeline flake, not a new structural gap — read the commit log
   right after the release tag before porting (the ayafileio case).
+- **675** — A `py3-none-<platform>` wheel's native payload can be fetched at build time from a
+  *second*, non-PyPI GitHub repo's own release assets, not compiled by the package being
+  ported at all — and that sibling's release matrix, not anything in the package's own tree,
+  is what riscv64 is missing. The eBPF half of the sibling can be fine (an architecture-neutral
+  `-target bpf` object resolved against the running kernel's BTF at load time); the blocker is
+  the ordinary native `.so` the sibling builds beside it, for only the two arches its own CI
+  matrix names (the pydivert/ebpfdivert case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
