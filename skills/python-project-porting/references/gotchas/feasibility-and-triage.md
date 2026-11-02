@@ -355,7 +355,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
   a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
   with no riscv64 entry (the scrapli/libscrapli case).
+- **679** — An embedded engine's riscv64 support can be real in the upstream source tree and
+  still not be real for the vendored commit a binding pins — check the fix's landing date
+  against the pin's date, not just whether the backend directory exists (the pythonmonkey
+  case).
 - **681** — `MANIFEST.in` can vendor a precompiled binary into every wheel with no platform
+- **684** — A package that embeds a KVM-based hypervisor needs more than a compiling
+  Rust/C target: the vendored engine's riscv64 code can be real but CI-unverified, and even a
+  clean compile needs the host's RISC-V Hypervisor+AIA extensions to actually run (boxlite).
 
 ---
 
@@ -6139,3 +6146,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       instead of silently shipping a foreign-arch binary with a native-looking name next to
       real riscv64 `.so` files, which is worse than a build failure because nothing flags it
       until a user actually calls the one function that needs it.
+
+684. **A package that embeds a KVM-based hypervisor needs more than a compiling Rust/C
+    target — it needs the host CPU's virtualization extension, and that gate sits below
+    anything CI can patch around (the boxlite case).** boxlite (PyPI, Apache-2.0,
+    github.com/boxlite-ai/boxlite) is a maturin/pyo3 binding over its own Rust core, which in
+    turn drives `libkrun`/`libkrunfw` — a `/dev/kvm`-based microVM library, not an ordinary
+    compiled extension. PyPI 0.11.0 ships no sdist and bdist wheels only for
+    `manylinux_2_28_{x86_64,aarch64}` and macOS arm64 (cp310-cp314t); no riscv64. Two
+    independent walls, not one:
+    - **The wrapper's own build tooling has no riscv64 branch at all.** `scripts/util.sh`'s
+      `map_arch_to_target`/`normalize_arch` — sourced by every build script, including the
+      `cibuildwheel` `before-all` that builds the guest musl binaries — `case`-match only
+      `arm64|aarch64` and `x86_64|amd64` and hard-`return 1` on anything else
+      ("ERROR: Unsupported architecture"). This is boxlite's own tree, patchable in principle,
+      but it is gating on an architecture its one real native dependency does not fully
+      support yet either (next point) — patching this alone would not produce a working wheel.
+    - **The vendored hypervisor engine's riscv64 support is real but unfinished and
+      CI-unverified, which gotcha 679's lesson generalizes past embedded *language* engines to
+      embedded *virtualization* engines.** boxlite's `.gitmodules` pins
+      `src/deps/libkrun-sys/vendor/libkrun` to `boxlite-ai/libkrun` by commit (confirmed via
+      `git ls-tree` on the gitlink, matching that fork's current `main`). That commit genuinely
+      contains non-stub riscv64 work: `src/arch/src/riscv64/{mod,layout}.rs` (memory layout,
+      FDT), `src/vmm/src/builder.rs`'s `#[cfg(all(target_arch = "riscv64", target_os =
+      "linux"))]` branch (`create_vcpus_riscv64`, a real AIA interrupt controller via
+      `KvmAia::new(vm.fd(), ...)`), and `src/devices/src/legacy/{aia.rs,kvmaia.rs,riscv64/}`
+      (AIA device + riscv64 serial). None of this is a stub returning `unimplemented!()`. But
+      `libkrun`'s own `.github/workflows/{cross-compilation,unit_tests,integration_tests}.yml`
+      build/test x86_64, aarch64, and FreeBSD-cross only — zero riscv64 jobs anywhere in that
+      fork's CI, so this code has never been built or run by its own authors, let alone by us.
+    - **Even a clean compile would not make the wheel's own tests pass**, because `libkrun`
+      is not an ordinary library — the thing it builds has to open `/dev/kvm` and boot a
+      guest kernel to do anything, which needs RISC-V's Hypervisor extension (`H`) plus AIA
+      in the *host CPU/firmware*, not just in the Linux kernel's KVM driver. That is still
+      rare, narrow silicon, unlikely to be what a generic `ubuntu-24.04-riscv` self-hosted
+      runner boots on — a hardware gate one level below anything a `patches/<pkg>/<version>/`
+      fix or a `CIBW_BEFORE_BUILD` step can route around, closer in kind to gotcha 284's
+      CUDA-only extension than to an ordinary missing-target-triple problem.
+    - **Verdict: `blocked-on-dependency`.** Re-triage once `libkrun` upstream (not this repo)
+      lands a riscv64 CI job of its own — that is the signal its riscv64 support graduated
+      from "a directory exists" to "it actually boots," the same distinction gotcha 679 draws
+      — and confirm at that point whether the runner this repo builds on even has the `H`+AIA
+      extensions to run it, which a passing compile alone will never prove.
