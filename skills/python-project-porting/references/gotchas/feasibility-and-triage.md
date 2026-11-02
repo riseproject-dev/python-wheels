@@ -349,6 +349,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **675** — A `py3-none-<platform>` wheel's native payload can be fetched from a *second*,
   non-PyPI GitHub repo's own release assets at build time, with that sibling's release matrix
   (not the package's own tree) missing riscv64 (the pydivert/ebpfdivert case).
+- **676** — A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions
 
 ---
 
@@ -5999,3 +6000,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        matrix needs the riscv64 leg isn't a registry dependency this repo could port instead,
        it's a non-PyPI GitHub project outside this repo's scope — the fix belongs in
        `ebpfdivert`'s `release.yml`, not in `build-pydivert.yml`.
+
+676. **A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions of
+     the *same*-named PyPI project is the strongest signal of a full-language rewrite, and the
+     project's own PyPI summary/description does not update to say so (the nb-clean case; see
+     `build-nb-clean.yml`).** nb-clean ("Clean Jupyter notebooks for versioning") published a
+     plain `py3-none-any` wheel at every release from 1.0.0 through 4.0.1 — a genuinely
+     pure-Python tool matching its PyPI summary. 5.0.0 and 6.0.0 instead ship five
+     `py3-none-<platform>` wheels (macOS x86_64/arm64, manylinux aarch64/x86_64, win_amd64),
+     zero riscv64. The PyPI summary is unchanged across the flip, and nothing in the
+     project-description text hints at a rewrite. Cloning the real upstream
+     (github.com/srstevenson/nb-clean) at the 6.0.0 tag shows why: `pyproject.toml` is now
+     `build-backend = "maturin"` with `[tool.maturin] bindings = "bin"`, and the *entire* CLI
+     — notebook parsing/cleaning, the Git clean-filter wiring, argument parsing — is Rust
+     (`src/*.rs`: clap, serde_json, rayon, ignore, tempfile; `[lints.rust] unsafe_code =
+     "forbid"`), not a Python package calling into a small extension. This is gotcha 145's
+     shape (a `bindings = "bin"` CLI, honest `py3-none` tag, one native build covers every
+     interpreter) with one added wrinkle: 145's examples (magika, ripgrep) were never
+     pure-Python, so there is no stale description to be misled by. Before trusting a
+     long-known pure-Python package's reputation, or a cached mental model of what it
+     compiles, check the newest release's actual wheel tags against its own history
+     (`pypi.org/pypi/<pkg>/json` → `releases`) — a flip to platform-specific tags at a major
+     version boundary means re-deriving everything from the current tagged source, not from
+     the project's name, description, or earlier-version behaviour. Mirrors upstream's own
+     `wheels.yml` `wheels` job (`PyO3/maturin-action`, `target: riscv64gc-unknown-linux-gnu`,
+     `manylinux: '2_39'`) — the same proven shape as `build-ripgrep.yml`.

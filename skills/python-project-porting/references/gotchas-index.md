@@ -555,6 +555,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   `-target bpf` object resolved against the running kernel's BTF at load time); the blocker is
   the ordinary native `.so` the sibling builds beside it, for only the two arches its own CI
   matrix names (the pydivert/ebpfdivert case).
+- **676** — A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions
+  of the same-named PyPI project signals a full-language rewrite, even when the project's own
+  PyPI summary never updates to say so (the nb-clean case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
