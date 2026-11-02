@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_ubuntu` job of
+# https://github.com/shiguredo/libdatachannel-py/blob/2026.1.0/.github/workflows/wheel.yml
+name: Build libdatachannel-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libdatachannel-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libdatachannel-py.yml'
+      - 'docs/packages/libdatachannel-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libdatachannel-py.yml'
+      - 'docs/packages/libdatachannel-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: libdatachannel-py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build libdatachannel-py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          - python: cp312
+            python-version: '3.12'
+          - python: cp313
+            python-version: '3.13'
+          - python: cp314
+            python-version: '3.14'
+          - python: cp314t
+            python-version: '3.14t'
+
+    env:
+      LIBDATACHANNEL_PY_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+
+    steps:
+      - name: Checkout libdatachannel-py ${{ env.LIBDATACHANNEL_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: shiguredo/libdatachannel-py
+          ref: ${{ env.LIBDATACHANNEL_PY_VERSION }}
+          persist-credentials: false
+
+      # Upstream runs `uv build --wheel` + `auditwheel repair --strip --only-plat` on a bare
+      # Ubuntu runner; build in the manylinux image instead and keep the same repair flags.
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair --strip --only-plat -w {dest_dir} {wheel}
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          whl = sys.argv[1]
+          assert whl.endswith("_riscv64.whl"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert len(sos) == 1 and sos[0].startswith("libdatachannel/libdatachannel_ext."), sos
+          licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          assert licenses == ["LICENSE", "THIRD_PARTY_LICENSES.md"], licenses
+          print(whl, "->", sos)
+          EOF
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python-version }}
+
+      - name: Test wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv --python "${{ matrix.python-version }}" .venv-test
+          uv pip install --python .venv-test/bin/python --group test wheelhouse/*.whl
+          .venv-test/bin/python -m pytest tests/ -v \
+            --deselect tests/test_peerconnection.py::test_destruct_without_explicit_close \
+            --deselect tests/test_peerconnection.py::test_track
+
+      - name: Check free-threading
+        if: endsWith(matrix.python-version, 't')
+        run: .venv-test/bin/python -c "import sys, libdatachannel; assert not sys._is_gil_enabled()"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libdatachannel-py-${{ env.LIBDATACHANNEL_PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish libdatachannel-py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: libdatachannel-py-${{ matrix.version }}-*-manylinux_riscv64
