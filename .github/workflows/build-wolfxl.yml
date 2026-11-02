@@ -118,6 +118,27 @@ jobs:
         run: python -m unittest discover -s study/agent-edit -p 'test_*.py' -v
 
       - name: Run Python tests
+        env:
+          # test_classifier_parity.py's _cli_schema() shells out to a bare
+          # `cargo run --release -p wolfxl-cli`, a cold compile of wolfxl-cli
+          # and its deps (clap, tiktoken-rs) that this step is the first to
+          # touch (the "Build wheel" step above only compiles the cdylib via
+          # maturin-action, a different target dir). The workspace root
+          # Cargo.toml's [profile.release] sets lto = "fat" + codegen-units = 1
+          # for the *shipped* cdylib; that profile applies workspace-wide, so
+          # the ad hoc wolfxl-cli compile pays the same fat-LTO cost even
+          # though nothing it produces ships. 300s (CLAUDE.md gotcha 141's
+          # earlier fix) still wasn't enough -- every interpreter leg hit the
+          # timeout at exactly 300s, not "sometimes slow": a real cold fat-LTO
+          # compile of this dependency graph on this fleet's cores, not a
+          # hang. Override the profile for this test-only compile the same
+          # way gotcha 141/188 do for a shipped workflow / local rehearsal
+          # (env vars, not editing Cargo.toml, so an unrelated `release`
+          # profile name stays valid everywhere): this never touches the
+          # wheel already built above.
+          CARGO_PROFILE_RELEASE_LTO: 'off'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
         run: |
           pytest tests -q -n auto --dist worksteal \
             --ignore=tests/vendored_openpyxl \
