@@ -641,6 +641,11 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
   committed — its dirty check is `git status --short`, which (unlike `git describe --dirty`)
   flags untracked files too; `.git/info/exclude` the staged filenames before copying them in
   (the pymp3 case).
+- **687** — When upstream ties the Python version to the literal count of commits on
+  master, not a human-maintained version string, find the release commit by bisecting
+  `git rev-list --count` on a blobless clone — neither gotcha 103's timestamp proximity
+  nor gotcha 213's version-bump diff fits, and the formula gives an exact answer
+  (the packingsolver case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

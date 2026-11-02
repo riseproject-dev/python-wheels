@@ -47,6 +47,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
   from-sdist build hermetic where a from-checkout build is not.
 - **683** — `CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file into `{project}` dirties
   a `setuptools-git-versioning` checkout via untracked files alone.
+- **687** — When the Python version is the literal count of commits on master, bisect
+  `git rev-list --count` on a blobless clone instead of gotcha 103/213's timestamp or
+  diff heuristics — the formula gives an exact answer.
 
 ---
 
@@ -830,3 +833,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       the actual compiled extension depends on (that part uses `setup.py`'s own
       `-std=c++11`-only flags). Building the sdist on `ubuntu-latest` instead of the riscv64
       runner (gotcha 4) sidesteps this gate entirely rather than needing to patch it.
+
+687. **When upstream ties the Python version to the literal count of commits on master, not
+    a human-maintained version string, find the release commit by bisecting `git rev-list
+    --count`, not gotcha 103's timestamp proximity or gotcha 213's version-bump diff (the
+    packingsolver case).** packingsolver's own `.github/workflows/python.yml` computes
+    `version = <base>.<N>` where `<base>` comes from `python/packingsolver/_version.py` and
+    `<N> = git rev-list --count HEAD`, run on every commit of master — every commit is its
+    own release. Neither existing technique fits: gotcha 213's diff has nothing to match
+    (the checked-out tree's `_version.py` never contains the literal string "0.1.1273" —
+    only the release workflow writes that, after checkout, right before building), and
+    gotcha 103's timestamp proximity is unnecessary precision-guessing when the exact answer
+    is a formula. The fix is cheap and exact: `git clone --bare --filter=blob:none
+    <url>` (a few MB even when the repo's own test fixtures make a full checkout
+    multi-gigabyte — packingsolver's `data/` directory alone exhausted a shared sandbox's
+    disk on a naive full clone), then `git rev-list --count master~<i>` for increasing `<i>`
+    until the count matches the target version's last component (`master~2` = 1273 for
+    version `0.1.1273`, two commits behind the tip at triage time). Still finish with gotcha
+    103's proof step — diffed the candidate commit's `CMakeLists.txt`/`extern/CMakeLists.txt`/
+    `python/CMakeLists.txt`/`pyproject.toml` against the real PyPI sdist, byte-identical
+    except `_version.py` itself. Recognize the shape before reaching for either other
+    gotcha: grep the release workflow for `rev-list --count` (or an equivalent `git log
+    --oneline | wc -l`) before assuming a missing tag means "guess from the timestamp."
