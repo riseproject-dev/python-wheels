@@ -1,4 +1,17 @@
 packages:
+- pkg: rleveldb
+  version: 1.0.0
+  home: https://github.com/DedInc/rleveldb
+  repo: https://github.com/DedInc/rleveldb
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/4355
+  notes: 'Triaged on explicit request. Fresh origin/main .queue.yml (git fetch + grep) had no `pkg: rleveldb` entry -- only a passing mention of rleveldb as a runtime dependency inside the already-parked browser-act-cli entry''s notes, which is not a port of rleveldb itself. Checked the existing LevelDB precedent in this repo (plyvel, PR #1665): that port builds the real C++ LevelDB + Snappy from source via cmake, which rleveldb does not need (see below). PyPI JSON confirms the gap is real: latest 1.0.0 ships 15 wheels (cp38-abi3 manylinux_2_17/x86_64,aarch64,armv7l,ppc64le,s390x,i686 + musllinux_1_2 x86_64,aarch64,armv7l,i686 + macOS x86_64/arm64 + Windows win32/amd64/arm64) plus an sdist -- zero riscv64; pypi.riseproject.dev/simple/rleveldb/ -> 404, confirmed genuinely missing. No local/remote branch or open PR existed for it before this one (gh search found none).
+
+    Cloned upstream DedInc/rleveldb and read src/*.rs + Cargo.toml + pyproject.toml directly: it is a maturin/PyO3 abi3-py38 build, and a pure-Rust reimplementation of the LevelDB .ldb/.log/.sst file formats and Snappy decompression (the `snap` crate) -- it does **not** FFI-bind or vendor the real C++ LevelDB/Snappy the way plyvel does. Cargo.lock dependency tree is pyo3, memmap2 (-> libc), crc32c (software/portable, no SIMD-only path), and snap, none of which build a C library or need a system package; no architecture-specific risk. Upstream''s own release tag for this version is the bare string "1.0.0", not "v1.0.0" (the commit title is "v1.0.0" but the tag itself is not prefixed) -- recorded in the workflow''s checkout `ref:` directly.
+
+    Rehearsed the full build locally on x86_64 against the real 1.0.0 checkout: `maturin build --release` succeeded with no special toolchain (produced cp38-abi3-manylinux_2_34_x86_64.whl, dist-info/licenses/LICENSE present, matching the real PyPI wheel''s layout). Upstream ships no tests at all (release.yml never runs one), so wrote a from-scratch smoke test instead of an import-only check: hand-assembled a minimal single-block LevelDB WAL .log file (the CRC header field is read but never verified by rleveldb''s own log_file.rs, so any 4 bytes there are accepted) and confirmed a real batch record comes back through RawLevelDb/iterate_records_raw with the expected key/value/seq/state/file_type, plus the ValueError-on-non-directory and empty-directory-is-zero-records paths -- ran this exact script against the locally built wheel and it passed.
+
+    Added docs/packages/rleveldb.yaml (pending version 1.0.0) and .github/workflows/build-rleveldb.yml, modeled on this repo''s build-fast-json-repair.yml/build-pdf-oxide.yml shape (PyO3/maturin-action direct build to a single riscv64 target, no CIBW): no before-script-linux needed since there is no native dependency to install. License MIT (upstream LICENSE file, real author copyright). No patches needed, no GPL sources. PR #4355 opened (draft), branch rleveldb. Watching CI.'
 - pkg: obstore-databaas
   version: 0.12.1
   home: https://pypi.org/project/obstore-databaas/
