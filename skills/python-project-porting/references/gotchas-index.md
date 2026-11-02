@@ -531,6 +531,11 @@ The porting gotchas (562 of them) live in [`references/gotchas/`](gotchas/), spl
   present (no dlopen wall, no hard `import`) and still be a park, when its only *wired*
   backend driver needs the vendor compiler to activate and the package's nominal CPU driver
   is dead code the loader never touches (the triton-ascend case).
+- **664** — A GPU-interop package can be blocked by two independent upstream-only
+  prebuilt-binary fetches stacked on top of each other: one (Dawn/WebGPU) is an optional
+  backend that dodges via a cache-variable override, the other (the Slang compiler itself)
+  is the actual product being wrapped and has no from-source path short of a second,
+  LLVM-scale port (the slangpy case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

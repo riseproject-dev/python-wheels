@@ -337,6 +337,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **657** — A GPU loader can pass gotcha 284's dlopen test (no CUDA at build time, `RTLD_NOLOAD`
   reuse of torch's `libcudart`) and still be dead on riscv64 because its only public API
   raises for any non-`cuda` device in pure Python (the instanttensor case).
+- **664** — A GPU-interop package can be blocked by two independent upstream-only
+  prebuilt-binary fetches stacked on top of each other, one of which dodges and one of which
+  doesn't (the slangpy case).
 
 ---
 
@@ -5805,3 +5808,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      anyway, which is gotcha 419's dead-stub trap. fastsafetensors (published) is the
      contrast: it has a real CPU device path. Verdict: `parked`. Revisit when a release drops
      the CUDA-only check in `safe_open`.
+
+664. **A GPU-interop package can be blocked by two independent upstream-only prebuilt-binary
+     fetches stacked on top of each other, one of which dodges and one of which doesn't (the
+     slangpy case).** slangpy (shader-slang/slangpy, Apache-2.0) wraps `sgl`, a setuptools +
+     CMake build (`cmake==3.31.6` pin, `--preset linux-gcc`) that vcpkg-installs only
+     `libjpeg-turbo`/`libpng`/`openexr`/`asmjit` — all portable, and the one riscv64-shaped
+     worry (`asmjit` has no RISC-V JIT backend) is a non-issue: `src/sgl/core/data_struct.cpp`
+     only ever selects `X86Program`/`ARMProgram` under `SGL_X86_64`/`SGL_ARM64`, and falls back
+     to a portable `VMProgram` interpreter on every other arch regardless of whether `asmjit`
+     was found, exactly like gotcha 648's scann scalar fallback. The real wall is one layer
+     down, in the `slang-rhi` submodule's `CMakeLists.txt`, which fetches two separate
+     upstream-only prebuilt binaries by URL and is not shy about it: (1) the Slang shading
+     compiler itself, `shader-slang/slang`'s release asset
+     `slang-<ver>-linux-<arch>.tar.gz` — confirmed only `x86_64`/`aarch64` exist (`-riscv64`
+     404s) — and (2) the Dawn WebGPU implementation, `shader-slang/webgpu-dawn-binaries`'s
+     `webgpu-dawn-<ver>-linux-<arch>.zip`, same `x86_64`/`aarch64`-only shape, same confirmed
+     404. Both paths hit `message(FATAL_ERROR "Unsupported processor architecture")` while
+     just computing the download URL, before any backend-enable option is even consulted. The
+     Dawn one dodges: predefine `-DSLANG_RHI_DAWN_URL=<dummy>` (its `if(NOT DEFINED ...)` guard
+     then skips the FATAL block entirely) and pass `-DSLANG_RHI_ENABLE_WGPU=OFF` so the dummy
+     URL is never actually fetched — WebGPU is an optional backend alongside CPU/Vulkan/CUDA.
+     The Slang compiler fetch does not dodge: it is not an optional backend, it is the thing
+     slangpy exists to wrap (`import slangpy` links against `libslang-compiler.so`), and its
+     only non-prebuilt alternative is `SLANG_RHI_BUILD_FROM_SLANG_REPO=ON`, which pulls in the
+     entire `shader-slang/slang` compiler — its own LLVM-scale CMake tree with its own
+     optional prebuilt `slang-llvm`/`dawn`/`tint` fetches — as a from-scratch second port, not
+     a cibuildwheel knob on this one. No riscv64 work exists upstream in either
+     `shader-slang/slang` or `shader-slang/slangpy` (checked both issue trackers). Verdict:
+     `parked` — a missing-prerequisite-port one level down, not a slangpy-specific defect;
+     revisit once `shader-slang/slang` itself ships a riscv64 compiler release to point
+     `SLANG_RHI_SLANG_URL`/`SLANG_RHI_FETCH_SLANG` at.
