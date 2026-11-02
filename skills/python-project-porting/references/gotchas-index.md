@@ -1032,6 +1032,9 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
 - **124** — A wheel whose compiled payload is a Go binary builds fine and then dies at
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
+- **690** — A `CIBW_BEFORE_ALL_LINUX` that mirrors an upstream recipe's `cp -a
+  /usr/include/<pkg>-*/*` can glob-copy headers from a system `-devel` package the upstream's
+  own (different) image bakes in by default, but manylinux_riscv64 does not.
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
