@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# pyqrack-cpu is upstream's own OpenCL-free sibling of pyqrack (published from
+# vm6502q/pyqrack's "cpu-only" branch): same Qrack core, same version, only
+# Makefile's cmake flags and setup.py's distribution name differ from "main"
+# (patches/pyqrack-cpu carries that exact diff forward onto the released tag).
+# Plain "pyqrack" needs a system OpenCL install and is out of scope for this
+# CPU-only fleet; this is the package upstream itself intends for that case.
+name: Build pyqrack-cpu wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyqrack-cpu.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyqrack-cpu.yml'
+      - 'docs/packages/pyqrack-cpu.yaml'
+      - 'patches/pyqrack-cpu/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyqrack-cpu.yml'
+      - 'docs/packages/pyqrack-cpu.yaml'
+      - 'patches/pyqrack-cpu/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyqrack-cpu
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyqrack-cpu ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    env:
+      PYQRACK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyqrack ${{ env.PYQRACK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vm6502q/pyqrack
+          ref: v${{ env.PYQRACK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyqrack source
+        run: git apply "python-wheels/patches/pyqrack-cpu/${PYQRACK_VERSION}"/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: dnf install -y cmake boost-devel git
+          # setup.py's build_py has no ext_modules to key a platform tag off
+          # of, so bdist_wheel defaults to "py3-none-any"; this placeholder
+          # forces a real platform and auditwheel repair (default, unmodified)
+          # turns it into the real manylinux_riscv64 tag.
+          CIBW_BUILD_FRONTEND: "build; args: -C--build-option=--plat-name=linux_riscv64"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: pyqrack/tests
+          CIBW_TEST_COMMAND: python -m pytest {project}/pyqrack/tests
+
+      - name: Check the wheel carries libqrack_pinvoke and both licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("qrack_lib/libqrack_pinvoke.so") for n in names), whl
+              assert any(n.endswith("qrack_lib/QRACK-LICENSE.md") for n in names), whl
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyqrack-cpu-${{ env.PYQRACK_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyqrack-cpu ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyqrack-cpu-${{ matrix.version }}-*-manylinux_riscv64
