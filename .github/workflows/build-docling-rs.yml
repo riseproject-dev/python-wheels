@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `sdist`, `wheels` and `wheel-s390x` jobs of
+# https://github.com/docling-project/docling.rs/blob/v2.62.0/.github/workflows/pypi-publish.yml
+name: Build docling-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/docling-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-docling-rs.yml'
+      - 'docs/packages/docling-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-docling-rs.yml'
+      - 'docs/packages/docling-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: docling-rs
+      version: ${{ inputs.version }}
+
+  build_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build docling-rs ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    env:
+      DOCLING_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout docling.rs v${{ env.DOCLING_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: docling-project/docling.rs
+          ref: v${{ env.DOCLING_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Resolve version
+        working-directory: crates/docling-py
+        run: |
+          sed -i -E "0,/^version = \".*\"/s//version = \"${DOCLING_RS_VERSION}\"/" pyproject.toml
+          grep -m1 '^version = ' pyproject.toml
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        run: |
+          uv pip install "maturin>=1.5,<2"
+          maturin sdist -m crates/docling-py/Cargo.toml --out dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: docling-rs-${{ env.DOCLING_RS_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build docling-rs ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    env:
+      DOCLING_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout docling.rs v${{ env.DOCLING_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: docling-project/docling.rs
+          ref: v${{ env.DOCLING_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: docling-rs-${{ env.DOCLING_RS_VERSION }}-sdist
+          path: sdist/
+
+      # The sdist carries no LICENSE (it sits at the repo root, outside crates/docling-py),
+      # so maturin's default glob beside pyproject.toml would ship none.
+      - name: Unpack sdist
+        run: |
+          mkdir pkg
+          tar -xzf sdist/*.tar.gz -C pkg --strip-components=1
+          cp LICENSE pkg/
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pkg
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # abi3-py39 wheel built on cp312 (docling-core's compiled deps start there in
+          # our registry) and re-tested on cp313/cp314.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable"
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$HOME/.cargo/bin:$PATH"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pyke ships no riscv64 ONNX Runtime; upstream's s390x wheel takes the same dlopen path.
+          CIBW_CONFIG_SETTINGS: build-args=--features=ort-load-dynamic
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,pandas,pillow,lxml,pydantic-core,rpds-py,pyyaml
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: >-
+            crates/docling-py/tests
+            crates/docling-py/python/docling_rs/models.py
+            crates/docling/tests/data
+            crates/docling/sample.html
+            tests/data
+            scripts/install/models_catalog.json
+          CIBW_TEST_COMMAND: >-
+            python -c "import docling_rs._native as n, importlib.metadata as md;
+            assert n.__file__.endswith('.so'), n.__file__;
+            assert any('.dist-info/licenses/LICENSE' in str(p) for p in md.files('docling-rs'))" &&
+            python -m pytest crates/docling-py/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: docling-rs-${{ env.DOCLING_RS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish docling-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: docling-rs-${{ matrix.version }}-*-manylinux_riscv64
