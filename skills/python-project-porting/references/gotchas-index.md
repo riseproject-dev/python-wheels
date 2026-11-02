@@ -590,6 +590,10 @@ The porting gotchas (562 of them) live in [`references/gotchas/`](gotchas/), spl
   tree without resolving their LFS objects first — verify by sha256 against the pointer's own
   `oid` before trusting a same-content fetch from the pre-merge submodule (the semgrep
   v1.177.0 case).
+- **668** — A per-release "binding revision" digit appended to upstream's own version can
+  have no git-tag counterpart at all, several PyPI versions sharing one tag — strip the
+  trailing `.<N>` segment to recover the tag, and replay upstream's own version-stamping
+  release script rather than inventing a scheme (the ufal.udpipe case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

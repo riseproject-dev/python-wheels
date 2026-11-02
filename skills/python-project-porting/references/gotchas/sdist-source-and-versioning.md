@@ -20,6 +20,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
+- **668** — A per-release "binding revision" digit appended to upstream's own version can
+  have no git-tag counterpart at all, several PyPI versions sharing one tag.
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
@@ -751,3 +753,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
        drives a step that re-fetches and re-verifies each pointer file's content by its own
        embedded `oid` before overwriting it, and is a no-op (skipped entirely) for every other
        version, whose manifest file doesn't exist.
+
+668. **A per-release "binding revision" digit appended to upstream's own version can have no
+    git-tag counterpart at all, several PyPI versions sharing one tag (the ufal.udpipe
+    case).** ufal.udpipe's PyPI releases are `<UDPipe-version>.<binding-rev>` — `1.2.0.1`,
+    `1.2.0.2` and `1.2.0.3` are all built from the single git tag `v1.2.0`;
+    `releases/pypi/Changes` is the only place that records which binding revision maps to
+    which UDPipe release. Gotcha 3 covers a tag and version that differ by a fixed
+    transform; this is looser still — strip the trailing `.<N>` segment to get the tag
+    (`sed -E 's/\.[0-9]+$//'`), never assume a `<pkg>-<ver>` tag exists for the full PyPI
+    version string. Gotcha 135's version-placeholder shape applies here too: the checked-out
+    `setup.py` carries a literal empty `version = ''`, stamped by upstream's own
+    `releases/pypi/gen.sh <version>` (a `sed` substitution, repeated for the SWIG-generated
+    `__init__.py`'s `# __version__ =` comment) — replaying that exact substitution in the
+    workflow, rather than inventing a different versioning scheme, is the smaller
+    divergence.
+    - **This project has no public GitHub Actions at all** (gotcha 391's shape taken one
+      step further): UDPipe's real release infra (`releases/release-udpipe.sh`) shells out
+      to a private institutional cross-compile farm (`/net/projects/cpp_builtem/compilers`,
+      including a remote macOS leg over ssh), invisible from the public repo. The only
+      public recipe is `releases/pypi/gen.sh` itself — read and replay that script's steps
+      directly (amalgamate sources, run SWIG, stamp the version, `setup.py sdist`) instead of
+      inventing an unrelated build.
+    - **A project's own internal build-system bootstrap can gate an unrelated codegen step
+      to x86/i386 even when the actual extension is fully portable.** UDPipe's
+      `src/Makefile.builtem` (transitively `include`d by both the sdist-generation Makefiles)
+      runs `$(error Architecture ... is currently not supported on platform ...)` at parse
+      time for any `uname -m` other than `x86_64`/`i386`/`i686` on the `linux-gcc` platform,
+      and separately hardcodes `-msse -msse2 -mfpmath=sse` unconditionally for that platform
+      — gating the tiny `merge_sources` helper tool and the SWIG invocation, neither of which
+      the actual compiled extension depends on (that part uses `setup.py`'s own
+      `-std=c++11`-only flags). Building the sdist on `ubuntu-latest` instead of the riscv64
+      runner (gotcha 4) sidesteps this gate entirely rather than needing to patch it.
