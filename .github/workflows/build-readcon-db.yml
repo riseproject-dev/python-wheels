@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `wheels` job of
+# https://github.com/lode-org/readcon-db/blob/v0.2.0/.github/workflows/python-wheels.yml
+name: Build readcon-db wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/readcon-db.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-readcon-db.yml'
+      - 'docs/packages/readcon-db.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-readcon-db.yml'
+      - 'docs/packages/readcon-db.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: readcon-db
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build readcon-db ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp314t dropped: MDAnalysis, a test dependency, has no cp314t wheel
+        # on pypi.riseproject.dev.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      READCON_DB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout readcon-db v${{ env.READCON_DB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lode-org/readcon-db
+          ref: v${{ env.READCON_DB_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside python/pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory
+        # (python/), not the crate root where LICENSE actually lives -
+        # unstaged, the upstream PyPI wheel itself ships no licence file.
+        run: cp LICENSE python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,h5py,MDAnalysis
+          CIBW_TEST_REQUIRES: pytest numpy h5py MDAnalysis
+          CIBW_TEST_SOURCES: python/tests resources
+          # test_append_trajectory_frames needs the `readcon` package, which
+          # has no riscv64 wheel on PyPI or pypi.riseproject.dev.
+          CIBW_TEST_COMMAND: >-
+            python -c "from readcon_db import readcon_db as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest python/tests
+            --deselect python/tests/test_ingest_memory.py::test_append_trajectory_frames
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: readcon-db-${{ env.READCON_DB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish readcon-db ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: readcon-db-${{ matrix.version }}-*-manylinux_riscv64
