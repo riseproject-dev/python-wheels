@@ -363,6 +363,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **684** — A package that embeds a KVM-based hypervisor needs more than a compiling
   Rust/C target: the vendored engine's riscv64 code can be real but CI-unverified, and even a
   clean compile needs the host's RISC-V Hypervisor+AIA extensions to actually run (boxlite).
+- **688** — A `PLATFORM_SUPPORT.md`-documented native engine with no riscv64 asset anywhere in
+  its own third-party binary distributor's release matrix looks like a hard architecture lock,
+  but check whether the language binding's *published-wheel* build job actually bundles that
+  specific binary at all before parking on it — an optional engine can dlopen lazily and
+  degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
 
 ---
 
@@ -6212,3 +6217,58 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     packages where that search (GitHub code search, the vendor's own site, `pip download
     --no-binary` for a real sdist) comes up empty; here it didn't, because the publisher
     simply never wired up PyPI's metadata fields, not because there was nothing to find.
+
+688. **A `PLATFORM_SUPPORT.md`-documented native engine with no riscv64 asset anywhere in its
+    own third-party binary distributor's release matrix looks like a hard architecture lock —
+    but check whether the language binding's *published-wheel* build job actually bundles that
+    specific binary at all before parking the whole port on it (the xberg case).** xberg (a
+    Rust/maturin "document intelligence" monorepo: PDF/OCR/layout/embeddings/NER/tree-sitter,
+    17 crates, abi3-py310 wheels) ships `crates/xberg-pdfium-render` (a fork of
+    `pdfium-render`) behind the `pdf-pdfium` Cargo feature, which its own `Cargo.toml` enables
+    unconditionally for the entire non-Windows/non-macOS-Intel target — the same target
+    riscv64 falls under. `PLATFORM_SUPPORT.md` and `.github/actions/download-pdfium/download.sh`
+    fetch the actual runtime library from `bblanchon/pdfium-binaries` GitHub releases
+    (`pdfium-${platform}-${arch}.tgz`), and that project's own `build-all.yml` target-CPU
+    matrix (Chromium's GN build) has entries for x64/x86/arm/arm64/mipsel/mips64el/ppc64/wasm —
+    nothing riscv64, anywhere, because Chromium's own PDFium build has never targeted it. That
+    reads exactly like gotcha 284/449's "vendored binary with no riscv64 anywhere upstream"
+    shape, and would normally be an immediate park.
+
+    It isn't one here, because `pdf-pdfium` never needs the real library to *compile*:
+    `xberg-pdfium-render/build.rs` only links against `libpdfium` when
+    `PDFIUM_STATIC_LIB_PATH`/`PDFIUM_DYNAMIC_LIB_PATH` is set at build time; otherwise it
+    emits a `cargo:warning` and falls back to `dynamic_bindings`, which `libloading::Library`
+    `dlopen()`s the platform library name *at first Pdfium use*, not at import time — a
+    documented, intentional degrade path (xberg-io/xberg#702), not a build failure. The
+    `download-pdfium` composite action is wired into exactly two places in the whole repo:
+    `ci-rust.yaml`'s `pdfium-engine` Rust-level test job and `benchmarks.yaml`'s
+    `bench-pdfium` job — read `.github/workflows/publish.yaml`'s `python-wheels` job
+    (the one that actually builds and ships the PyPI artifact) line by line and it calls
+    `xberg-io/actions/build-python-wheels@v1` with no PDFium step at all; the only native
+    library that job downloads and vendors into the wheel is ONNX Runtime
+    (`microsoft/onnxruntime` releases, `ORT_STRATEGY=system` + explicit
+    `vendor-native-closure.sh`). So the published `xberg` wheel on **every** platform it
+    already ships for — x86_64, aarch64, macOS, Windows — compiles `pdf-pdfium` in but never
+    bundles a real `libpdfium`, and that one secondary PDF-extraction backend already silently
+    no-ops (or raises a clear load error, per #702) for every existing user unless they supply
+    their own binary out of band. A riscv64 wheel built the same way is not a regression
+    against any platform that exists today — the actual blocking/non-blocking native payload
+    to resolve is ONNX Runtime (Microsoft ships no riscv64 prebuilt either, but this repo
+    already publishes `onnxruntime` for riscv64 cp312–cp314t — `docs/packages/onnxruntime.yaml`
+    — so `ci_scripts/check_riscv64_deps.py --python 312 313 314 314t -- onnxruntime maturin`
+    resolves clean and the dynamic-link-against-our-own-wheel pattern of gotcha 17 applies),
+    plus Tesseract/Leptonica and libheif/libde265/libaom, all three built from plain upstream
+    CMake/autotools source tarballs in `CIBW_BEFORE_ALL_LINUX`/a Cargo build script — ordinary
+    portable C/C++, no prebuilt-binary dependency at all.
+
+    **Don't let a `PLATFORM_SUPPORT.md` gap or a missing third-party-binary-distributor asset
+    end the triage before checking which CI job the gap actually lives in.** A Rust/C++ crate
+    can legitimately compile a feature whose only runtime dependency is an optional,
+    lazily-`dlopen()`ed library that the project's own published artifact never bundles on any
+    architecture — in which case riscv64 ships exactly as complete (or incomplete) a wheel as
+    every platform already published. This is a genuine reason the port *isn't* blocked by
+    that one engine; it is not, by itself, a reason the port is small — xberg's real scope
+    (17 crates, ~80 Cargo features, ONNX Runtime + Tesseract/Leptonica + libheif/libde265/libaom
+    all needing to be built or linked for riscv64 in one CI job) still makes it a large,
+    disproportionate first port, recorded `parked` on size/complexity grounds rather than any
+    single hard architectural wall.

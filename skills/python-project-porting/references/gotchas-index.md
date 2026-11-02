@@ -578,6 +578,11 @@ The porting gotchas (564 of them) live in [`references/gotchas/`](gotchas/), spl
   reads exactly like gotcha 157/372's closed-source-no-source-ever shape — but a plain web
   search for the publisher's name/contact domain can still surface a large, genuinely public
   monorepo whose PyPI metadata simply was never filled in (the alienplatform case).
+- **688** — A `PLATFORM_SUPPORT.md`-documented native engine with no riscv64 asset anywhere in
+  its own third-party binary distributor's release matrix looks like a hard architecture lock,
+  but check whether the language binding's *published-wheel* build job actually bundles that
+  specific binary at all before parking on it — an optional engine can dlopen lazily and
+  degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
