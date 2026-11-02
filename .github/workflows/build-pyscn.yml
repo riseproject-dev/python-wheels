@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/ludo-technologies/pyscn/blob/v1.33.1/.github/workflows/python-release.yml
+# and its python/scripts/build_platform_wheel.sh / create_wheel.sh.
+name: Build pyscn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyscn.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyscn.yml'
+      - 'docs/packages/pyscn.yaml'
+      - 'patches/pyscn/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyscn.yml'
+      - 'docs/packages/pyscn.yaml'
+      - 'patches/pyscn/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyscn
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyscn ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      PYSCN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyscn v${{ env.PYSCN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ludo-technologies/pyscn
+          ref: v${{ env.PYSCN_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyscn source
+        run: |
+          git apply python-wheels/patches/pyscn/${{ env.PYSCN_VERSION }}/0001-*.patch
+          git apply python-wheels/patches/pyscn/${{ env.PYSCN_VERSION }}/0002-*.patch
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Verify Go module
+        run: |
+          go mod download
+          go mod verify
+
+      # pyscn/internal/parser wraps smacker/go-tree-sitter, which needs CGO
+      # (its own bindings.go is cgo-gated); build_platform_wheel.sh already
+      # sets CGO_ENABLED=1 for every Linux target for this reason, so this
+      # job runs on a native riscv64 runner rather than cross-compiling, the
+      # same way upstream's own linux-arm64 leg uses a native arm64 runner.
+      - name: Build the pyscn wheel
+        run: python/scripts/build_platform_wheel.sh linux-riscv64 manylinux_2_39_riscv64
+        env:
+          GOOS: linux
+          GOARCH: riscv64
+          # build_platform_wheel.sh derives the wheel version from
+          # GITHUB_REF_NAME (set to the upstream tag on upstream's own
+          # `push: tags: v*` runs); this workflow's own GITHUB_REF_NAME is
+          # the python-wheels branch/PR ref, so it is overridden here.
+          GITHUB_REF_NAME: v${{ env.PYSCN_VERSION }}
+
+      - name: Check the wheel ships the riscv64 binaries and the LICENSE
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith("-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              for path in ("pyscn/bin/pyscn-linux-riscv64", "pyscn/bin/pyscn-mcp-linux-riscv64"):
+                  assert path in names, names
+                  header = zf.read(path)[:20]
+                  assert header[:4] == b"\x7fELF", (path, header)
+                  assert header[18] == 0xF3, (path, header)  # e_machine EM_RISCV
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+              assert licenses == ["LICENSE"], licenses
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyscn-${{ env.PYSCN_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/pyscn-*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test pyscn ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      PYSCN_VERSION: ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyscn-${{ env.PYSCN_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . pyscn
+
+      # Mirrors upstream's own test-wheels job (pyscn --version / --help),
+      # plus a real `pyscn check` run exercising the tree-sitter-backed CFG
+      # dead-code analysis that is the whole reason this binary needs CGO.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          [ "$(pyscn --version)" = "pyscn version ${PYSCN_VERSION}" ]
+          pyscn --help >/dev/null
+
+          # pyscn-mcp has no --help: it starts the MCP server over stdio and
+          # waits for a client, so this only proves the binary launches and
+          # exits cleanly once stdin closes.
+          pyscn-mcp </dev/null >/dev/null 2>&1
+
+          work=$(mktemp -d)
+          cat > "$work/sample.py" <<'PY'
+          def f(x):
+              if x:
+                  return 1
+              return 2
+              return 3
+          PY
+
+          if out=$(pyscn check "$work/sample.py"); then
+            echo "expected pyscn check to report an issue, but it exited 0" >&2
+            echo "$out"
+            exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q 'unreachable_after_return'
+
+  publish:
+    name: Publish pyscn ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyscn-${{ matrix.version }}-py3-none-manylinux_riscv64
