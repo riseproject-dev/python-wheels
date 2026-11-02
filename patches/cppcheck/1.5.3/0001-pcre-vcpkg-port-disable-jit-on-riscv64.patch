@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 30 Sep 2026 00:00:00 +0000
+Subject: [PATCH] cmake/vcpkg/ports/pcre: disable JIT on riscv64
+
+The build fails during `vcpkg install` of the `pcre` overlay port:
+
+    pcre_jit_compile.c:65:2: error: #error Unsupported architecture
+    ninja: build stopped: subcommand failed.
+    error: building pcre:riscv64-linux failed with: BUILD_FAILED
+
+This port vendors PCRE 8.45 (legacy PCRE1, last released 2021) with its own
+bundled copy of sljit. That copy predates sljit's RISC-V work and ships no
+`sljitNativeRISCV*.c` backend file at all (confirmed by listing
+`sljit/sljitNative*.c` in the extracted PCRE 8.45 tarball: x86, ARM, MIPS,
+PPC, SPARC, TILEGX - no RISC-V). `pcre_jit_compile.c`'s own
+`SLJIT_CONFIG_AUTO` detection therefore falls through to
+`SLJIT_CONFIG_UNSUPPORTED`, which the file turns into a hard `#error`. This
+is unrelated to PCRE2's sljit fork, which did gain a real riscv64 JIT
+backend - the two forks diverged well before that.
+
+The port already disables JIT for other architectures its bundled sljit
+doesn't cover (`loongarch`, `s390`, via `IS_PCRE_SUPPORT_JIT`); riscv64 just
+isn't in that list because upstream has never built or published a riscv64
+wheel. Add it, same as the existing entries, rather than trying to backport
+a RISC-V sljit backend into a decade-old vendored copy for a feature (JIT)
+cppcheck itself does not need.
+
+Upstream-Status: Inappropriate [riscv64-only build fix for a package upstream does not build or test for riscv64; folds into the port's existing per-arch no-JIT list rather than changing behavior for any arch upstream supports]
+---
+ cmake/vcpkg/ports/pcre/portfile.cmake | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/cmake/vcpkg/ports/pcre/portfile.cmake b/cmake/vcpkg/ports/pcre/portfile.cmake
+--- a/cmake/vcpkg/ports/pcre/portfile.cmake
++++ b/cmake/vcpkg/ports/pcre/portfile.cmake
+@@ -22,7 +22,11 @@ vcpkg_from_sourceforge(
+ )
+
+ set(IS_PCRE_SUPPORT_JIT YES)
+-if(VCPKG_TARGET_ARCHITECTURE MATCHES "(loongarch|^s390)")
++# riscv64: this port's vendored PCRE 8.45 JIT has no sljit backend for RISC-V at all (no
++# sljitNativeRISCV*.c, unlike PCRE2's newer, separately-maintained sljit fork), so
++# pcre_jit_compile.c's own `#if SLJIT_CONFIG_UNSUPPORTED ... #error Unsupported architecture`
++# always fires there. Added alongside the existing loongarch/s390 no-JIT arches.
++if(VCPKG_TARGET_ARCHITECTURE MATCHES "(loongarch|^s390|riscv64)")
+     set(IS_PCRE_SUPPORT_JIT NO)
+ endif()
+
+--
+2.43.0
