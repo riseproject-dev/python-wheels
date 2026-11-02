@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/doppler-dsp/doppler/blob/v0.78.0/.github/workflows/release.yml (build-python)
+name: Build doppler-dsp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/doppler-dsp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-doppler-dsp.yml'
+      - 'docs/packages/doppler-dsp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-doppler-dsp.yml'
+      - 'docs/packages/doppler-dsp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  UV_VERSION: "0.13.6"
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: doppler-dsp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build doppler-dsp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream has not published cp313t/cp314t wheels; the extension isn't
+        # declared free-threading safe.
+        python: ["cp312", "cp313", "cp314"]
+    env:
+      DOPPLER_DSP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout doppler v${{ env.DOPPLER_DSP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: doppler-dsp/doppler
+          ref: v${{ env.DOPPLER_DSP_VERSION }}
+          persist-credentials: false
+
+      - name: Build and smoke-test the wheel in manylinux container
+        # Mirrors release.yml's build-python leg: dnf-install cmake/pkg-config,
+        # pip-install numpy/build/just-buildit/uv (uv is just-buildit's repair
+        # step, `uvx auditwheel repair`), then `python -m build --no-isolation`.
+        # unzip is added because make wheel-check (run on the host by upstream)
+        # runs inside the container here instead.
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/project \
+            -w /project \
+            -e UV_VERSION \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -euxc '
+              dnf install -y cmake pkg-config unzip
+              PYTHON=/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python
+              export PATH="$(dirname "$PYTHON"):$PATH"
+              "$PYTHON" -m pip install --quiet numpy build just-buildit "uv==${UV_VERSION}"
+              mkdir -p dist
+              "$PYTHON" -m build --no-isolation --wheel --outdir dist/
+              make wheel-check
+              bash tests/install/wheel-smoke.sh --wheel-dir dist
+            '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: doppler-dsp-${{ env.DOPPLER_DSP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish doppler-dsp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: doppler-dsp-${{ matrix.version }}-*-manylinux_riscv64
