@@ -26,6 +26,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
 - **660** — A setuptools SWIG extension built from an old tag can ship the `.so` without
   its SWIG-generated `.py` proxy — `build_py` runs before `build_ext` writes it.
+- **672** — A scikit-build-core project can ship a pyproject `if.failed = true` override
+  that silently turns a failed cmake build into a pure-Python wheel instead of failing CI
+  — check for upstream's own "require the extension" env var (the type_enforced case).
 
 ---
 
@@ -523,3 +526,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       (their `Box2D.py` has a post-tag `.i` fix and their `tests/` drop `assertEquals`, gotcha
       631). Compare `upload_time` on PyPI's JSON against the tag date, and diff the PyPI wheel's
       `.py` files against the tag before assuming "upstream builds this tag as-is".
+
+672. **A scikit-build-core project whose `pyproject.toml` has `if.failed = true` ->
+    `wheel.cmake = false` will build a pure-Python wheel and report success when the cmake
+    step fails, instead of failing CI (the type_enforced case; see
+    `build-type-enforced.yml`).** This is scikit-build-core's own graceful-degradation
+    feature, not a bug: `[[tool.scikit-build.overrides]]` with `if.failed = true` means "if
+    anything above this point in the override chain failed, drop `wheel.cmake` and ship a
+    pure-Python wheel anyway" — so a genuinely broken riscv64 cmake/compiler toolchain, or a
+    transient container flake, produces a *working, installing* wheel that silently lacks
+    the compiled accelerator the published PyPI wheels always carry. Nothing in cibuildwheel's
+    own output flags this; the wheel tag and test pass either way, because the pure-Python
+    fallback path exists precisely to keep `import <pkg>` working. The project almost always
+    ships its own opt-out env var for exactly this reason — type_enforced's own
+    `build_wheels.yml` sets `CIBW_ENVIRONMENT: TYPE_ENFORCED_REQUIRE_CPP="1"` (checked via
+    `if.not.env.TYPE_ENFORCED_REQUIRE_CPP = true` gating the same override) so that *upstream's
+    own* CI hard-fails rather than silently publishing a degraded wheel; set the same variable
+    in the riscv64 workflow rather than inventing a new verification step. Grep the checkout's
+    `pyproject.toml` for `if.failed` under `[[tool.scikit-build.overrides]]` whenever a
+    scikit-build-core project's CMake build looks suspiciously forgiving, and prefer upstream's
+    own require-the-extension knob over a bespoke `.so`-presence assertion when one already
+    exists.
