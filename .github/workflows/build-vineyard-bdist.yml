@@ -1,0 +1,374 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/v6d-io/v6d/blob/main/.github/workflows/build-vineyardd-and-wheels-linux.yaml
+name: Build vineyard-bdist wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vineyard-bdist.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vineyard-bdist.yml'
+      - 'docs/packages/vineyard-bdist.yaml'
+      - 'patches/vineyard-bdist/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vineyard-bdist.yml'
+      - 'docs/packages/vineyard-bdist.yaml'
+      - 'patches/vineyard-bdist/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vineyard-bdist
+      version: ${{ inputs.version }}
+
+  build_vineyardd:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vineyardd ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      VINEYARD_BDIST_VERSION: ${{ matrix.version }}
+      OPENSSL_VERSION: '3.5.0'
+      GFLAGS_VERSION: '2.2.2'
+      GLOG_VERSION: '0.7.1'
+      GRPC_VERSION: '1.83.1'
+      CCACHE_VERSION: '4.13.6'
+      DEPS_PREFIX: /opt/vineyard-deps
+      # vineyard's own cmake_minimum_required(VERSION 3.3), and several of
+      # its vendored thirdparty/ submodules, predate CMake 4's 3.5 floor
+      # (gotcha 207/257); the image's pipx cmake is >=4 (gotcha 358).
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+    steps:
+      - name: Checkout v6d v${{ env.VINEYARD_BDIST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: v6d-io/v6d
+          ref: v${{ env.VINEYARD_BDIST_VERSION }}
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      # OpenSSL's Configure needs perl modules the image's minimal
+      # perl-interpreter lacks (gotcha 46). boost-devel/boost-static cover
+      # find_boost()'s system+filesystem components (USE_STATIC_BOOST_LIBS=ON).
+      - name: Install build dependencies
+        run: dnf install -y --setopt=install_weak_deps=False perl boost-devel boost-static
+
+      - name: Install ccache
+        run: |
+          set -eux
+          curl -fsSL "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static.tar.gz" | \
+            tar -xzf - --strip-components 1 -C /usr/local/bin "ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static/ccache"
+          ccache --version
+
+      - name: Restore compilation cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /root/.cache/ccache
+          key: ccache-vineyard-bdist-v${{ env.VINEYARD_BDIST_VERSION }}-grpc${{ env.GRPC_VERSION }}-manylinux_riscv64-${{ github.run_id }}
+          restore-keys: |
+            ccache-vineyard-bdist-v${{ env.VINEYARD_BDIST_VERSION }}-grpc${{ env.GRPC_VERSION }}-manylinux_riscv64-
+
+      - name: Build static OpenSSL
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          set -eux
+          curl -fsSL -o "openssl-${OPENSSL_VERSION}.tar.gz" "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar zxf "openssl-${OPENSSL_VERSION}.tar.gz"
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure no-ssl2 no-zlib no-shared no-comp no-dynamic-engine \
+            --prefix="${DEPS_PREFIX}" --openssldir="${DEPS_PREFIX}" linux64-riscv64
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Build static gflags
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          set -eux
+          curl -fsSL -o gflags.tar.gz "https://github.com/gflags/gflags/archive/v${GFLAGS_VERSION}.tar.gz"
+          tar zxf gflags.tar.gz
+          cmake -S "gflags-${GFLAGS_VERSION}" -B gflags-build \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${DEPS_PREFIX}" \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build gflags-build -j"$(nproc)" --target install
+
+      - name: Build static glog
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          set -eux
+          curl -fsSL -o glog.tar.gz "https://github.com/google/glog/archive/v${GLOG_VERSION}.tar.gz"
+          tar zxf glog.tar.gz
+          cmake -S "glog-${GLOG_VERSION}" -B glog-build \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${DEPS_PREFIX}" \
+            -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
+            -DBUILD_SHARED_LIBS=OFF -DWITH_GTEST=OFF -DWITH_GFLAGS=ON \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build glog-build -j"$(nproc)" --target install
+
+      - name: Checkout grpc v${{ env.GRPC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: grpc/grpc
+          ref: v${{ env.GRPC_VERSION }}
+          submodules: recursive
+          fetch-depth: 1
+          path: grpc-src
+          persist-credentials: false
+
+      # Builds gRPC's own bundled protobuf/abseil-cpp/re2/c-ares/zlib
+      # (module provider for each, same shape grpcio-tools.yaml already
+      # proves compiles on this image) statically, linked against the
+      # OpenSSL just built above.
+      - name: Build static gRPC
+        working-directory: grpc-src
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          set -eux
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${DEPS_PREFIX}" \
+            -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DgRPC_INSTALL=ON \
+            -DgRPC_BUILD_TESTS=OFF \
+            -DgRPC_SSL_PROVIDER=package \
+            -DgRPC_ZLIB_PROVIDER=module \
+            -DgRPC_CARES_PROVIDER=module \
+            -DgRPC_RE2_PROVIDER=module \
+            -DgRPC_PROTOBUF_PROVIDER=module \
+            -DgRPC_ABSL_PROVIDER=module \
+            -DOPENSSL_ROOT_DIR="${DEPS_PREFIX}"
+          cmake --build build -j"$(nproc)" --target install
+
+      - name: Save compilation cache
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /root/.cache/ccache
+          key: ccache-vineyard-bdist-v${{ env.VINEYARD_BDIST_VERSION }}-grpc${{ env.GRPC_VERSION }}-manylinux_riscv64-${{ github.run_id }}
+
+      # Mirrors docker/Dockerfile.vineyardd's own inline sed (upstream's
+      # workaround, not ours): cpprestsdk's bundled boost::regex detection
+      # otherwise pulls in a Boost::regex target nothing else here builds.
+      - name: Patch cpprestsdk to drop its boost::regex dependency
+        run: sed -i 's/Boost::regex//g; s/regex//g' thirdparty/cpprestsdk/Release/cmake/cpprest_find_boost.cmake
+
+      # Mirrors docker/Dockerfile.vineyardd's cmake invocation
+      # (BUILD_VINEYARD_SERVER=ON, everything else the client/graph/io/python
+      # path needs turned off). USE_LIBUNWIND=OFF: FindLibUnwind.cmake is
+      # non-REQUIRED and nothing riscv64-specific gates it, but libunwind
+      # itself isn't packaged here and the backtrace it enables is optional.
+      - name: Configure and build vineyardd
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          set -eux
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUSE_STATIC_BOOST_LIBS=ON \
+            -DUSE_LIBUNWIND=OFF \
+            -DBUILD_VINEYARD_SERVER=ON \
+            -DBUILD_VINEYARD_CLIENT=OFF \
+            -DBUILD_VINEYARD_PYTHON_BINDINGS=OFF \
+            -DBUILD_VINEYARD_PYPI_PACKAGES=OFF \
+            -DBUILD_VINEYARD_LLM_CACHE=OFF \
+            -DBUILD_VINEYARD_BASIC=OFF \
+            -DBUILD_VINEYARD_GRAPH=OFF \
+            -DBUILD_VINEYARD_IO=OFF \
+            -DBUILD_VINEYARD_HOSSEINMOEIN_DATAFRAME=OFF \
+            -DBUILD_VINEYARD_TESTS=OFF \
+            -DBUILD_VINEYARD_TESTS_ALL=OFF \
+            -DBUILD_VINEYARD_BENCHMARKS=OFF \
+            -DBUILD_VINEYARD_PROFILING=OFF
+          cmake --build build -j"$(nproc)"
+          strip build/bin/vineyardd
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vineyard-bdist-${{ env.VINEYARD_BDIST_VERSION }}-vineyardd
+          path: build/bin/vineyardd
+          if-no-files-found: error
+
+  build_vineyardctl:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vineyardctl ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      VINEYARD_BDIST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout v6d v${{ env.VINEYARD_BDIST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: v6d-io/v6d
+          ref: v${{ env.VINEYARD_BDIST_VERSION }}
+          submodules: false
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: 'stable'
+
+      # Mirrors build-vineyardd-and-wheels-linux.yaml's build-vineyardctl job,
+      # cross-compiled (GOARCH=riscv64, CGO_ENABLED=0) rather than natively
+      # built, same as build-s5cmd.yml.
+      - name: Build vineyardctl
+        run: |
+          set -eux
+          CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -a -o vineyardctl k8s/cmd/main.go
+          strip vineyardctl || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vineyard-bdist-${{ env.VINEYARD_BDIST_VERSION }}-vineyardctl
+          path: vineyardctl
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, build_vineyardd, build_vineyardctl]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vineyard-bdist ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      VINEYARD_BDIST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout v6d v${{ env.VINEYARD_BDIST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: v6d-io/v6d
+          ref: v${{ env.VINEYARD_BDIST_VERSION }}
+          submodules: false
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: vineyard-bdist-${{ env.VINEYARD_BDIST_VERSION }}-vineyardd
+          path: python/vineyard/bdist/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: vineyard-bdist-${{ env.VINEYARD_BDIST_VERSION }}-vineyardctl
+          path: python/vineyard/bdist/
+
+      - run: chmod +x python/vineyard/bdist/vineyardd python/vineyard/bdist/vineyardctl
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - run: uv pip install setuptools wheel
+
+      # setup_bdist.py's own bdist_wheel_plat.get_tag() rewrites any
+      # 'linux*' --plat-name to 'manylinux2014*' - a no-op here since
+      # 'manylinux_2_39_riscv64' doesn't start with 'linux', so the tag
+      # we pass survives untouched and no patch is needed.
+      - name: Build wheel
+        run: python3 setup_bdist.py bdist_wheel --plat-name=manylinux_2_39_riscv64
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vineyard-bdist-${{ env.VINEYARD_BDIST_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test vineyard-bdist ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      VINEYARD_BDIST_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: vineyard-bdist-${{ env.VINEYARD_BDIST_VERSION }}-manylinux_riscv64
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - run: uv pip install --reinstall --no-index --find-links . vineyard-bdist
+
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          BDIST_DIR="$(python3 -c 'import vineyard.bdist, os; print(os.path.dirname(vineyard.bdist.__file__))')"
+          "$BDIST_DIR/vineyardd" --version
+          "$BDIST_DIR/vineyardctl" version
+
+  publish:
+    name: Publish vineyard-bdist ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: vineyard-bdist-${{ matrix.version }}-manylinux_riscv64
