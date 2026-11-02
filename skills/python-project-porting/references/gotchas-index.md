@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (561 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (562 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1338,6 +1338,10 @@ The porting gotchas (561 of them) live in [`references/gotchas/`](gotchas/), spl
   with the same `mv <pkg> <pkg>-src` gotcha 148 already uses, not more `cd`s (the pyscf
   case; one early `.so` load failure there then cascades into 336 unrelated-looking
   `AttributeError`s within the same pytest process).
+- **667** — A src-layout project's pytest ini `pythonpath = ["src"]` inserts the checkout's
+  source package ahead of the installed wheel, so `pytest {project}/tests` silently tests
+  the pure-Python fallback; stage `tests` + `pyproject.toml` with `test-sources` as in gotcha
+  25 (the munkres case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
