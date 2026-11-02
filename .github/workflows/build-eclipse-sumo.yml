@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's .github/workflows/cibuildwheel.yml
+# (the build-wheels job, narrowed to the Linux manylinux leg for eclipse-sumo).
+# Upstream builds with CHECK_OPTIONAL_LIBS=ON (the almalinux manylinux_2_28 image's
+# install_dependencies.sh installs FOX/X11/OpenGL for netedit+sumo-gui, GDAL, GEOS,
+# Apache Arrow/Parquet, and builds JuPedSim from source) to produce a GUI-capable
+# wheel. None of those are CMAKE REQUIRED (only XercesC and Threads are - see
+# CMakeLists.txt), and FFmpeg/OpenSceneGraph/GL2PS are themselves gated on
+# HAVE_FOX, so turning CHECK_OPTIONAL_LIBS/ENABLE_FOX/ENABLE_PROJ/ENABLE_PARQUET
+# off here keeps exactly the headless CLI tools (sumo, netconvert, duarouter,
+# activitygen, dfrouter, jtrrouter, marouter, netgenerate, od2trips, polyconvert)
+# and drops the GUI (X11/OpenGL/FOX), GDAL, GEOS, Arrow/Parquet, FFmpeg, OpenSceneGraph
+# and JuPedSim trees - each would need its own from-source riscv64 build (EPEL,
+# which upstream's GDAL/Arrow stack and the manylinux_2_39_riscv64 image's own
+# samtools/bcftools gap both rely on, resolves to nothing on this arch) for a
+# feature set this registry's users do not need to run sumo/netconvert/duarouter
+# headlessly. Eigen3 (used only for overhead-wire/electric-circuit simulation)
+# stays on: eigen3-devel resolves from the image's own CRB/AppStream repos, as it
+# already does for build-ompl.yml/build-cgal.yml.
+#
+# eclipse-sumo's own [tool.cibuildwheel] build list is cp312-only for every other
+# platform too (wheel.py-api = "py3": one build serves every interpreter), so
+# there is no interpreter matrix here either.
+#
+# XercesC is CMAKE REQUIRED and not available via dnf (EPEL-only on Rocky 10,
+# which is a no-op for riscv64 - see build-pysam.yml/build-openbabel.yml), so it
+# is built from its own upstream release tarball first.
+name: Build eclipse-sumo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/eclipse-sumo.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-eclipse-sumo.yml'
+      - 'docs/packages/eclipse-sumo.yaml'
+      - 'patches/eclipse-sumo/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-eclipse-sumo.yml'
+      - 'docs/packages/eclipse-sumo.yaml'
+      - 'patches/eclipse-sumo/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  XERCESC_VERSION: '3.3.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: eclipse-sumo
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build eclipse-sumo ${{ matrix.version }} cp312-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      ECLIPSE_SUMO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sumo v${{ env.ECLIPSE_SUMO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: eclipse-sumo/sumo
+          ref: v${{ env.ECLIPSE_SUMO_VERSION }}
+          fetch-depth: 0
+          filter: tree:0
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          set -euo pipefail
+          for p in python-wheels/patches/eclipse-sumo/${ECLIPSE_SUMO_VERSION}/*.patch; do
+            git apply -v "$p"
+          done
+
+      # Upstream vendors Xerces-C (Apache-2.0) into the wheel via auditwheel but
+      # ships no copy of its licence; staged here for the license-files patch
+      # above, the same shape as build-ompl.yml staging boost/yaml-cpp's.
+      - name: Stage vendored dependency licences
+        run: curl -fsSL --retry 5 "https://raw.githubusercontent.com/apache/xerces-c/v${{ env.XERCESC_VERSION }}/LICENSE" -o LICENSE.xercesc
+
+      - name: Preparing wheel eclipse-sumo
+        run: python tools/build_config/version.py --pep440 build_config/pyproject/eclipse-sumo.toml pyproject.toml
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp312-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install eigen3-devel &&
+            cd "$(mktemp -d)" &&
+            curl -fsSL --retry 5 "https://dlcdn.apache.org/xerces/c/3/sources/xerces-c-${{ env.XERCESC_VERSION }}.tar.gz" | tar xz &&
+            cd "xerces-c-${{ env.XERCESC_VERSION }}" &&
+            cmake -Bbuild -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr &&
+            cmake --build build --parallel "$(nproc)" &&
+            cmake --install build
+          CIBW_CONFIG_SETTINGS: >-
+            cmake.args=-DCHECK_OPTIONAL_LIBS=OFF;-DENABLE_FOX=OFF;-DENABLE_PROJ=OFF;-DENABLE_PARQUET=OFF;-DENABLE_PYTHON_BINDINGS=OFF;-DENABLE_JAVA_BINDINGS=OFF;-DENABLE_CS_BINDINGS=OFF
+          CIBW_TEST_REQUIRES: sumo-data
+          CIBW_TEST_COMMAND: >-
+            python -c "import sumo; print('SUMO_HOME=' + sumo.SUMO_HOME)" &&
+            sumo --version && netconvert --version && duarouter --version &&
+            netgenerate --grid --grid.number=3 -o net.xml &&
+            test -s net.xml
+
+      - name: Check the compiled binaries and vendored licences made it into the wheel
+        run: |
+          set -euo pipefail
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          bins = sorted(n for n in names if n.startswith("sumo/bin/"))
+          print("\n".join(bins))
+          assert any(n.endswith("/sumo") for n in bins), bins
+          assert any(n.endswith("/netconvert") for n in bins), bins
+          assert not any("sumo-gui" in n or "netedit" in n for n in bins), bins
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          assert lic == ["LICENSE", "LICENSE.xercesc"], lic
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: eclipse-sumo-${{ env.ECLIPSE_SUMO_VERSION }}-cp312-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish eclipse-sumo ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: eclipse-sumo-${{ matrix.version }}-*-manylinux_riscv64
