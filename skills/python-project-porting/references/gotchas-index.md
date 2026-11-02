@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (562 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -536,6 +536,11 @@ The porting gotchas (562 of them) live in [`references/gotchas/`](gotchas/), spl
   backend that dodges via a cache-variable override, the other (the Slang compiler itself)
   is the actual product being wrapped and has no from-source path short of a second,
   LLVM-scale port (the slangpy case).
+- **669** — A CMake extension's `pyproject.toml` can look fully buildable (a normal
+  `CMakeExtension`/`CMakeBuild` setup.py, a plausible `[build-system] requires`) while the
+  published sdist ships none of the extension's own C++ source at all — `pip wheel <sdist>
+  --no-deps --no-build-isolation` on any host is what actually proves a build is attempted,
+  not the requires list (the mplib case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

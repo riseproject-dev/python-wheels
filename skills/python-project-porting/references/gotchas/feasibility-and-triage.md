@@ -340,6 +340,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **664** — A GPU-interop package can be blocked by two independent upstream-only
   prebuilt-binary fetches stacked on top of each other, one of which dodges and one of which
   doesn't (the slangpy case).
+- **669** — A CMake extension's `pyproject.toml` can look fully buildable while the published
+  sdist ships none of the extension's own source — `pip wheel` on any host, not the
+  `requires` list, is what proves a build is even attempted (the mplib case).
 
 ---
 
@@ -5839,3 +5842,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      `parked` — a missing-prerequisite-port one level down, not a slangpy-specific defect;
      revisit once `shader-slang/slang` itself ships a riscv64 compiler release to point
      `SLANG_RHI_SLANG_URL`/`SLANG_RHI_FETCH_SLANG` at.
+
+669. **A CMake extension's `pyproject.toml` can look fully buildable while the published
+     sdist ships none of the extension's own source — `pip wheel <sdist> --no-deps
+     --no-build-isolation` on any host, not the `[build-system] requires` list, is what
+     proves a build is even attempted (the mplib case).** mplib (a motion-planning library
+     wrapping OMPL/FCL/Pinocchio) reads as straightforwardly portable from packaging
+     metadata alone: a normal `setup.py` `CMakeExtension`/`CMakeBuild` pair, `requires =
+     ["setuptools>=61.0", "setuptools-git-versioning<2", "libclang==11.0.1"]`. The released
+     sdist (`mplib-0.2.1.tar.gz`) contains none of the C++ side: extracting it yields only
+     the Python wrapper tree (`mplib/*.py`, `.pyi` stubs) and packaging files — no
+     `CMakeLists.txt`, no `src/`, no `pybind/`, no `third_party/` anywhere in the archive.
+     `pip wheel <extracted-sdist> --no-deps --no-build-isolation` fails immediately **on
+     x86_64**, with the `cmake <sourcedir>` subprocess erroring because there is nothing to
+     configure — not a riscv64 symptom at all. The real source and its ~13 from-source
+     system C++ dependencies (Eigen, libccd, Boost, OMPL, octomap, a maintainer fork of FCL,
+     CppAD, console_bridge, urdfdom_headers, tinyxml2, urdfdom, pinocchio with autodiff,
+     assimp, orocos_kdl) live only in the upstream git repo plus a hand-maintained
+     `docker/Dockerfile`; upstream's own CI never builds a wheel from the sdist it publishes
+     either — its `build-sdist` job only runs `python -m build --sdist` to produce it, and
+     real wheels come from `cibuildwheel` against the full checkout inside that image. A
+     `[build-system] requires` naming cmake/pybind11/ninja is evidence the project *has* a
+     CMake build, not that the sdist *contains* it — run the local `pip wheel` check before
+     crediting either. (Separately, that same `pyproject.toml`'s `libclang==11.0.1` build
+     pin — which only ever shipped `manylinux1_x86_64`/macOS/Windows wheels — is not itself
+     fatal: it is gotcha 346's exact shape, fixed the same way `build-pymupdfb.yml` fixes
+     it.)
