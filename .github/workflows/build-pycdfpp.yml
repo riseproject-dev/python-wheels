@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/SciQLop/CDFpp/blob/v0.19.0/.github/workflows/CI.yml
+name: Build pycdfpp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycdfpp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycdfpp.yml'
+      - 'docs/packages/pycdfpp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycdfpp.yml'
+      - 'docs/packages/pycdfpp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycdfpp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pycdfpp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYCDFPP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pycdfpp v${{ env.PYCDFPP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SciQLop/CDFpp
+          ref: v${{ env.PYCDFPP_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BEFORE_BUILD: pip install meson meson-python ninja
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy,pyyaml
+          CIBW_TEST_REQUIRES: cyclopts>=4 rich>=13
+          # full_corpus is excluded: it fetches ~33 fixtures from an upstream mirror
+          # (self-signed cert, bare IP) that this runner has no reason to depend on.
+          # The rest is upstream's own free-threaded-only loop (tests-windows.yml/CI.yml),
+          # run here for every interpreter since it needs no network.
+          CIBW_TEST_COMMAND: >-
+            cd {project}/tests && for t in python_loading python_saving python_skeletons
+            python_variable_set_values python_chrono python_windows_crash
+            python_structural_introspection python_debug python_cli_irsdump
+            python_value_conversions python_api_contract python_threads;
+            do python $t/test.py || exit 1; done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycdfpp-${{ env.PYCDFPP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycdfpp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pycdfpp-${{ matrix.version }}-*-manylinux_riscv64
