@@ -1911,3 +1911,8 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `origin` nor its local commit-identity/`core.hooksPath` override — fix all three before
   the first commit, or a bad identity and an unstripped AI-attribution trailer can both land
   silently.
+- **705** — `ci_scripts/safe_push_main.sh` takes no arguments and resolves its own worktree
+  via `git rev-parse --show-toplevel` on the invoking shell's own cwd — run it from inside the
+  bookkeeping worktree, never from the primary checkout's directory with the worktree merely
+  named as an unused argument, or it rebases/pushes the primary checkout itself and can leave
+  real conflict markers committed into tracked files repo-wide.

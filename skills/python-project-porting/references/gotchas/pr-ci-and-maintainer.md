@@ -576,3 +576,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
        solo, not-yet-reviewed branch with one commit, and `--force-with-lease` with an
        explicit old-sha works even when the clone's narrow fetch refspec never populated a
        normal `origin/<branch>` tracking ref to lease against.
+
+705. **`ci_scripts/safe_push_main.sh` resolves its own worktree by `git rev-parse
+    --show-toplevel`, not by any argument you pass it — invoke it from inside the bookkeeping
+    worktree (`cd` there, or `git -C <worktree> ...` all the way through), never from the
+    shared primary checkout's own directory while merely naming the worktree as an argument
+    (the nanobot-ai case).** The script's usage is literally `ci_scripts/safe_push_main.sh`
+    with no arguments at all — its very first line is `cd "$(git rev-parse --show-toplevel)"`,
+    which resolves against whatever directory the shell invoking it is *already* in. Running
+    `cd /home/user/python-wheels && bash ci_scripts/safe_push_main.sh /path/to/worktree`
+    silently ignores that trailing path (`sh` scripts don't error on an unused positional arg)
+    and instead rebases/pushes the **primary checkout itself** — `git rebase origin/main` run
+    there, against a primary checkout that may be mid-detached-HEAD from an unrelated earlier
+    worktree operation, can leave real merge-conflict markers (`<<<<<<<`/`>>>>>>>`) committed
+    into tracked files across the whole repo, including shell scripts like
+    `ci_scripts/check_no_ai_attribution.sh` itself — whose own `pre-push` hook then fails with
+    a shell *syntax* error ("redirection unexpected") on literally every subsequent push,
+    because the conflict markers are interpreted as I/O redirection operators.
+    - **Recognize it fast**: `git status --short --branch` on `/home/user/python-wheels`
+      showing `## HEAD (no branch)` (detached) with a long run of `AA` (added/added conflict)
+      entries, or any push anywhere failing with "Syntax error: redirection unexpected" naming
+      an absolute `ci_scripts/*.sh` path, means the *primary* checkout is broken, not your
+      worktree.
+    - **The fix is cheap and loses nothing real**: the primary checkout holds no unique local
+      work by this repo's own hard rule (never commit there directly), so `git rebase --abort`
+      (if `.git/rebase-merge` exists) cleanly restores it to its prior branch/commit with a
+      clean working tree — verify with `git status --short --branch` and a `git diff --check
+      HEAD` for stray conflict markers before trusting it again. Then re-run
+      `ci_scripts/safe_push_main.sh` from *inside* the actual target worktree (`cd
+      .git/pw-scratch/<pkg>-queue && ci_scripts/safe_push_main.sh` or
+      `git -C .git/pw-scratch/<pkg>-queue ...` throughout), never from the primary checkout's
+      own directory with the worktree merely named as an argument.
