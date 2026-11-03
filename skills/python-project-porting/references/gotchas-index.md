@@ -1270,6 +1270,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `ls`/`grep` the bundled JIT's own source tree for an arch-named backend file (gotcha 231)
   before trusting the list, then patch the list rather than the generated `#error`
   (the cppcheck/pcre case).
+- **702** — A build-time cross-toolchain downloader's own host-arch match list (e.g.
+  `build.rs` only knowing `x86_64`/`aarch64` hosts for an SDK it fetches) can simply be stale
+  against that toolchain project's *own* current release matrix — check the toolchain's own
+  CI/releases directly, not the consuming package's hardcoded list, and bypass via an
+  existing path/URL override env var instead of patching (the componentize-py / WASI-SDK
+  case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
