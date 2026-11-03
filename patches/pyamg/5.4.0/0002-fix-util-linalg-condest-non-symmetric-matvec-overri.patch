@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 15:35:00 +0200
+Subject: [PATCH] fix(util/linalg): condest non-symmetric matvec override
+ ignored by scipy>=1.17
+
+condest(A, symmetric=False) estimates cond(A) by running Arnoldi on
+the operator v -> A^H (A v), built by assigning a `matvec` function
+directly onto the `LinearOperator` returned by aslinearoperator(A).
+Through scipy 1.16, `C @ v` / `C.dot(v)` dispatched to that
+instance-level `matvec` override. As of scipy 1.17, `@`/`dot()` call
+the operator's internal `_matvec` directly and no longer look at an
+instance `matvec` attribute, so the override is silently ignored:
+_approximate_eigenvalues ends up iterating on A itself instead of
+A^H A, and the final `** 0.5` then takes an extra, incorrect square
+root of the (already unsquared) estimate. For a random 2x2 matrix this
+returns ~3.59 where cond(A) via SVD is ~12.93 - not a precision issue,
+every multi-dimensional non-symmetric case in the test is off by
+roughly this same square-root factor.
+
+Build the v -> A^H (A v) operator through the LinearOperator(shape,
+matvec=...) constructor instead of monkey-patching an existing
+instance's `matvec` attribute - the constructor wires the function in
+as `_matvec`, which `@`/`dot()` do call on every scipy version.
+
+Not yet reported or fixed upstream: this project bans opening issues
+or PRs against third-party repositories, so the fix is carried here
+until it can be submitted upstream by someone able to do so.
+
+Upstream-Status: To upstream [filing against pyamg/pyamg is outside this project's automation scope]
+---
+ pyamg/util/linalg.py | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/pyamg/util/linalg.py b/pyamg/util/linalg.py
+index 8c24331..a0d384a 100644
+--- a/pyamg/util/linalg.py
++++ b/pyamg/util/linalg.py
+@@ -4,7 +4,7 @@
+ from warnings import warn
+ import numpy as np
+ from scipy import sparse
+-from scipy.sparse.linalg import aslinearoperator
++from scipy.sparse.linalg import aslinearoperator, LinearOperator
+ from scipy.linalg import lapack, get_blas_funcs, eig, svd
+
+ from .params import set_tol
+@@ -421,9 +421,11 @@ def condest(A, maxiter=25, symmetric=False):
+     C = aslinearoperator(A)
+     power = 1
+     if not symmetric:
++        Corig = C
++
+         def matvec(v):
+-            return C.rmatvec(C.A @ v)
+-        C.matvec = matvec
++            return Corig.rmatvec(Corig.A @ v)
++        C = LinearOperator(Corig.shape, matvec=matvec, dtype=Corig.dtype)
+         power = 0.5
+
+     [evect, ev, H, V, breakdown_flag] =\
+--
+2.50.1
