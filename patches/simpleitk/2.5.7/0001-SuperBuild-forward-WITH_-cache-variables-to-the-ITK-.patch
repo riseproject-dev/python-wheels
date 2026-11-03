@@ -1,0 +1,37 @@
+From 6cc39b5660aa8f02803d22eec2cf022ffb9e461b Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 04:03:14 +0000
+Subject: [PATCH] SuperBuild: forward WITH_* cache variables to the ITK
+ external project
+
+External_ITK.cmake forwards the ITK_*, ITKV3/4, FFTW, GDCM_, NIFTI_ and
+Module_ variables of the SuperBuild cache into the ITK sub-build, but not
+the WITH_* ones. ITK's vendored zlib-ng (Modules/ThirdParty/ZLIB) is added
+with a plain add_subdirectory(), so all of its architecture-kernel toggles
+are ordinary WITH_* options of the ITK build - and with nothing forwarding
+them, a SuperBuild caller has no way to turn one off.
+
+riscv64 needs WITH_RVV=OFF: zlib-ng enables its RVV kernels by default on
+riscv (option(WITH_RVV ... ON) once BASEARCH_RISCV_FOUND), and its
+riscv_features.c probe confirms the kernel's HWCAP report by executing
+vsetvli itself, which raises SIGILL on the riscv64 hardware this wheel is
+built and tested on - crashing any process that reaches deflate/inflate,
+i.e. every compressed NIfTI/NRRD/MetaImage or HDF5 transform read.
+
+Upstream-Status: Inappropriate [riscv64 build-host workaround; the real defect is zlib-ng's RVV probe trusting an instruction it is testing for, and nothing in SimpleITK's own code is wrong]
+---
+ SuperBuild/External_ITK.cmake | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/SuperBuild/External_ITK.cmake b/SuperBuild/External_ITK.cmake
+index 0eadf34..3bfd58b 100644
+--- a/SuperBuild/External_ITK.cmake
++++ b/SuperBuild/External_ITK.cmake
+@@ -45,6 +45,7 @@ foreach (_varName ${_varNames})
+       OR _varName MATCHES "^GDCM_"
+       OR _varName MATCHES "^NIFTI_"
+       OR _varName MATCHES "^Module_"
++      OR _varName MATCHES "^WITH_"
+       OR _varName STREQUAL "TBB_DIR")
+     message( STATUS "Passing variable \"${_varName}=${${_varName}}\" to ITK external project.")
+     list(APPEND ITK_VARS ${_varName})
