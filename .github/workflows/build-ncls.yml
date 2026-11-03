@@ -34,7 +34,6 @@ env:
   # Update alongside NCLS_VERSION.
   NCLS_REF: 1eca944791fcc71940617c19e00789d3a28573ac
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -46,7 +45,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build ncls ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    name: Build ncls ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     strategy:
@@ -54,7 +53,6 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
-        libc: [manylinux, musllinux]
 
     env:
       NCLS_VERSION: ${{ matrix.version }}
@@ -67,12 +65,16 @@ jobs:
           ref: ${{ env.NCLS_REF }}
           persist-credentials: false
 
+      # musllinux is dropped: numpy (a runtime dep) has no musllinux_riscv64 wheel
+      # on either PyPI or pypi.riseproject.dev, only manylinux_riscv64 ones, so the
+      # test-install step's glibc-built numpy wheel fails to import under musl libc
+      # (`ModuleNotFoundError: No module named 'numpy._core._multiarray_umath'`).
+      # This is an accepted outcome (gotcha 221), not a build problem to work around.
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         env:
           CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           # numpy (a runtime dep) ships no riscv64 wheel on public PyPI; ours is what
           # the test env installs. PIP_ONLY_BINARY keeps pip from building it from source.
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
@@ -86,7 +88,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ncls-${{ env.NCLS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          name: ncls-${{ env.NCLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
