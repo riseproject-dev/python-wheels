@@ -37,6 +37,22 @@ assertions are otherwise untouched: this only gives the DDS discovery and
 the watcher more wall-clock room to actually observe the mutation before the
 subprocess is told to stop and dump its snapshot.
 
+Follow-up (gotcha 708): the above alone turned green locally but still failed
+in CI, because run_ddsls()'s own process.communicate() kill-timeout defaults
+to a fixed 10s that run_ddsls_async_watch never overrides - completely
+unrelated to the --runtime value handed to the watched subprocess. Raising
+test_ddsls_qos_change/test_ddsls_qos_change_in_verbose's runtime to 10 above
+pushed the inner watch budget up to exactly that hardcoded outer kill-timeout,
+deleting all headroom for the subprocess's own startup (interpreter boot +
+cyclonedds import, before --runtime's own clock even starts) and shutdown
+(DDS participant teardown, stdout flush, process exit): both tests then hit
+`subprocess.TimeoutExpired` at 10s in the next CI run, one with a partial
+stdout capture proving the subprocess was still working, not deadlocked.
+Thread a `timeout` through to run_ddsls() from run_ddsls_async_watch that is
+always `runtime` plus a fixed 20s of headroom, so this harness function can
+never again let a bump to some test's runtime collide with its own
+kill-timeout.
+
 Upstream-Status: Inappropriate [riscv64 runner is slower than the hardware this fixed budget was sized for; not a defect on upstream's own CI]
 
 Signed-off-by: Ludovic Henry <git@ludovic.dev>
@@ -44,7 +60,23 @@ Signed-off-by: Ludovic Henry <git@ludovic.dev>
 diff --git a/tests/test_ddsls.py b/tests/test_ddsls.py
 --- a/tests/test_ddsls.py
 +++ b/tests/test_ddsls.py
-@@ -466,7 +466,7 @@ def test_ddsls_write_disposed_data_to_file(tmp_path):
+@@ -69,7 +69,14 @@ async def run_ddsls_async_watch(args, runtime, runner):
+ async def run_ddsls_async_watch(args, runtime, runner):
+     loop = asyncio.get_event_loop_policy().get_event_loop()
+     with concurrent.futures.ThreadPoolExecutor() as pool:
+-        task = loop.run_in_executor(pool, run_ddsls, ["--watch", "--runtime", str(runtime)] + args)
++        # gotcha 708: run_ddsls()'s own kill-timeout defaults to a fixed 10s unrelated to
++        # the --runtime budget handed to the subprocess below; raising runtime (in the
++        # tests further down) without raising this too leaves zero headroom for the
++        # subprocess's own startup/shutdown. Always give the kill-timeout real headroom
++        # above runtime instead of relying on run_ddsls()'s unrelated default.
++        task = loop.run_in_executor(
++            pool,
++            lambda: run_ddsls(["--watch", "--runtime", str(runtime)] + args, timeout=runtime + 20))
+         await asyncio.sleep(0.3)
+         test = await runner()
+         return (await task), test
+@@ -466,7 +473,7 @@ def test_ddsls_write_disposed_data_to_file(tmp_path):
          return disposed_data
 
      procdata, disposed_data = run_ddsls_watchmode(["--json", "-a", "--filename", str(tmp_path / "test_disposed.json")],
@@ -53,7 +85,7 @@ diff --git a/tests/test_ddsls.py b/tests/test_ddsls.py
 
      assert procdata['status'] == 0
 
-@@ -522,7 +522,7 @@ def test_ddsls_qos_change():
+@@ -522,7 +529,7 @@ def test_ddsls_qos_change():
 
          return dp, tp, dw, old_qos, new_qos
 
@@ -62,7 +94,7 @@ diff --git a/tests/test_ddsls.py b/tests/test_ddsls.py
 
      assert str(old_qos) in data["stdout"]
      for q in new_qos:
-@@ -550,7 +550,7 @@ def test_ddsls_qos_change_in_verbose():
+@@ -550,7 +557,7 @@ def test_ddsls_qos_change_in_verbose():
 
          return dp, tp, dw, old_qos, new_qos
 
