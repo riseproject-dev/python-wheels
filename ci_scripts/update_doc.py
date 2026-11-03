@@ -19,7 +19,6 @@ maintain the YAML source of truth; it never touches a generated page directly.
 import difflib
 import hashlib
 import os
-import re
 import subprocess
 import sys
 import zipfile
@@ -29,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-REPO = "riseproject-dev/python-wheels"
+from github_issues import REPO, normalize_name
 CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
 PACKAGES_FILE = CI_SCRIPTS_DIR / "packages.txt"
@@ -42,13 +41,6 @@ GH_TOKEN = os.environ.get("GH_TOKEN", "")
 
 def find_wheel_files(path):
     return sorted(Path(path).glob("*.whl"))
-
-
-def normalize_name(name):
-    """
-    https://packaging.python.org/en/latest/specifications/name-normalization/#name-normalization
-    """
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 # "License :: OSI Approved :: BSD License" -> "BSD"

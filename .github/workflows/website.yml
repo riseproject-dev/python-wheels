@@ -59,3 +59,31 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./_site
           cname: pypi.riseproject.dev
+
+  # A package is officially available once deploy has published /simple/, so
+  # we can now move the issue Status to "Available in RISE PyPI".
+  # Compares packages.txt with the project rather than diffing this push,
+  # so pushes the concurrency queue skipped are caught up.
+  sync-project-status:
+    needs: deploy
+    if: ${{ vars.RISEPROJECT_APP_CLIENT_ID != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # GITHUB_TOKEN cannot write organization projects; the App needs the
+      # organization "Projects: read and write" permission.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: ci_scripts
+
+      - name: Mark published packages in the Python Wheels project
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 ci_scripts/sync_project_status.py
