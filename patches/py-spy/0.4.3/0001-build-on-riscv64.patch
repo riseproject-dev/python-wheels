@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 27 Aug 2026 00:00:00 +0000
+Subject: [PATCH] build on riscv64
+
+pyruntime::get_tstate_current_offset() is defined once per (os, arch) pair
+and riscv64 matches none of them, so a riscv64-linux build fails to compile
+at its only call site:
+
+    error[E0425]: cannot find function `get_tstate_current_offset` in module `pyruntime`
+       --> src/python_process_info.rs:694:41
+
+The offset is only consulted for Python 3.7 to 3.11, where the address of
+gilstate.tstate_current has to be read out of _PyRuntime; 3.12 and later
+take the ceval.gil branch above it and never reach this code. Returning
+None is what the powerpc64/powerpc/mips arm already does, and the caller
+handles it: it reports "unknown pyruntime.gilstate.tstate_current offset"
+if --gil was asked for, and otherwise carries on. So add riscv64 to that
+arm rather than inventing offsets that would need generate_bindings.py run
+against a riscv64 build of every 3.7-3.11 interpreter.
+
+Upstream-Status: To upstream [not yet submitted; benfred/py-spy#594 is the standing riscv64 request and is about native-extension unwinding, so this compile fix needs to be raised on its own rather than appended there]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/src/python_bindings/mod.rs b/src/python_bindings/mod.rs
+--- a/src/python_bindings/mod.rs
++++ b/src/python_bindings/mod.rs
+@@ -195,7 +195,8 @@ pub mod pyruntime {
+         any(
+             target_arch = "powerpc64",
+             target_arch = "powerpc",
+-            target_arch = "mips"
++            target_arch = "mips",
++            target_arch = "riscv64"
+         )
+     ))]
+     pub fn get_tstate_current_offset(version: &Version) -> Option<usize> {
