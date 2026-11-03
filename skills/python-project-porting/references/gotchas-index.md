@@ -1600,6 +1600,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   vendor's own released x86_64 wheel fails the same suite: prove it with one
   `pip install --only-binary :all: <pkg>==<ver>`, bisect across sibling distributions, then
   ship a functional smoke test instead of a half-suite deselect list (the fasttext-numpy2 case).
+- **699** — Gotcha 504's discrete-wrong-result class extends to a boolean: a trivially feasible
+  instance coming back `is_proven_infeasible` on riscv64 only, with no exact-equality assertion
+  anywhere, is still an architecture float divergence one layer inside a vendored exact solver
+  (`FetchContent`-built HiGHS), not a wrong build; a day-long vendored build makes the
+  one-flag x86 repro impractical, so the pass/fail split across problem types/objectives
+  stands in for it instead (the packingsolver case).
 - **535** — A release tag can ship tests its own source does not satisfy: diff the failing
   test against upstream's post-release `master`, and `git cherry-pick -x` the fix that
   landed after the tag was cut into an `Upstream-Status: Backport` patch (the

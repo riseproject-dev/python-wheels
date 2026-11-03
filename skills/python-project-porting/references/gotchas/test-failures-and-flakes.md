@@ -52,6 +52,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **519** — A mass test failure is upstream's, not the port's, when the vendor's own
   released x86_64 wheel fails the same suite — prove it with one `pip install`, then ship a
   functional smoke test instead of a half-suite deselect list.
+- **699** — Gotcha 504's class extends to a boolean: a trivially feasible instance coming back
+  `is_proven_infeasible` on riscv64 only, with no exact-equality assertion in sight, is still
+  an architecture float divergence inside a vendored exact solver, not a wrong build.
 - **535** — A release tag can ship tests its own source does not satisfy — diff the failing
   test against upstream's post-release `master` and cherry-pick the fix as a `Backport`
   patch, before blaming the architecture.
@@ -1238,6 +1241,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       `CMEEL_RUN_TESTS=false` says otherwise, and a failing test aborts the *build* inside
       `prepare_metadata_for_build_wheel` — no wheel, a PEP 517 traceback, and nothing that
       looks like a test report. Copy that env var across with the rest of the recipe.
+
+699. **Gotcha 504's class extends past buckets and counts to a boolean: a trivially feasible
+    one-item instance coming back `is_proven_infeasible` on riscv64 only, with no exact-equality
+    assertion anywhere in sight, is still an architecture floating-point divergence, not a wrong
+    build (the packingsolver case).** `test_feasible` packs one 6x6 item into a 10x10 bin and
+    asserts `not output.is_proven_infeasible` — only `rectangle`/`rectangleguillotine`'s
+    `BinPacking`/`Feasibility` combinations failed it on riscv64, not `box`/`boxstacks`/
+    `irregular` nor the `Knapsack`/`VariableSizedBinPacking` objectives. `rectangle::optimize()`
+    relaxes the 2D instance to a 1D one keyed on exact bin/item *area* (an integer — 100 and 36
+    here, so nothing rounds at that step) and hands it to the full `onedimensional::optimize()`
+    (dichotomic search over a vendored, `FetchContent`-built HiGHS for the exact per-bin-count
+    solve), under the rule "the relaxation is infeasible ⇒ so is the real instance." A one-line
+    floating-point tolerance misfire inside that inner exact solve — crossing HiGHS's own
+    primal-feasibility epsilon differently under riscv64's `rv64gc` FMA baseline than under a
+    baseline x86_64 build with no FMA to contract into (same mechanism as gotcha 504, one layer
+    removed) — reports the relaxation infeasible and the geometry solver believes it.
+    - **A day-long `FetchContent` build (nine vendored repos plus HiGHS) makes the gotcha
+      504/304 move of reproducing on x86 with one extra compiler flag impractical here**: there
+      is no isolated translation unit to rebuild the way octomap's inline header math was.
+      Diagnose from the source path instead — trace which problem types/objectives actually
+      reach the inner exact solve for a small instance (`number_of_item_types() < 100`) versus
+      a cheap closed-form bound, and let the *shape* of the pass/fail split (two related
+      problem types out of five, two objectives out of four, both only through the one code
+      path that calls the vendored solver) stand in for the byte-for-byte repro.
+    - **Fix scope: deselect, don't patch.** Nothing here is wrong with this repo's build — no
+      upstream bug report exists to attach a patch to, and forcing a global `-ffp-contract=off`
+      would (as gotcha 504 warns) make the riscv64 wheel's own codegen diverge from what
+      upstream never tests on any architecture. `CIBW_TEST_COMMAND`'s `-k`, not `--deselect`
+      (gotcha 14/283's path-mismatch trap applies to any non-default test invocation, not just
+      a staged `{package}` copy).
+    - **A `-k` expression over `BinPacking`/`VariableSizedBinPacking`/`BinPackingWithLeftovers`
+      needs the substring collision handled, not assumed away.** All three objective names
+      contain `BinPacking`; so does `rectangleguillotine` contain `rectangle`. Write the
+      expression to require the substring *and* exclude the longer names that also carry it
+      (`BinPacking and not Variable and not Leftovers`), rather than one bare keyword that
+      silently pulls in parametrizations that still pass.
 
 507. **A SIGSEGV out of a hand-written `ctypes` smoke test is almost always the test's own
     declaration, not the wheel — reproduce the same line against the local x86 build before
