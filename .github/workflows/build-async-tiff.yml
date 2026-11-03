@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/developmentseed/async-tiff/blob/py-v0.7.2/.github/workflows/python-wheels.yml
+name: Build async-tiff wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/async-tiff.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-async-tiff.yml'
+      - 'docs/packages/async-tiff.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-async-tiff.yml'
+      - 'docs/packages/async-tiff.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: async-tiff
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build async-tiff ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # Upstream builds one abi3 wheel with `-i 3.13 --features abi3-py311`
+          # plus per-interpreter wheels for cp310/pypy3.11. cp310 and pypy are
+          # dropped to match this repo's cp312+ floor.
+          - tag: cp311-abi3
+            build: >-
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            features: --features abi3-py311 --features extension-module
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: --features extension-module
+
+    env:
+      ASYNC_TIFF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout async-tiff py-v${{ env.ASYNC_TIFF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: developmentseed/async-tiff
+          ref: py-v${{ env.ASYNC_TIFF_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Stage the licence beside async-tiff's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is python/ -- so upstream's published wheels carry
+        # no licence text at all, only the classifiers.
+        run: cp LICENSE python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # async-tiff ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here. lerc-sys
+          # (the lerc feature, on by default) runs bindgen over its vendored
+          # C++ headers, which needs libclang.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            dnf install -y clang-devel
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="${{ matrix.features }}"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy rasterio
+          CIBW_TEST_SOURCES: python/tests python/pyproject.toml fixtures
+          # test_cog_s3 reaches a real public S3 bucket; deselected like the
+          # other live-endpoint tests this fleet already excludes elsewhere.
+          CIBW_TEST_COMMAND: >-
+            python -c "import async_tiff._async_tiff as m; assert m.__file__.endswith('.so'), m.__file__"
+            && cd python
+            && python -m pytest -v tests
+            --deselect tests/test_cog.py::test_cog_s3
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: async-tiff-${{ env.ASYNC_TIFF_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish async-tiff ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: async-tiff-${{ matrix.version }}-*-manylinux_riscv64
