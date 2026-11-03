@@ -55,7 +55,12 @@ jobs:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream's own published wheels and classifiers stop at 3.11; jina pins
         # several runtime deps (grpcio<=1.68.0, uvicorn<=0.23.1) that track that.
-        python: ["cp39", "cp310", "cp311"]
+        # cp39 dropped here: docarray's orjson>=3.8.2 dependency has no riscv64 wheel
+        # for cp39 in this registry at any version (nor, it looks like, upstream's own
+        # PyPI releases past 3.11.x), so PIP_ONLY_BINARY below can't find one to
+        # backtrack to and the build falls through to a from-source orjson build,
+        # which fails outright (no rustup riscv64 target).
+        python: ["cp310", "cp311"]
 
     env:
       JINA_VERSION: ${{ matrix.version }}
@@ -88,10 +93,17 @@ jobs:
             curl -sSfL https://go.dev/dl/go${{ env.GO_VERSION }}.linux-riscv64.tar.gz
             | tar -zx -C /usr/local/
           # jraft.go's `#cgo pkg-config: python3` needs the target interpreter's python3.pc.
+          # docarray pulls in orjson>=3.8.2 with no upper bound; pip's default resolves
+          # the newest orjson (3.13.0), which this registry only ships for cp312+, and
+          # falls back to building orjson's sdist from source -- which fails outright
+          # (no rustup riscv64 target). PIP_ONLY_BINARY keeps pip off that sdist path so
+          # it backtracks to 3.11.9, the newest version this registry publishes for
+          # cp310/cp311.
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="/usr/local/go/bin:$PATH"
             PKG_CONFIG_PATH="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBPC"))')"
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=orjson
           CIBW_TEST_COMMAND: python -c "import jina; import jraft"
 
       - name: Check the wheel ships the compiled extension
