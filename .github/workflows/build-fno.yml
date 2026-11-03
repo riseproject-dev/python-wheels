@@ -49,7 +49,7 @@ jobs:
     if: needs.setup.outputs.versions != '[]'
     name: Build fno ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -80,9 +80,16 @@ jobs:
           source "$HOME/.cargo/env"
           rustup target add riscv64gc-unknown-linux-gnu
           (cd crates/fno-agents && cargo build --release --target riscv64gc-unknown-linux-gnu --bins)
+          # The `fno` front door is its own crate; the wheel hook hard-fails without it.
+          (cd crates/fno && cargo build --release --target riscv64gc-unknown-linux-gnu --bin fno)
           mkdir -p cli/src/fno/_bin
-          for b in fno-agents fno-agents-daemon fno-agents-worker; do
-            cp "crates/fno-agents/target/riscv64gc-unknown-linux-gnu/release/${b}" "cli/src/fno/_bin/${b}"
+          cp crates/fno/target/riscv64gc-unknown-linux-gnu/release/fno cli/src/fno/_bin/fno
+          # 0.4.4 added fno-gh-proxy, fno-gh-loopcheck and fno-gh-coverage to the required
+          # set; `--bins` already builds whichever of them this release has.
+          for b in fno-agents fno-agents-daemon fno-agents-worker \
+                   fno-gh-proxy fno-gh-loopcheck fno-gh-coverage; do
+            f="crates/fno-agents/target/riscv64gc-unknown-linux-gnu/release/${b}"
+            if [ -f "$f" ]; then cp "$f" "cli/src/fno/_bin/${b}"; fi
           done
           pybin=/opt/python/cp312-cp312/bin
           "$pybin/pip" install -q build
