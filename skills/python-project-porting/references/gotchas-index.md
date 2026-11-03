@@ -593,6 +593,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   package): check what happens when it's absent (a named, working fallback vs. every call
   failing) and what the sdist itself already builds before parking it as a hard
   `vendored-binary` block (the nanobot-ai case).
+- **706** — A plain `git` Cargo dependency pinned by rev into a third-party org's private repo,
+  gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux build exactly
+  as hard as gotcha 600/670/704's missing checkout would, even with a fully public wrapper
+  repo and a clean Python dependency closure (the chalk-remote-call-python case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
