@@ -1762,14 +1762,16 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   reaches the outer default, all headroom for subprocess startup/shutdown disappears and
   `TimeoutExpired` returns. Fix the harness function to pass `timeout=runtime+20`, not just
   the individual tests' `runtime=` values.
-- **710** — Gotcha 693 blamed the wrong variable: a nanobind-bound function's `std::bad_cast`
-  on riscv64 (sleipnirgroup-jormungandr's `Problem.solve()`) fires on entering its
-  `nb::kwargs`-handling branch at all, not on the specific keyword value it happened to see
-  in every failing call — patching `diagnostics=True` to `diagnostics=False` still fails the
-  same 34 tests, since any kwarg (even `max_iterations=0` or `timeout=0.0` alone) triggers
-  it and a bare `problem.solve()` never does. Drop kwargs that only assert default behavior;
-  deselect the few calls that need a genuinely non-default option and so can't avoid the
-  kwargs path.
+- **711** — A test that caps `RLIMIT_AS` at "VmSize + small headroom" to force a
+  `MemoryError` out of a large allocation silently allocates anyway under free-threaded
+  CPython (cp314t) — `RLIMIT_AS` only gates new `mmap`/`brk` growth, and cp314t's
+  mimalloc-backed allocator reserves large per-thread arenas up front, so later large
+  allocations are carved from address space already mapped before the test's own
+  `setrlimit` call. Confirmed off riscv64 and off the package's own code with a ~20-line
+  pure-stdlib repro (GIL: `MemoryError`; free-threaded: allocates all 192 MiB, no error,
+  baseline `VmSize` >1 GiB before touching the module under test). Deselect the specific
+  test for `cp314t` only (matrix `include:`, gotcha 149's shape), citing this gotcha —
+  don't chase it as a port bug.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

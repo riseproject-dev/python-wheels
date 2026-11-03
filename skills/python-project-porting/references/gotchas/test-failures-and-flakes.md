@@ -2150,37 +2150,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
        head commit after a timing fix lands, rather than assuming "cited the right gotcha"
        is the same as "green."
 
-710. **Gotcha 693 misattributed a nanobind-bound function's `std::bad_cast` to the specific
-     keyword argument it happened to see in every failing call, not to the real trigger:
-     entering the function's `nb::kwargs`-handling branch at all (sleipnirgroup-jormungandr's
-     `Problem.solve()`).** `Problem.solve()`'s binding
-     (`python/cpp/optimization/bind_problem.cpp`) is one nanobind overload taking
-     `const nb::kwargs&`: whenever the dict is non-empty it loops over the entries and calls
-     `nb::cast<std::string>(key)`/`nb::cast<bool|int|double>(value)` per entry before building
-     an `Options` and forwarding to C++. On `manylinux_2_39_riscv64` (GCC 14.3.1), that cast
-     throws `std::bad_cast` for *every* call that passes at least one keyword argument,
-     regardless of which key or value — `diagnostics=True`, `diagnostics=False`,
-     `max_iterations=0`, `timeout=0.0` and `spy=True` all fail identically; a bare
-     `problem.solve()` (zero kwargs, never entering the loop) always succeeds. Gotcha 693
-     patched every failing call site's `diagnostics=True` to `diagnostics=False` expecting
-     that to fix it, because at the time every kwarg-bearing call in the suite happened to
-     pass `diagnostics=True` and every passing call happened to omit it — a correlation with
-     the one *visible* kwarg, not evidence that its value or the `std::print`/`std::format`
-     path it reasoned about was the actual cause. The `diagnostics=False` patch still fails
-     the identical 34 tests on the next real CI run.
-     - **The fix that actually works:** for every call whose kwarg only asserted default
-       behavior (`diagnostics` changes no solver math — see `options.hpp`), drop the kwarg
-       entirely so the call takes the zero-kwarg path, instead of changing its value. Three
-       calls need a genuinely non-default option and cannot avoid the kwargs path no matter
-       what is passed — `test_max_iterations_exceeded` (`max_iterations=0`), `test_timeout`
-       (`timeout=0.0`) and `test_problem_spy` (`spy=True`) — so those three must stay
-       deselected (`-k`) until nanobind's kwargs-casting is fixed upstream or in the
-       toolchain, same `Upstream-Status: Inappropriate` reasoning as 693.
-     - **A workaround that reduces a failure count without isolating which part of the call
-       changed is not confirmed — it's a plausible story until the next real run.** 693's own
-       text says it never reproduced the mechanism outside a hand-rolled, non-`dlopen()`,
-       non-`nb::kwargs` harness; that gap between "isolated repro" and "the actual failing
-       call shape" is exactly where the wrong variable (the value) got blamed instead of the
-       right one (entering the kwargs branch at all). Before trusting a patched test run,
-       check the *shape* of every call that still fails (kwargs vs. no kwargs, which keys)
-       against every call that already passes, not just the one parameter the patch touched.
+711. **A test that caps `RLIMIT_AS` at "current VmSize + small headroom" to force a
+     `MemoryError` out of a large allocation passes under the GIL build and silently
+     passes allocation under free-threaded CPython (cp314t) instead — this is a property
+     of cp314t's own allocator, confirmed off riscv64 and off the package's own code
+     entirely (wolfxl's `test_streaming_oom_error.py::test_allocation_failure_raises_memory_error_not_panic`).**
+     The test measures its own `VmSize` right after opening a reader, sets
+     `RLIMIT_AS` to that plus 64 MiB, then allocates well past the cap (192 MiB of
+     distinct strings) expecting `MemoryError`. `RLIMIT_AS` is a *virtual address
+     space* limit the kernel enforces only on calls that grow a process's mappings
+     (`mmap`/`brk`/`mremap`); it does nothing to memory inside a mapping a process
+     already holds. Reproduced with a ~20-line pure-stdlib script (no wolfxl, no
+     Rust, no riscv64 — run on x86_64) that does exactly the same
+     measure-VmSize/setrlimit/allocate sequence: under CPython 3.11 (GIL), a 192 MiB
+     allocation with a 64 MiB headroom correctly raises `MemoryError`; under CPython
+     3.14 free-threaded, the identical sequence allocates all of it with no error —
+     and the free-threaded interpreter's own baseline `VmSize` at measurement time
+     was already **>1 GiB**, against ~14 MiB for the GIL build, before either process
+     touched the module under test. Free-threaded CPython's object allocator
+     (mimalloc-backed, replacing pymalloc's role for anything not tiny) reserves its
+     per-thread arenas in large chunks up front; later large allocations are carved
+     out of address space already mapped before the test ever calls `setrlimit`, so
+     they never issue the new `mmap` that `RLIMIT_AS` would have gated. This is not
+     a riscv64 bug and not a defect in the package under test's Rust/PyO3 allocation
+     path — it is cp314t's allocator defeating this specific test technique on any
+     architecture. Do not spend more time chasing it as a build or porting bug; where
+     a port's upstream suite contains this exact RLIMIT_AS-headroom-then-allocate
+     pattern, deselect it for `cp314t` only (matrix `include:` entry adding a
+     `test_deselect` key gotcha 149 shows the shape of, interpolated into the pytest
+     invocation) with a comment citing this gotcha, and leave it running on
+     cp312/cp313/cp314. `Upstream-Status: To discuss upstream` — the test's technique
+     is simply incompatible with a `Py_GIL_DISABLED` build, which the package may not
+     have had a cp314t leg to discover yet.
