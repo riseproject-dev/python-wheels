@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] tests: skip the live-github.com-dependent cert chain test
+
+tests/cert_chain_verifier_test.py::TestCertificateChainVerifier::
+test_valid_certificate_chain's certificate_chain_as_x509 fixture does not
+use a bundled fixture chain: it calls ssl.get_server_certificate(
+("www.github.com", 443)) to fetch whatever leaf certificate GitHub is
+serving right now, then pairs that live leaf with a hardcoded PEM for
+"Sectigo ECC Domain Validation Secure Server CA" (captured 2018-11-02,
+per the cert's own notBefore) as the "intermediate", and asks nassl's
+CertificateChainVerifier to build a chain from those two up to a root in
+the bundled tests/mozilla.pem trust store.
+
+This reproduced as a deterministic failure - not a flake - identically on
+both the cp313 and cp314 legs of this riscv64 build:
+
+    nassl.cert_chain_verifier.CertificateChainVerificationFailed:
+    Verification failed with OpenSSL error code 20: "unable to get local
+    issuer certificate"
+
+Root cause has nothing to do with riscv64, this build, or nassl's
+statically-linked OpenSSL_1_1_1w:
+
+- mozilla.pem is present and loads correctly (the test gets as far as a
+  real OpenSSL chain-validation error, not a file/collection error), so
+  this is not a staged-fixture/packaging problem.
+- CertificateChainVerifier.verify() builds the chain purely from the PEM
+  bytes it is handed (X509_STORE_CTX.set0_trusted_stack/set0_untrusted
+  over in-memory certs); it never touches the system or build's default
+  CA path, so no OpenSSL build flag affecting CA-path defaults is
+  involved either.
+- ssl.get_server_certificate() goes through Python's stdlib ssl module
+  (the runner's/manylinux image's system OpenSSL), not nassl's own
+  bundled OpenSSL_1_1_1w, and it is that *live* leaf, not a stale one,
+  that fails to chain.
+- What has actually changed is GitHub's own serving CA: as of this run,
+  www.github.com's ECDSA leaf is issued by "Sectigo Public Server
+  Authentication CA DV E36", a newer Sectigo intermediate generation
+  that replaced "Sectigo ECC Domain Validation Secure Server CA" since
+  this test's fixture was written. The hardcoded intermediate's subject
+  no longer matches the live leaf's issuer at all, so OpenSSL can't find
+  an issuer for the leaf - exactly what error 20 means - regardless of
+  interpreter, architecture, or OpenSSL build.
+- This is a known failure mode of this exact test, not introduced by
+  this port: nassl's Kali Linux packaging has separately hit this same
+  test failing from the same live-fetch-vs-hardcoded-cert design, there
+  with error 10 ("certificate has expired") instead of error 20 - a
+  different symptom of the same root cause (an external, live TLS
+  endpoint checked against certificate material frozen in source at
+  some point in the past).
+- The sibling test, test_expired_certificate_chain, uses a fully static,
+  self-contained (if actually expired) chain and is unaffected; only the
+  live-fetch-dependent happy-path test breaks under CA rotation.
+
+Since GitHub will keep rotating its serving CA on its own schedule,
+hardcoding today's correct intermediate would only move the next break
+further out, not fix the underlying fragility - so skip the test rather
+than re-pin another intermediate that will go stale again.
+
+Upstream-Status: To upstream [not yet submitted; the live-github.com dependency and the hardcoded intermediate are both upstream's own test design, not anything riscv64/RISE-specific, but no PR has been opened yet]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tests/cert_chain_verifier_test.py | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/tests/cert_chain_verifier_test.py b/tests/cert_chain_verifier_test.py
+index cd561bc..4160645 100644
+--- a/tests/cert_chain_verifier_test.py
++++ b/tests/cert_chain_verifier_test.py
+@@ -43,6 +43,14 @@ cS0chWBNKPFNpvDKdrdKRe+oAkr2jU+ubgIxAODheSr2XhcA7oz9HmedGdMhlrd9
+
+
+ class TestCertificateChainVerifier:
++    @pytest.mark.skip(
++        reason="certificate_chain_as_x509 hardcodes the 2018-era 'Sectigo ECC Domain "
++        "Validation Secure Server CA' intermediate and chains it against a live leaf "
++        "fetched from www.github.com:443 at test time; github.com's real issuing CA has "
++        "since rotated (now 'Sectigo Public Server Authentication CA DV E36'), so the "
++        "hardcoded intermediate no longer matches the live leaf's issuer and chain "
++        "building fails with OpenSSL error 20 on any platform, not just riscv64."
++    )
+     def test_valid_certificate_chain(self, certificate_chain_as_x509: list[X509]) -> None:
+         path_validator = CertificateChainVerifier.from_file(Path(__file__).absolute().parent / "mozilla.pem")
+         path_validator.verify(certificate_chain_as_x509)
+--
+2.43.0
