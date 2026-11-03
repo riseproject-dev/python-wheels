@@ -657,6 +657,14 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `git rev-list --count` on a blobless clone — neither gotcha 103's timestamp proximity
   nor gotcha 213's version-bump diff fits, and the formula gives an exact answer
   (the packingsolver case).
+- **700** — In a multi-package monorepo, a release-please-style bot can stamp the real
+  published version into a *different* language binding's own manifest (a Bazel wheel
+  macro's `version = "..." # x-release-please-version` argument, or a sibling
+  `package.json`), leaving a Rust workspace member's own `Cargo.toml` on an unrelated,
+  already-bumped value at the exact tag — trust the packaging target's literal version,
+  not `dynamic = ["version"]` sourced from the dependency crate (the formatjs/formatjs
+  icu_messageformat case). Distinct from gotcha 668: that one has no tag at all for the
+  extra digit; here the tag is real and still disagrees with its own dependency's manifest.
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

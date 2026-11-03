@@ -50,6 +50,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **687** — When the Python version is the literal count of commits on master, bisect
   `git rev-list --count` on a blobless clone instead of gotcha 103/213's timestamp or
   diff heuristics — the formula gives an exact answer.
+- **700** — In a multi-package monorepo, a release-please-style bot can stamp the real
+  published version into a *different* language binding's own manifest, leaving a Rust
+  workspace member's `Cargo.toml` on an unrelated, already-bumped value at the exact tag.
 
 ---
 
@@ -855,3 +858,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     except `_version.py` itself. Recognize the shape before reaching for either other
     gotcha: grep the release workflow for `rev-list --count` (or an equivalent `git log
     --oneline | wc -l`) before assuming a missing tag means "guess from the timestamp."
+
+700. **In a multi-package monorepo, a release-please-style bot can stamp the real published
+    version into a *different* language binding's own manifest, leaving a Rust workspace
+    member's `Cargo.toml` on an unrelated, already-bumped value at the exact tag (the
+    formatjs/formatjs `icu_messageformat` case; see `build-icu-messageformat.yml`).**
+    formatjs/formatjs builds this Python binding with Bazel, whose `formatjs_python_wheel`
+    macro call in `python/icu_messageformat/BUILD.bazel` takes an explicit `version = "0.1.1"
+    # x-release-please-version` argument — that comment marks the field release-please
+    rewrites on each release, and it is what actually lands on PyPI as `icu_messageformat
+    0.1.1`. At the exact `icu_messageformat@0.1.1` tag, the bound crate's own
+    `crates/icu_messageformat_python/Cargo.toml` reads `version = "0.1.2"`: one release ahead,
+    because release-please bumps each of this monorepo's many release-please-tracked
+    manifests (one per crate, one per Python/npm binding) independently, on its own
+    publish-detecting schedule, not in lockstep. A workflow that trusts `dynamic =
+    ["version"]` sourced from that `Cargo.toml` — the default, reasonable-looking choice for
+    a maturin build with no real upstream `pyproject.toml` to copy from (gotcha 312) — ships
+    `icu_messageformat-0.1.2-...`, silently wrong and off by one release, with no build
+    failure to catch it.
+    - **The wheel macro's own version argument is the ground truth, not the crate's
+      manifest.** Before wiring a dynamic/inferred version for any Bazel- or
+      release-please-managed monorepo binding, grep the actual packaging target (a
+      `py_wheel`/`formatjs_python_wheel`/analogous macro call, or a sibling `package.json`)
+      for a literal version string or a `release-please` marker comment, and diff it against
+      the dependency crate's own `[package] version` at the same tag — a mismatch here means
+      hardcode the macro's value (interpolated from the build matrix, per gotcha 18's
+      three-way match) instead of trusting `dynamic = ["version"]`.
+    - **Distinct from gotcha 668.** That gotcha is about a PyPI version with no git-tag
+      counterpart at all (an extra digit PyPI carries that the tag never does); this one is
+      about a *tagged* release whose own dependency's manifest still disagrees with the tag,
+      because the monorepo's version-bumping bot tracks each binding's manifest separately.
