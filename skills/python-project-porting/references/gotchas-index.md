@@ -589,6 +589,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   before CMake runs; read that CI step, not just the CMake default, and check whether every
   published wheel's own runtime `dependencies` hard-require a CUDA JIT package with no marker
   (the gs-madrona case).
+- **703** — A vendored per-platform binary can gate one *optional* feature only (not the whole
+  package): check what happens when it's absent (a named, working fallback vs. every call
+  failing) and what the sdist itself already builds before parking it as a hard
+  `vendored-binary` block (the nanobot-ai case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

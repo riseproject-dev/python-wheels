@@ -6313,3 +6313,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     (same disposition as the existing `onnxruntime-gpu`/`cuda-tile`/`sglang` entries) — revisit
     only if NVIDIA ships a riscv64 CUDA Toolkit, or if upstream ever publishes its own CPU-only
     build matrix the way `pyqrack`/`pyqrack-cpu` split theirs.
+
+703. **A vendored per-platform binary can gate one *optional* feature only — generalizing
+    gotchas 27/35/116/157/183 to the install-and-mostly-works middle case (the nanobot-ai
+    case).** Gotchas 27, 35 and 116 each resolve a `py3-none-<platform>` wheel set to one of
+    two outcomes: cosmetic tag/nothing compiled ⇒ `not-feasible` (27), or a load-bearing
+    vendored runtime with no riscv64 story ⇒ installable-but-every-call-fails
+    `vendored-binary` (35/157), unless the *Linux* wheel is itself the universal `-any` one
+    (116). nanobot-ai (PyPI; upstream HKUDS/nanobot) is a fifth shape the first three don't
+    quite cover: its five published wheels (`macosx_13_0_{arm64,x86_64}`,
+    `manylinux_2_17_{aarch64,x86_64}`, `win_amd64`) are genuinely differentiated — each
+    bundles a different ~128MB native terminal-UI executable, compiled by
+    `bun build --compile` from a TypeScript tree committed at `tui/` — so gotcha 81's
+    size/content-diff test correctly says "real content" (pointing toward `vendored-binary`),
+    and Bun's own cross-compile target list (`darwin-arm64`, `darwin-x64`, `linux-arm64`,
+    `linux-x64`, `win32-x64`, read straight out of upstream's own
+    `.github/workflows/tui-release.yml` matrix) has no riscv64 entry, so gotcha 35's
+    "find the fetch, then the vendor's own platform table" step correctly says "no upstream
+    artifact to assemble".
+    - **The missing check: read what happens when the binary is absent, not just whether it
+      is absent.** `nanobot/cli/tui_launcher.py::resolve_tui_command()` raises a typed,
+      caught `TuiUnavailableError` naming the exact workaround (`nanobot agent --classic`);
+      `nanobot/cli/agent.py` catches it only around the *one* code path that defaults to the
+      native TUI (a bare interactive `nanobot agent`) and exits 1 with that same message —
+      every other entry point (`--message` one-shot, the SDK, the gateway/HTTP API, the
+      browser WebUI, every chat-channel integration, and `--classic` itself) never touches
+      the TUI binary at all. That is the opposite of gotcha 157's claude-agent-sdk test
+      ("every call fails, always") — here almost nothing fails, and the one thing that does
+      names its own fix.
+    - **Check what the *sdist* builds, not just what the wheels contain.** nanobot-ai's
+      sdist has no `tui/` TypeScript source, no `node_modules`, and no reference to the
+      native binary at all — the Bun-compiled executable is injected into the wheel by a
+      release-only packaging script (`tui/scripts/package-release.py`) that runs *after*
+      `uv build` produces a plain `py3-none-any` wheel, itself never uploaded to PyPI. So
+      `pip install nanobot-ai` on riscv64 today already falls back to the sdist and builds
+      that same zero-native-content wheel in seconds with no compiler — gotcha 27's exact
+      watchdog outcome, reached by a different route (a release-time injection step instead
+      of a `sys.platform == "darwin"` gate in `setup.py`).
+    - **Verdict test, in order: (1)** does the vendored-platform wheel differ for real
+      (gotcha 81's size/content diff) — if no, stop at gotcha 27; if yes, **(2)** does the
+      *runtime* degrade to a named, working alternative when the binary is absent, or does
+      every call fail (gotcha 157) — if every call fails, it's `vendored-binary`/blocked
+      regardless of (1); if it degrades gracefully, **(3)** does the *sdist* (not any
+      published wheel) already build a complete, functional package with no compiler — if
+      yes, there is nothing to port: the gap is in one optional feature, not in the package,
+      and a riscv64 wheel of the base package would carry the same zero-arch-specific bytes
+      pip's sdist fallback already produces. `parked`/no real gap, not `vendored-binary`.
