@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/prody/ProDy/blob/v2.6.1/.github/workflows/main.yml
+name: Build prody wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/prody.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-prody.yml'
+      - 'docs/packages/prody.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-prody.yml'
+      - 'docs/packages/prody.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: prody
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build prody ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PRODY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ProDy v${{ env.PRODY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: prody/ProDy
+          ref: v${{ env.PRODY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,biopython
+          # pyproject.toml pins build-system.requires to setuptools<69/numpy<2.0,
+          # neither published for riscv64; --no-build-isolation skips that check
+          # and setup.py's own `import numpy` is satisfied by the preinstall.
+          # --no-build-isolation also means pip never installs build-system.requires
+          # itself (gotcha 23/76 shape), so setuptools/wheel must be preinstalled
+          # too, or `setuptools.build_meta` isn't importable at all (BackendUnavailable).
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # hpb_Python*/hpb.so are x86_64-only prebuilts MANIFEST.in vendors into
+          # every wheel; dropping them leaves prody's own fallback (calcSASA() and
+          # calcHydrophobicOverlapingAreas() raise ImportError) instead of shipping
+          # binaries that can't load on this arch.
+          CIBW_BEFORE_BUILD: >-
+            pip install setuptools wheel numpy &&
+            rm -f prody/proteins/hpbmodule/hpb_Python*/hpb.so
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib; [importlib.import_module(m) for m in
+            ('prody.dynamics.rtbtools', 'prody.dynamics.smtools', 'prody.kdtree._CKDTree',
+            'prody.proteins.ccealign', 'prody.sequence.msaio', 'prody.sequence.msatools',
+            'prody.sequence.seqtools')]"
+
+      - name: Check the wheel ships the licence and the compiled extensions
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.rsplit("/", 1)[-1].split(".")[0] for n in names if n.endswith(".so")}
+          expected = {
+              "rtbtools", "smtools", "_CKDTree", "ccealign", "msaio", "msatools", "seqtools",
+          }
+          assert exts == expected, exts
+          # gotcha 349: cibuildwheel's Linux build adds a bare dist-info/licenses/
+          # directory entry (name ending in "/") that a naive rsplit("/", 1)[-1]
+          # scan turns into an extra "" alongside the real file; exclude it.
+          licences = {
+              n.rsplit("/", 1)[-1] for n in names
+              if ".dist-info/licenses/" in n and not n.endswith("/")
+          }
+          assert licences == {"LICENSE.rst"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: prody-${{ env.PRODY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish prody ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: prody-${{ matrix.version }}-*-manylinux_riscv64

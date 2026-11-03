@@ -14,6 +14,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **106** — A `yum_install <pkg>` that "fails" may have installed exactly what you needed —
 - **124** — A wheel whose compiled payload is a Go binary builds fine and then dies at
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
+- **690** — A `CIBW_BEFORE_ALL_LINUX` that mirrors an upstream recipe's `cp -a
+  /usr/include/<pkg>-*/*` can glob-copy headers from a system `-devel` package the upstream's
+  own (different) image bakes in by default, but manylinux_riscv64 does not.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
@@ -1910,3 +1913,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     is the safe spelling under hatch-vcs) and `fetch-depth: 0` can go. The `ziglang` PyPI
     wheel itself ships `manylinux_2_31_riscv64.musllinux_1_1_riscv64`, so a hatch-ziglang
     build needs no toolchain setup on either image.
+
+690. **A `CIBW_BEFORE_ALL_LINUX` that mirrors an upstream recipe's `cp -a /usr/include/<pkg>-*/*`
+    can glob-copy headers from a system `-devel` package the upstream's own (different) image
+    bakes in by default, but manylinux_riscv64 does not (the netgen-mesher case).** Netgen's
+    GitLab recipe stages MPI headers into neutral `/opt/openmpi/include` and `/opt/mpich/include`
+    directories (so CMake can find either variant without an arch-suffixed path) by copying out
+    of `/usr/include/openmpi-*/` and `/usr/include/mpich-*/` - on upstream's own manylinux image
+    those directories exist because `openmpi-devel`/`mpich-devel` are preinstalled. The generic
+    `quay.io/pypa/manylinux_2_39_riscv64` image (Rocky 10) has neither package, so under
+    `set -eux` the unglobbed, literal path reaches `cp` as `/usr/include/openmpi-*/*` and fails
+    with `cp: cannot stat '/usr/include/openmpi-*/*': No such file or directory` - a `dnf`-shaped
+    problem disguised as a `cp` error, 3+ minutes into `before_all` after the image pull and the
+    unrelated `tcl-devel`/`tk-devel`/`ninja-build` install already succeeded. Fix: `dnf install`
+    the same `openmpi-devel mpich-devel` the recipe assumes, same line as the other `-devel`
+    packages (`build-mpi4py.yml` and `build-lalsuite.yml` already install one or the other on
+    this image, confirming both are available risc64 CRB/AppStream packages). More generally:
+    every bare `cp -a <glob>` in a transcribed `before-all` is a silent assumption that
+    something upstream's own container provides for free - check the glob resolves (`dnf -q
+    list <pkg>` per gotcha 51, or just inspect `/usr/include` after the install line) before
+    trusting a mirrored recipe on this image.
