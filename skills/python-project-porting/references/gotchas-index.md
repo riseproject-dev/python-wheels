@@ -1755,6 +1755,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `qemu-riscv64-static` did not reproduce it. Patch the tests to pass `diagnostics=False`
   (leaving independent `spy=True` calls untouched) as a workaround (the
   sleipnirgroup-jormungandr case).
+- **708** — Widening a watch-mode test's inner `--runtime` budget to fix gotcha 38's
+  discovery race can collide with a *different*, hardcoded outer `communicate(timeout=10)`
+  default the harness never exposes (cyclonedds-python's `test_ddsls.py`); once `runtime`
+  reaches the outer default, all headroom for subprocess startup/shutdown disappears and
+  `TimeoutExpired` returns. Fix the harness function to pass `timeout=runtime+20`, not just
+  the individual tests' `runtime=` values.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

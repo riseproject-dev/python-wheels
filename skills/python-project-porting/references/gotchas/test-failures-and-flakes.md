@@ -2112,3 +2112,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
        riscv64 runner directly) rather than a cross-compiled approximation, and check whether
        the failure needs the real Python/nanobind `dlopen()` + `STABLE_ABI` runtime — not just
        a hand-rolled `dlopen()` host — to reproduce.
+
+708. **Widening a test's inner subprocess budget to fix gotcha 38's discovery race can
+     silently collide with a *different*, hardcoded outer kill-timeout the harness itself
+     never exposes — the two numbers look independent until one is raised far enough to
+     meet the other (cyclonedds-python's `test_ddsls.py` watch-mode harness).**
+     `run_ddsls_watchmode()`/`run_ddsls_async_watch()` launch `ddsls --watch --runtime N`
+     as a subprocess and hand it to `run_ddsls(args, timeout=10)` — whose `timeout` kwarg
+     has its own hardcoded default of 10s and is never passed through by the watch-mode
+     callers, so every watch-mode test's `process.communicate()` kill-timeout is a fixed
+     10s regardless of what `--runtime N` the caller asked for. While `N` stayed at the
+     original 5, this left 5s of accidental headroom for subprocess startup (interpreter
+     boot + `cyclonedds` import, before the tool's own `--runtime` clock even starts) and
+     shutdown (DDS domain-participant teardown, stdout flush, process exit) on top of the
+     watch window itself. Gotcha 38's own fix for this suite (raising `test_ddsls_qos_change`
+     and `test_ddsls_qos_change_in_verbose` from `runtime=5` to `runtime=10` to fix a
+     discovery/qos-propagation race) pushed the inner budget up to exactly the outer
+     kill-timeout's value, deleting that headroom entirely — the next CI run then failed
+     both tests with `subprocess.TimeoutExpired` at 10s, one with a partial stdout capture
+     (the subprocess was genuinely still working, not deadlocked) and the `--lf` rerun with
+     none at all (an even busier host left zero room for even the first print).
+     - **A `TimeoutExpired` whose captured stdout is non-empty but incomplete is evidence of
+       a margin problem, not a hang** — same read as gotcha 568's awscrt case, applied to a
+       different harness shape (an outer wrapper's own default swallowing the inner value
+       instead of a single hardcoded wall clock).
+     - **The fix is to stop treating the inner and outer timeouts as independent**: thread a
+       `timeout` through to `run_ddsls()` from `run_ddsls_async_watch()` that is always
+       `runtime` plus a fixed, comfortable headroom (20s), so any future bump to a test's
+       `runtime=` argument can never again close the gap to the harness's own default.
+       Patching only the three tests' `runtime=` values (as the first pass did) treats the
+       symptom; patching the harness function closes the whole class of collision for every
+       current and future caller in the file.
+     - **Resolving "gotcha 38" in a comment or commit message doesn't mean the fix for that
+       citation is complete** — a correct fix for the race gotcha 38 describes can still
+       expose a second, unrelated bug (this harness's hardcoded kill-timeout) that only
+       manifests once the first fix pushes a number far enough. Re-run CI against the actual
+       head commit after a timing fix lands, rather than assuming "cited the right gotcha"
+       is the same as "green."
