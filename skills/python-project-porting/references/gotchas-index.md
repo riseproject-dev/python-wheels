@@ -1772,6 +1772,13 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   baseline `VmSize` >1 GiB before touching the module under test). Deselect the specific
   test for `cp314t` only (matrix `include:`, gotcha 149's shape), citing this gotcha —
   don't chase it as a port bug.
+- **712** — `ld.lld` linking GCC-compiled C++ with `--gc-sections` can fail on riscv64 with
+  `relocation refers to a symbol in a discarded section: .LEHBnn`/`.LFBnnnn`/`.LEHEnn` on
+  exception-table-heavy translation units (iree-base-compiler, building LLVM/MLIR from
+  source with `IREE_ENABLE_LLD=ON`) — a riscv64-specific GCC `.eh_frame`-ordering/linker-
+  relaxation interaction (binutils bug 28709), not a GCC/lld compiler mismatch (upstream's
+  own CI pairs GCC+lld successfully on aarch64). Fix: `-mno-relax` via `CFLAGS`/`CXXFLAGS`,
+  not disabling `--gc-sections` or lld.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
