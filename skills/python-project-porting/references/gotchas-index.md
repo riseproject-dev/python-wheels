@@ -768,6 +768,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   includes a `riscv64` marker, before the real build ever starts — add a riscv64
   `[[tool.cibuildwheel.overrides]]` that drops the hook, the same shape as a PyPy override
   dropping it for a different reason (the turbohtml PGO case).
+- **707** — A workflow-level `env:` var (e.g. a pinned `OCCT_VERSION`) isn't visible inside
+  `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX`, which run inside the container, not on
+  the runner — forward it explicitly with `CIBW_ENVIRONMENT_PASS_LINUX`, or the container's
+  shell dies with "unbound variable" under `set -u` (the netgen-mesher OCCT case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
