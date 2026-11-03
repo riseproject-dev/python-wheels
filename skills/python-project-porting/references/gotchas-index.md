@@ -1393,6 +1393,9 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   independently — fixing one project's `pyproject.toml` for riscv64 does not fix its siblings',
   since `build-system.requires` resolves into a separate isolated build env per project (the
   onyx-devtools-audit case).
+- **698** — A distro-apt `swig` can be too old for the target CPython's `PyHeapTypeObject`
+  layout, failing a `-builtin`-mode extension's compile identically on cp314 and cp314t with
+  no free-threading angle at all — pin a newer PyPI `swig` wheel (the ufal.udpipe case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

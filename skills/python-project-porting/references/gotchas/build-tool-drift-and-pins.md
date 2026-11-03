@@ -36,6 +36,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **689** — A monorepo's sibling Go-binary packages can each pin the same custom build tool
   feature the wheel being built does not even ship — on riscv64 that is still a doomed
   from-source build, not a no-op (the eclipse-sumo case).
+- **698** — A distro-apt `swig` can be too *old* for the target CPython, failing cp314 and
+  cp314t identically with no free-threading angle at all (the ufal.udpipe case).
 
 ---
 
@@ -780,3 +782,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     - **Check every sibling package's own `[build-system] requires` for a shared custom
       build hook's pinned tool**, even when the hook's source file is known-good for
       riscv64 already — the fix does not travel with the hook.
+
+698. **A distro-apt `swig` can be too *old* for the target CPython, not too new —
+    `build-cgal.yml`/`build-lalsuite.yml` each pin `swig` down because the image's default
+    is too *new* for their old typemaps, but here it is the reverse, and it fails cp314 and
+    cp314t identically with no free-threading angle at all (the ufal.udpipe case).**
+    `swig -builtin` mode generates a static `PyHeapTypeObject` initializer that hardcodes the exact field layout of that
+    struct as of the SWIG release's own knowledge of CPython. CPython 3.14 added two fields
+    to it (`ht_token`, and the trailing getitem-cache struct's `init`); SWIG 4.2.0 — what
+    `apt-get install swig` gives on `ubuntu-latest` — predates that and still emits the
+    pre-3.14 layout. The resulting aggregate initializer is two entries short, so the
+    compiler folds the next real member's brace-list into the `void*` slot that used to be
+    the struct's end, erroring `cannot convert '<brace-enclosed initializer list>' to
+    'void*' in initialization` on every `-builtin`-wrapped class's closing `};` — ufal.udpipe
+    hit this ~20 times, once per class SWIG wraps. It fails byte-for-byte identically on
+    cp314 and cp314t (both expose the same public struct; this is a CPython-version gap, not
+    a free-threading safety problem), so **do not drop cp314t from the matrix for this** —
+    confirm first by diffing the generated `.cpp` around the failing line against a newer
+    SWIG's output (`swig -O -c++ -outcurrentdir -python -builtin <pkg>.i`, run twice with
+    `SWIG_LIB` pointed at each version's `share/swig/<ver>/python`) before assuming free
+    threading is the culprit. The fix is a newer SWIG, not a patch to the generated code:
+    pin a PyPI `swig` wheel new enough to know about 3.14 (`>=4.4.0`; `4.3.1.post0` — what
+    `build-lalsuite.yml` already pins for the *opposite* kind of drift — still lacks it)
+    instead of whatever the OS repo ships, the same `pipx install "swig==<ver>"` pattern
+    `build-cgal.yml` and `build-lalsuite.yml` already use. Where SWIG actually runs on a
+    plain `ubuntu-latest` job rather than inside the manylinux container (as for a
+    self-contained sdist generated ahead of the riscv64 build, see `build-ufal-udpipe.yml`),
+    there is no existing pipx venv to patch in place — `pipx install` a fresh one and prepend
+    its bin dir to `$GITHUB_PATH` so the later step that invokes a bare `swig` picks it up
+    ahead of apt's.
