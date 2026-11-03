@@ -149,7 +149,10 @@ jobs:
             --exclude 'libtorch*'
             --exclude 'libc10*'
             --exclude libgomp.so.1
-          CIBW_TEST_REQUIRES: torch>=2.11 numpy pytest pillow
+          # pytest<9.2: from 9.2 pytest.approx() iterates its expected value to look for
+          # Decimals, and the sampler tests pass it a 0-d torch tensor ("iteration over a
+          # 0-d tensor").
+          CIBW_TEST_REQUIRES: torch>=2.11 numpy pytest<9.2 pillow
           # pyproject.toml is staged alongside test/ purely for its [tool.pytest.ini_options]
           # (the needs_* markers and the 'not slow' default); src/ deliberately is not, which
           # is what upstream's packaging/remove_src.sh achieves before its own test jobs.
@@ -164,6 +167,15 @@ jobs:
           # dropped, smoke_test.py included: it encodes H.264 yuv444p to build every one of its
           # fixtures. test_logging.py asserts an empty subprocess stderr, which torch's
           # libcpuinfo pollutes on this runner by reading core_id -1 from /sys.
+          # test_seek_on_non_seekable_source_raises (0.17.0) is dropped for the same
+          # reason, and because it hangs: the ffmpeg CLI that should stream libx264 into
+          # its named pipe exits at once, so opening the pipe for reading blocks for
+          # good (every leg sat there until the 6 hour job limit).
+          # test_color_tags_describe_the_samples (0.17.0, new non-regression test) hits
+          # the same gap (gotcha 429): it encodes with pixel_format="yuv444p" and no
+          # explicit codec, so our GPL-less FFmpeg falls back to the container's built-in
+          # mpeg4 encoder, which only supports yuv420p -
+          # "Specified pixel format yuv444p is not supported by the mpeg4 encoder".
           CIBW_TEST_COMMAND: >-
             FAIL_WITHOUT_JPEG=1 FAIL_WITHOUT_PNG=1 FAIL_WITHOUT_WEBP=1 pytest
             --ignore=test/test_transform_ops.py
@@ -182,7 +194,9 @@ jobs:
             or test_to_file_like_real_file_video
             or (test_to_file_like_custom_file_object and not audio)
             or test_add_audio_unsupported_num_channels_errors
-            or test_add_audio_invalid_out_sample_rate_errors)"
+            or test_add_audio_invalid_out_sample_rate_errors
+            or test_seek_on_non_seekable_source_raises
+            or test_color_tags_describe_the_samples)"
             test
 
       - name: Check the wheel bundles the image codecs and no FFmpeg
