@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux-wheels` job of
+# https://github.com/ML-KULeuven/problog/blob/v2.3.0/.github/workflows/python-publish.yml
+name: Build problog wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/problog.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-problog.yml'
+      - 'docs/packages/problog.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-problog.yml'
+      - 'docs/packages/problog.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: problog
+      version: ${{ inputs.version }}
+
+  linux_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build problog ${{ matrix.version }} py3-none-${{ matrix.plat }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        platform: [manylinux, musllinux]
+        include:
+          - platform: manylinux
+            plat: manylinux_2_39_riscv64
+            image: quay.io/pypa/manylinux_2_39_riscv64
+          - platform: musllinux
+            plat: musllinux_1_2_riscv64
+            image: quay.io/pypa/musllinux_1_2_riscv64
+
+    env:
+      PROBLOG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout problog v${{ env.PROBLOG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ML-KULeuven/problog
+          ref: v${{ env.PROBLOG_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build the binaries and the wheel in ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${{ matrix.image }}" sh -c '
+            set -eux
+            export PATH=/opt/python/cp311-cp311/bin:$PATH
+            # The riscv64 manylinux image ships no libstdc++.a, which the Makefile links dsharp against.
+            if command -v dnf >/dev/null; then dnf -y install libstdc++-static; fi
+            make binaries
+            python -m pip install --upgrade pip build wheel pytest pyparsing
+            # pysdd 1.0.6'\''s published sdist on PyPI is missing pysdd/sddapi_c.pxd
+            # (present at the matching v1.0.6 git tag, confirmed to Cython-compile
+            # cleanly there), so building it from the sdist fails with "cimported
+            # module has no attribute ..." for every sddapi_c symbol. Install
+            # straight from the tag instead.
+            python -m pip install "pysdd @ git+https://github.com/wannesm/PySDD.git@v1.0.6"
+            python -m pytest problog/test -q
+            rm -rf problog/bin/darwin problog/bin/windows
+            python -m build --wheel
+          '
+          sudo chown -R "$(id -u):$(id -g)" .
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.11'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Tag it for this platform
+        run: |
+          uv pip install wheel
+          python -m wheel tags --python-tag py3 --abi-tag none \
+                 --platform-tag ${{ matrix.plat }} --remove dist/*.whl
+          ls -l dist
+
+      - name: Verify the wheel ships riscv64 solver binaries
+        run: |
+          python - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              bins = sorted(n for n in names if n.startswith("problog/bin/") and "/LICENSES/" not in n and "/source/" not in n)
+              assert bins == ["problog/bin/linux/dsharp", "problog/bin/linux/maxsatz"], bins
+              for n in bins:
+                  header = zf.read(n)[:20]
+                  assert header[:4] == b"\x7fELF" and header[18] == 0xF3, (n, header)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: problog-${{ env.PROBLOG_VERSION }}-py3-none-${{ matrix.plat }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish problog ${{ matrix.version }}
+    needs: [setup, linux_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: problog-${{ matrix.version }}-py3-none-*_riscv64
