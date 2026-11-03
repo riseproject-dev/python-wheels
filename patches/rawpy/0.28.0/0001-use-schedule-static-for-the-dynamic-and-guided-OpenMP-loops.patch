@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 20:00:00 +0000
+Subject: [PATCH] use schedule(static) for the dynamic and guided OpenMP loops
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+libgomp's dynamic and guided work-share schedules fault on the riscv64
+machines these wheels are built and tested on (see CLAUDE.md gotcha 166).
+copy_fuji_uncropped/copy_bayer in raw2image.cpp run schedule(dynamic) on
+every single postprocess() call regardless of camera or demosaic
+algorithm, and ahd_demosaic.cpp (the default demosaic algorithm) and
+dht_demosaic.cpp (the optional DHT algorithm) run schedule(dynamic)/
+schedule(guided) too, so this is reachable by ordinary decoding, not an
+edge case.
+
+Moving all 16 affected loops in the vendored LibRaw copy to
+schedule(static) costs only load balancing on rows/columns whose
+iterations differ in cost, and buys a wheel that does not crash. Revert
+once the runners' toolchain is fixed.
+---
+ external/LibRaw/src/demosaic/ahd_demosaic.cpp  |  2 +-
+ external/LibRaw/src/demosaic/dht_demosaic.cpp  | 26 +++++++++++++-------------
+ external/LibRaw/src/preprocessing/raw2image.cpp |  4 ++--
+ 3 files changed, 16 insertions(+), 16 deletions(-)
+
+diff --git a/external/LibRaw/src/demosaic/ahd_demosaic.cpp b/external/LibRaw/src/demosaic/ahd_demosaic.cpp
+index ae87b28..ae6ad6d 100644
+--- a/external/LibRaw/src/demosaic/ahd_demosaic.cpp
++++ b/external/LibRaw/src/demosaic/ahd_demosaic.cpp
+@@ -306,7 +306,7 @@ void LibRaw::ahd_interpolate()
+     char** buffers = malloc_omp_buffers(buffer_count, buffer_size);
+
+ #ifdef LIBRAW_USE_OPENMP
+-#pragma omp parallel for schedule(dynamic) default(none) shared(terminate_flag) firstprivate(buffers)
++#pragma omp parallel for schedule(static) default(none) shared(terminate_flag) firstprivate(buffers)
+ #endif
+     for (int top = 2; top < height - 5; top += LIBRAW_AHD_TILE - 6)
+     {
+diff --git a/external/LibRaw/src/demosaic/dht_demosaic.cpp b/external/LibRaw/src/demosaic/dht_demosaic.cpp
+index 9fa603f..b23dc61 100644
+--- a/external/LibRaw/src/demosaic/dht_demosaic.cpp
++++ b/external/LibRaw/src/demosaic/dht_demosaic.cpp
+@@ -259,7 +259,7 @@ void DHT::hide_hots()
+ {
+   int iwidth = libraw.imgdata.sizes.iwidth;
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided) firstprivate(iwidth)
++#pragma omp parallel for schedule(static) firstprivate(iwidth)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -401,7 +401,7 @@ void DHT::restore_hots()
+ #ifdef _MSC_VER
+ #pragma omp parallel for firstprivate(iwidth)
+ #else
+-#pragma omp parallel for schedule(guided) firstprivate(iwidth) collapse(2)
++#pragma omp parallel for schedule(static) firstprivate(iwidth) collapse(2)
+ #endif
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+@@ -423,7 +423,7 @@ void DHT::restore_hots()
+ void DHT::make_diag_dirs()
+ {
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -442,7 +442,7 @@ void DHT::make_diag_dirs()
+ //		refine_diag_dirs(i, (i & 1) ^ 1);
+ //	}
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -453,28 +453,28 @@ void DHT::make_diag_dirs()
+ void DHT::make_hv_dirs()
+ {
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+     make_hv_dline(i);
+   }
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+     refine_hv_dirs(i, i & 1);
+   }
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+     refine_hv_dirs(i, (i & 1) ^ 1);
+   }
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -689,7 +689,7 @@ void DHT::refine_idiag_dirs(int i)
+ void DHT::make_greens()
+ {
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -765,7 +765,7 @@ void DHT::make_gline(int i)
+ void DHT::illustrate_dirs()
+ {
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -956,7 +956,7 @@ void DHT::make_rb()
+ {
+ #if defined(LIBRAW_USE_OPENMP)
+ #pragma omp barrier
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -964,7 +964,7 @@ void DHT::make_rb()
+   }
+ #if defined(LIBRAW_USE_OPENMP)
+ #pragma omp barrier
+-#pragma omp parallel for schedule(guided)
++#pragma omp parallel for schedule(static)
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+   {
+@@ -982,7 +982,7 @@ void DHT::copy_to_image()
+ #ifdef _MSC_VER
+ #pragma omp parallel for
+ #else
+-#pragma omp parallel for schedule(guided) collapse(2)
++#pragma omp parallel for schedule(static) collapse(2)
+ #endif
+ #endif
+   for (int i = 0; i < libraw.imgdata.sizes.iheight; ++i)
+diff --git a/external/LibRaw/src/preprocessing/raw2image.cpp b/external/LibRaw/src/preprocessing/raw2image.cpp
+index e343762..9fd2f1e 100644
+--- a/external/LibRaw/src/preprocessing/raw2image.cpp
++++ b/external/LibRaw/src/preprocessing/raw2image.cpp
+@@ -221,7 +221,7 @@ void LibRaw::copy_fuji_uncropped(unsigned short cblack[4],
+                                  unsigned short *dmaxp)
+ {
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(dynamic) default(none) firstprivate(cblack) shared(dmaxp)
++#pragma omp parallel for schedule(static) default(none) firstprivate(cblack) shared(dmaxp)
+ #endif
+   for (int row = 0; row < int(S.raw_height) - int(S.top_margin) * 2; row++)
+   {
+@@ -276,7 +276,7 @@ void LibRaw::copy_bayer(unsigned short cblack[4], unsigned short *dmaxp)
+   // Both cropped and uncropped
+   int maxHeight = MIN(int(S.height),int(S.raw_height)-int(S.top_margin));
+ #if defined(LIBRAW_USE_OPENMP)
+-#pragma omp parallel for schedule(dynamic) default(none) shared(dmaxp) firstprivate(cblack, maxHeight)
++#pragma omp parallel for schedule(static) default(none) shared(dmaxp) firstprivate(cblack, maxHeight)
+ #endif
+   for (int row = 0; row < maxHeight ; row++)
+   {
+--
+2.43.0
