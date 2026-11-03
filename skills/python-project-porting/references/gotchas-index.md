@@ -1872,3 +1872,8 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   can silently mutate the *primary* checkout instead of the intended new worktree when a
   disk-pressure `cd` failure is non-fatal — drive every step with `git -C <absolute-path>`
   instead.
+- **696** — A hardlinked local `git clone` of the shared primary checkout (the safer
+  alternative to nesting a worktree under it) inherits neither the primary's real GitHub
+  `origin` nor its local commit-identity/`core.hooksPath` override — fix all three before
+  the first commit, or a bad identity and an unstripped AI-attribution trailer can both land
+  silently.

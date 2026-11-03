@@ -26,6 +26,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **540** — `Failed to FinalizeArtifact … (403) Forbidden` after a green build is an
   artifact-service flake; re-run failed jobs, but only once the whole run has finished.
 - **695** — A `git worktree add --no-checkout` + `sparse-checkout` sequence, chained with
+- **696** — A hardlinked local `git clone` of the shared primary checkout (gotcha 695's own
   relative `cd`s under disk pressure, can silently mutate the *primary* checkout instead of
   creating a separate worktree.
 
@@ -543,3 +544,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
        any PR already opened from it) is unaffected by its local worktree disappearing or
        the primary checkout being mangled — recreate the worktree from the pushed branch
        only if more local work on it is still needed; otherwise there is nothing to recover.
+
+696. **A hardlinked local `git clone` of the shared primary checkout (gotcha 695's own
+     suggested escape from nesting a worktree under it) inherits neither the primary's real
+     `origin` URL nor its local commit-identity override, and both gaps are silent until
+     push/commit time (the docvortex case).** `git clone --depth 1 /home/user/<repo>
+     .git/pw-scratch/<pkg>` is cheap (objects are hardlinked, a few MB even for a multi-GB
+     `.git`) and, unlike a nested worktree, cannot be touched by another agent's accident
+     against the primary checkout's own working tree. But `git clone` of a local path sets
+     `origin` to that *local path*, not the GitHub remote the primary checkout itself points
+     at — a first `git push origin <branch>` succeeds (it is pushing to the local repo's own
+     ref, not GitHub) and only the *next* push attempt, or a later check for the PR's branch,
+     reveals nothing reached GitHub. Separately, `user.name`/`user.email` are the primary
+     checkout's own **local** `.git/config` override (`Ludovic Henry <git@ludovic.dev>`),
+     which a fresh clone never copies; it falls back to the account's **global** git config
+     instead (`Claude <noreply@anthropic.com>`) — and because `core.hooksPath` is local-only
+     too, the `pre-commit`/`commit-msg` hooks that would normally reject that identity or an
+     AI-attribution trailer are *also* missing, so a first commit in the new clone can carry
+     both problems at once with no error anywhere.
+     - **Before the first commit in any such clone**: `git remote set-url origin
+       <the real https://github.com/... URL>` (read it off the primary checkout, not off
+       memory), `git config user.name "Ludovic Henry"`, `git config user.email
+       "git@ludovic.dev"`, and `git config core.hooksPath ci_scripts/git-hooks` to restore
+       the identity/attribution checks environment-and-auth.md already documents — then
+       confirm with `git log -1 --format='%an <%ae>'` before pushing, same as after running
+       `git-identity.sh`.
+     - **If a bad commit already landed** (wrong identity, or an AI-attribution trailer a
+       tool auto-appended) and nothing else has been pushed on top: fix the three `git
+       config` values above, then `git commit --amend --reset-author -m '<clean message>'`
+       and `git push --force-with-lease=<branch>:<old-sha> origin <branch>` — safe on a
+       solo, not-yet-reviewed branch with one commit, and `--force-with-lease` with an
+       explicit old-sha works even when the clone's narrow fetch refspec never populated a
+       normal `origin/<branch>` tracking ref to lease against.
