@@ -51,6 +51,14 @@ jobs:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No abi3 (pyo3 has no abi3-pyNN feature here), so one wheel per interpreter.
         python: ['cp312', 'cp313', 'cp314', 'cp314t']
+        include:
+          # gotcha 711: the RLIMIT_AS-headroom OOM test is defeated by cp314t's own
+          # allocator (confirmed off riscv64, off wolfxl's code, with a pure-stdlib
+          # repro) -- not a build or porting bug. Deselect it for cp314t only; the
+          # other three legs keep the full suite.
+          - python: 'cp314t'
+            test_deselect: >-
+              --deselect=tests/test_streaming_oom_error.py::test_allocation_failure_raises_memory_error_not_panic
 
     env:
       WOLFXL_VERSION: ${{ matrix.version }}
@@ -117,25 +125,57 @@ jobs:
       - name: Run offline workbook editing study tests
         run: python -m unittest discover -s study/agent-edit -p 'test_*.py' -v
 
-      - name: Run Python tests
+      - name: Pre-build wolfxl-cli (avoid xdist cold-compile contention)
         env:
           # test_classifier_parity.py's _cli_schema() shells out to a bare
           # `cargo run --release -p wolfxl-cli`, a cold compile of wolfxl-cli
-          # and its deps (clap, tiktoken-rs) that this step is the first to
-          # touch (the "Build wheel" step above only compiles the cdylib via
-          # maturin-action, a different target dir). The workspace root
-          # Cargo.toml's [profile.release] sets lto = "fat" + codegen-units = 1
-          # for the *shipped* cdylib; that profile applies workspace-wide, so
-          # the ad hoc wolfxl-cli compile pays the same fat-LTO cost even
-          # though nothing it produces ships. 300s (CLAUDE.md gotcha 141's
-          # earlier fix) still wasn't enough -- every interpreter leg hit the
-          # timeout at exactly 300s, not "sometimes slow": a real cold fat-LTO
-          # compile of this dependency graph on this fleet's cores, not a
-          # hang. Override the profile for this test-only compile the same
-          # way gotcha 141/188 do for a shipped workflow / local rehearsal
-          # (env vars, not editing Cargo.toml, so an unrelated `release`
-          # profile name stays valid everywhere): this never touches the
-          # wheel already built above.
+          # and its deps (clap, tiktoken-rs) that the test job is otherwise
+          # the first to touch (the "Build wheel" step above only compiles
+          # the cdylib via maturin-action, a different target dir). The
+          # workspace root Cargo.toml's [profile.release] sets lto = "fat" +
+          # codegen-units = 1 for the *shipped* cdylib; that profile applies
+          # workspace-wide, so the ad hoc wolfxl-cli compile would otherwise
+          # pay the same fat-LTO cost even though nothing it produces ships.
+          # Override it the same way gotcha 141/188 do for a shipped
+          # workflow / local rehearsal (env vars, not editing Cargo.toml, so
+          # an unrelated `release` profile name stays valid everywhere): this
+          # never touches the wheel already built above.
+          CARGO_PROFILE_RELEASE_LTO: 'off'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
+        run: |
+          # Doing the compile here, serially and before pytest's `-n auto`
+          # starts, is the fix 300s-of-timeout (and then dropping fat LTO)
+          # didn't get to: `pytest -n auto --dist worksteal` spreads tests
+          # across ~4 xdist workers on this fleet's 4-core runners, and
+          # test_schema_parity_structural / test_schema_parity_samples both
+          # call _cli_schema() from whichever worker picks them up. Two
+          # workers landing on these tests close together both try a cold
+          # `cargo run --release -p wolfxl-cli` against the *same* target
+          # dir at once; cargo serializes them with its own target-dir lock,
+          # so the second worker's subprocess.run(timeout=300) clock runs
+          # down largely while blocked waiting for the first compile to
+          # finish, not while actually compiling -- and if the first compile
+          # alone takes close to 300s (a real cost on this fleet, LTO or
+          # not), the second one is left with too little of its own budget
+          # and times out too, which is exactly the "every leg, both tests,
+          # right at 300s" shape both the pre- and post-LTO-drop runs showed.
+          # Building the binary once here, before any xdist worker exists,
+          # removes the compile from every test's timeout budget entirely:
+          # `cargo run` during the actual test suite just checks nothing
+          # changed and launches the already-built binary.
+          cargo build --release --locked -p wolfxl-cli
+
+      - name: Run Python tests
+        env:
+          # Must match the "Pre-build wolfxl-cli" step's profile overrides
+          # exactly: _cli_schema()'s `cargo run --release -p wolfxl-cli`
+          # inherits this step's env (test patch passes
+          # env={**os.environ, ...}), and cargo's fingerprint includes the
+          # effective profile. A mismatch here would invalidate the
+          # pre-build's cache and trigger a full recompile under this
+          # step's own (and xdist's) time pressure -- exactly what the
+          # pre-build step exists to avoid.
           CARGO_PROFILE_RELEASE_LTO: 'off'
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
           CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
@@ -152,7 +192,8 @@ jobs:
             --ignore=tests/test_import_release_artifact_proof_reports.py \
             --ignore=tests/test_openpyxl_compat_oracle.py \
             --ignore=tests/test_openpyxl_corpus_runner_summary.py \
-            --deselect=tests/test_calc_functions.py::TestWhitelist::test_public_formula_counts_match_whitelist
+            --deselect=tests/test_calc_functions.py::TestWhitelist::test_public_formula_counts_match_whitelist \
+            ${{ matrix.test_deselect }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
