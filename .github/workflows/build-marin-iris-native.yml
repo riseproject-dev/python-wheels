@@ -183,16 +183,24 @@ jobs:
               print("stats:", stats)
               print("rpc_metrics:", rpc_metrics)
 
-              # No route matches a bare "/" -- the native router's fallback
-              # returns a 404 with a JSON error body (src/lib.rs error_response).
+              # A bare "/" is not a dedicated 404 route -- ingress_inner (src/lib.rs)
+              # only short-circuits to a 404 "route not found" for a request whose path
+              # is exactly DECISION_PATH ("/_iris/internal/proxy-decision", an endpoint
+              # meant to be unreachable from outside); everything else, "/" included,
+              # falls through to the real proxy/controller forwarding, which correctly
+              # surfaces a 502 against the deliberately-unreachable upstream
+              # ("http://127.0.0.1:1" above). Hit the real DECISION_PATH to exercise the
+              # 404 fallback this test actually means to check.
               try:
-                  urllib.request.urlopen(f"http://127.0.0.1:{proxy.port}/", timeout=5)
+                  urllib.request.urlopen(
+                      f"http://127.0.0.1:{proxy.port}/_iris/internal/proxy-decision", timeout=5
+                  )
               except urllib.error.HTTPError as error:
                   assert error.code == 404, error.code
                   body = json.loads(error.read())
                   assert body == {"error": "route not found"}, body
               else:
-                  raise AssertionError("expected the native listener to 404 on /")
+                  raise AssertionError("expected the native listener to 404 on the decision path")
 
               proxy.pause_registry()
 
