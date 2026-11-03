@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `linux` and `test` jobs of
+# https://github.com/mpiannucci/gribberish/blob/1.9.0/.github/workflows/python.yml
+name: Build gribberish wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gribberish.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gribberish.yml'
+      - 'docs/packages/gribberish.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gribberish.yml'
+      - 'docs/packages/gribberish.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_PYTHON_PREFERENCE: only-managed
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: gribberish
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gribberish ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp312 is the abi3-py312 wheel; cp315t is dropped (numpy has no riscv64 cp315t wheel), pp311 too (no riscv64 PyPy).
+        python: ["cp312", "cp314t"]
+
+    env:
+      GRIBBERISH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout gribberish ${{ env.GRIBBERISH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mpiannucci/gribberish
+          ref: ${{ env.GRIBBERISH_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      # maturin only globs licence files next to python/pyproject.toml, and openjpeg-sys compiles OpenJPEG (BSD-2-Clause) into the extension.
+      - name: Stage licence files
+        run: |
+          cp LICENSE python/LICENSE
+          ver=$(awk '/^name = "openjpeg-sys"$/ {getline; sub(/^version = "/, ""); sub(/"$/, ""); print; exit}' Cargo.lock)
+          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o openjpeg-sys.tar.gz "https://crates.io/api/v1/crates/openjpeg-sys/${ver}/download"
+          tar -xzf openjpeg-sys.tar.gz -O "openjpeg-sys-${ver}/vendor/LICENSE" > python/LICENSE.openjpeg
+          rm openjpeg-sys.tar.gz
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: python
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+
+      - name: Verify the wheel ships the compiled extension and licences
+        run: |
+          python3 - python/dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("gribberish/_gribberish_python.") and n.endswith(".so") for n in names), names
+          for lic in ("LICENSE", "LICENSE.openjpeg"):
+              assert any(n.endswith(f".dist-info/licenses/{lic}") for n in names), (lic, names)
+          print(sys.argv[1], "ok")
+          EOF
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream's 3.15/3.15t legs drop the extras for want of numcodecs/obstore wheels; pandas/numcodecs have no riscv64 cp314t wheel either.
+      - name: Install package and test dependencies
+        working-directory: python
+        run: |
+          whl=$(ls dist/*.whl)
+          if [ "${{ matrix.python }}" = "cp314t" ]; then
+            extras=""
+          else
+            extras="[xarray,zarr]"
+          fi
+          uv pip install --only-binary :all: "gribberish${extras} @ file://${PWD}/${whl}" pytest pytest-asyncio
+
+      - name: Check the GIL stays disabled
+        if: endsWith(matrix.python, 't')
+        run: python -W error -c "import sys, gribberish; assert not sys._is_gil_enabled()"
+
+      - name: Run tests
+        working-directory: python
+        run: pytest tests/test_xarray_backend.py tests/test_zarr_codec.py tests/test_dataset_determinism.py tests/test_north_up_real_world.py -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gribberish-${{ env.GRIBBERISH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gribberish ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: gribberish-${{ matrix.version }}-*-manylinux_riscv64
