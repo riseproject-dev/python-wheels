@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 03 Nov 2026 00:42:41 +0000
+Subject: [PATCH] tests: widen ddsls watch runtime for slow CI hosts
+
+run_ddsls_watchmode launches `ddsls --watch --runtime <N>` as a background
+subprocess and starts the test's own async body ~0.3s later; the subprocess
+polls the DDS waitset until its own clock reaches N seconds, then writes its
+final snapshot (to stdout or --filename) and exits. The N budget leaves
+essentially no slack for the SPDP/SEDP discovery and dispose/qos-change
+propagation the test depends on to land before that deadline:
+
+- test_ddsls_write_disposed_data_to_file's body sleeps 1s, disposes every
+  entity, sleeps 1s more, i.e. ~2.3s of wall clock against runtime=2 -
+  dispose already happens near or past the subprocess's own cutoff, so the
+  final JSON snapshot can be written before the Disposed transition is
+  observed:
+      assert dw_guid in data["PUBLICATION"]["Disposed"]
+      AssertionError: assert '...' in {}
+- test_ddsls_qos_change_in_verbose's qos change happens ~1.3s in against
+  runtime=5, with the assertion reading the old Qos's str() out of stdout
+  that the subprocess only had until t=5 to print.
+
+On this repo's riscv64 runner (slower interpreter/DDS-stack startup than the
+x86_64 hardware upstream's own CI sizes these budgets for) both windows are
+tight enough to flake: the exact same job rerunning failing tests with
+`pytest --lf` reproduced test_ddsls_write_disposed_data_to_file passing and
+test_ddsls_qos_change_in_verbose failing again, consistent with a timing race
+rather than a deterministic break.
+
+Raise the watcher's `--runtime` budget for the three tests built on this
+exact "watch, mutate, assert on the final snapshot" shape
+(test_ddsls_write_disposed_data_to_file, test_ddsls_qos_change,
+test_ddsls_qos_change_in_verbose) so the subprocess stays alive well past
+every test body's own sleeps, on any host speed. The test bodies and
+assertions are otherwise untouched: this only gives the DDS discovery and
+the watcher more wall-clock room to actually observe the mutation before the
+subprocess is told to stop and dump its snapshot.
+
+Upstream-Status: Inappropriate [riscv64 runner is slower than the hardware this fixed budget was sized for; not a defect on upstream's own CI]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/tests/test_ddsls.py b/tests/test_ddsls.py
+--- a/tests/test_ddsls.py
++++ b/tests/test_ddsls.py
+@@ -466,7 +466,7 @@ def test_ddsls_write_disposed_data_to_file(tmp_path):
+         return disposed_data
+
+     procdata, disposed_data = run_ddsls_watchmode(["--json", "-a", "--filename", str(tmp_path / "test_disposed.json")],
+-                                           test_inner, runtime=2)
++                                           test_inner, runtime=8)
+
+     assert procdata['status'] == 0
+
+@@ -522,7 +522,7 @@ def test_ddsls_qos_change():
+
+         return dp, tp, dw, old_qos, new_qos
+
+-    data, (dp, tp, dw, old_qos, new_qos) = run_ddsls_watchmode(["-a"], test_inner, runtime=5)
++    data, (dp, tp, dw, old_qos, new_qos) = run_ddsls_watchmode(["-a"], test_inner, runtime=10)
+
+     assert str(old_qos) in data["stdout"]
+     for q in new_qos:
+@@ -550,7 +550,7 @@ def test_ddsls_qos_change_in_verbose():
+
+         return dp, tp, dw, old_qos, new_qos
+
+-    data, (dp, tp, dw, old_qos, new_qos) = run_ddsls_watchmode(["-a", "--verbose"], test_inner, runtime=5)
++    data, (dp, tp, dw, old_qos, new_qos) = run_ddsls_watchmode(["-a", "--verbose"], test_inner, runtime=10)
+
+     assert str(old_qos) in data["stdout"]
+     for q in new_qos:

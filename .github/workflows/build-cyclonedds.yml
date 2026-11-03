@@ -21,11 +21,13 @@ on:
     paths:
       - '.github/workflows/build-cyclonedds.yml'
       - 'docs/packages/cyclonedds.yaml'
+      - 'patches/cyclonedds/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-cyclonedds.yml'
       - 'docs/packages/cyclonedds.yaml'
+      - 'patches/cyclonedds/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -66,6 +68,19 @@ jobs:
           set -eux
           git clone --depth 1 --branch "${CYCLONEDDS_VERSION}" \
             https://github.com/eclipse-cyclonedds/cyclonedds-python.git cyclonedds-python
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # gotcha 38: run_ddsls_watchmode's fixed `--runtime` budget leaves no slack on this
+      # repo's riscv64 runner for DDS discovery/dispose/qos-change propagation to land
+      # before the watcher subprocess's own deadline and final snapshot write.
+      - name: Patch cyclonedds-python source
+        working-directory: cyclonedds-python
+        run: git apply ../python-wheels/patches/cyclonedds/${{ env.CYCLONEDDS_VERSION }}/*.patch
 
       - name: Install dependencies with dnf
         run: dnf install -y --setopt=install_weak_deps=False ninja-build
