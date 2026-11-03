@@ -583,6 +583,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   but check whether the language binding's *published-wheel* build job actually bundles that
   specific binary at all before parking on it — an optional engine can dlopen lazily and
   degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
+- **697** — Gotcha 411's "CPU is the CMake default" check isn't enough — a soft/QUIET
+  `find_package(CUDAToolkit)` can still be forced on in the one build upstream actually
+  publishes by a `cibuildwheel` `before-all` that installs the CUDA devel toolkit from scratch
+  before CMake runs; read that CI step, not just the CMake default, and check whether every
+  published wheel's own runtime `dependencies` hard-require a CUDA JIT package with no marker
+  (the gs-madrona case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

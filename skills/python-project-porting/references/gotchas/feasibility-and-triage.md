@@ -6272,3 +6272,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     all needing to be built or linked for riscv64 in one CI job) still makes it a large,
     disproportionate first port, recorded `parked` on size/complexity grounds rather than any
     single hard architectural wall.
+
+697. **Gotcha 411's "CPU is the CMake default" check isn't enough by itself — a `find_package
+    (CUDAToolkit QUIET)` that silently no-ops when the toolkit is absent can still be forced on
+    in the one build upstream actually publishes, by a `cibuildwheel` `before-all` (or
+    equivalent CI step) that installs the CUDA devel toolkit from scratch before CMake ever
+    runs (the gs-madrona case).** gs-madrona (a Genesis-Embodied-AI fork of the Madrona batch
+    simulation/rendering engine) reads, at the CMake level, exactly like gotcha 411's
+    bitsandbytes: `cmake/dependencies.cmake` only does `find_package(CUDAToolkit REQUIRED)`
+    when an opt-in `MADRONA_REQUIRE_CUDA` flag is set; left at its default, `CUDAToolkit_FOUND`
+    is simply false and every `if (CUDAToolkit_FOUND)`/`if (TARGET madrona_cuda)` guard across
+    `src/common`, `src/mw`, `src/render` and `src/bridge` quietly skips the CUDA-only code, so a
+    bare `cmake .` on a GPU-less host looks CPU-capable by construction. But gotcha 411's own
+    test — "is CPU the build upstream's own CI actually ships?" — comes back no: the real
+    `.github/workflows/python-wheels.yml` runs `cibuildwheel` on a plain GPU-less
+    `ubuntu-24.04` runner, and `pyproject.toml`'s `[tool.cibuildwheel.linux] before-all` adds
+    NVIDIA's own CUDA RHEL8 `dnf` repo and installs `cuda-nvrtc-devel-12-8`/
+    `cuda-cudart-devel-12-8`/`cuda-nvcc-12-8` *before* `cmake` is ever invoked inside the
+    manylinux container — so `CUDAToolkit_FOUND` is unconditionally true in every wheel
+    upstream actually publishes, with no device-selecting env var anywhere in that one-job
+    matrix (contrast gotcha 459's vLLM, where `VLLM_TARGET_DEVICE` really does pick a published
+    CPU variant). `pyproject.toml`'s unconditional runtime `dependencies` on
+    `nvidia-cuda-nvrtc-cu12`/`nvidia-nvjitlink-cu12` (no marker, no extra) is the tell that
+    confirms it without even reading the CI file: a package whose *every* published wheel hard-
+    requires a CUDA JIT runtime package has no CPU-only release to point a riscv64 build at,
+    regardless of what the CMake default alone would produce in isolation.
+
+    **The fix to gotcha 411's heuristic: read the actual `CIBW_BEFORE_ALL`/`before-all` (or
+    whatever upstream's CI uses to provision its build image) before concluding a soft/QUIET
+    `find_package` proves a CPU path is real and published.** A CMake-level default and the
+    CI-level reality it runs under are two different questions — bitsandbytes' own default
+    build job genuinely never installs a CUDA toolkit, which is what makes CPU the true
+    default there; gs-madrona's does, every time, which makes CUDA the true (and only)
+    default here. Unlike gotcha 679 (an enabling fix exists upstream, only a pin is stale),
+    there is no pin to bump: NVIDIA has never published a CUDA Toolkit for riscv64 at all (no
+    riscv64 entry under any `developer.download.nvidia.com/compute/cuda/repos/*` distro, and
+    the PyPI `nvidia-cuda-nvrtc-cu12`/`nvidia-nvjitlink-cu12` wheels ship only
+    x86_64/aarch64/win_amd64), so `ci_scripts/check_riscv64_deps.py` reports those runtime
+    dependencies unconditionally `UNRESOLVABLE` for every interpreter. **Verdict: `parked`**
+    (same disposition as the existing `onnxruntime-gpu`/`cuda-tile`/`sglang` entries) — revisit
+    only if NVIDIA ships a riscv64 CUDA Toolkit, or if upstream ever publishes its own CPU-only
+    build matrix the way `pyqrack`/`pyqrack-cpu` split theirs.
