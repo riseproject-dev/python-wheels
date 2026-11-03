@@ -25,6 +25,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **508** — A job is not hung because *you* think it has been long: compare its `started_at`
 - **540** — `Failed to FinalizeArtifact … (403) Forbidden` after a green build is an
   artifact-service flake; re-run failed jobs, but only once the whole run has finished.
+- **695** — A `git worktree add --no-checkout` + `sparse-checkout` sequence, chained with
+  relative `cd`s under disk pressure, can silently mutate the *primary* checkout instead of
+  creating a separate worktree.
 
 ---
 
@@ -500,3 +503,43 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       replays the whole run as attempt 2 against the same merge ref, so the PR's checks
       follow the new attempt with no push (gotcha 80's no-push rule still holds). Say in
       the report that you cancelled and why.
+
+695. **A `git worktree add --no-checkout <dir> -b <branch> origin/main` followed by several
+     `sparse-checkout`/`checkout` calls chained via relative `cd`s is not atomic under disk
+     pressure, and a mid-sequence "No space left on device" on the `cd` itself (silently
+     landing back in the shell's start directory rather than the intended worktree) makes
+     every later command in the chain run against the *primary* checkout instead — switching
+     its branch and collapsing it to a 2% sparse tree, not just failing loudly.** Hit this
+     building a second, queue-editing worktree for a routine triage: `git worktree add
+     --no-checkout .claude/worktrees/<pkg>-queue -b <pkg>-queue origin/main` printed its
+     normal "Preparing worktree" success line, but the very next line in the same shell
+     call — `cd .claude/worktrees/<pkg>-queue` (relative, assuming the prior `cd
+     /home/user/<repo>` from earlier in the chain was still in effect) — failed with "No
+     such file or directory" with no visible error in that call's own output (it was
+     reported, just not treated as fatal since the script had no `set -e`), leaving the
+     shell wherever it actually was. The following `sparse-checkout init --cone`,
+     `sparse-checkout set ci_scripts` and `checkout <branch>` then ran there instead,
+     silently succeeding — against the repo's own primary worktree, which shares the exact
+     same command surface (`git sparse-checkout`, `git checkout <branch>`) and gave no
+     signal that it was the wrong directory. `git worktree list` afterward showed the
+     primary path itself tagged with the new branch, and every *other* concurrently running
+     agent's worktree under the same shared `.claude/worktrees/` reporting `prunable` (their
+     directories had separately vanished from the same disk pressure) — initially
+     indistinguishable from "this host-wide incident wiped everyone's worktrees," until
+     `git status` on the primary path surfaced the real, narrower cause: a local mistake,
+     not a wipe.
+     - **The fix, and the way to avoid it:** drive every step of a new worktree by `git -C
+       <absolute-path> <subcommand>` instead of `cd`-ing into it, so a failed-but-nonfatal
+       directory change can never redirect a later command onto the wrong checkout — this
+       is also strictly safer under disk pressure, since each invocation is independent of
+       whatever the shell's cwd happens to be after an unrelated prior failure.
+     - **Recovery, if it already happened:** the primary checkout's own previous branch and
+       HEAD are still in its `git reflog` (`checkout: moving from <old-branch> to
+       <new-branch>`) even after the sparse-checkout shrank the tree; `git sparse-checkout
+       disable` followed by `git checkout <old-branch>` restores both the full tree and the
+       original branch, with no reflog-expiry or re-clone needed, since nothing was
+       deleted — only checked out narrower and switched.
+     - **This has no bearing on pushed work.** A port branch already pushed to `origin` (and
+       any PR already opened from it) is unaffected by its local worktree disappearing or
+       the primary checkout being mangled — recreate the worktree from the pushed branch
+       only if more local work on it is still needed; otherwise there is nothing to recover.

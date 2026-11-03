@@ -1868,3 +1868,7 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   port defect: re-run that leg with `rerun-failed-jobs`, which itself answers `403 "This
   workflow is already running"` until every sibling matrix leg has finished (the chonkie-core
   case).
+- **695** — `git worktree add --no-checkout` + `sparse-checkout`, chained with relative `cd`s,
+  can silently mutate the *primary* checkout instead of the intended new worktree when a
+  disk-pressure `cd` failure is non-fatal — drive every step with `git -C <absolute-path>`
+  instead.
