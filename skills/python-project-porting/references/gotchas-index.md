@@ -1316,6 +1316,7 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
 - **678** — `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` are not real `uv` env vars (unlike
+- **701** — `check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
 - **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
 - **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
   answer plain `404`, not `302` — the check logic is unaffected, but scripts written

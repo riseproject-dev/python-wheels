@@ -1065,3 +1065,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       fail depending on whether the manylinux image happens to carry that dependency's
       native toolchain. Worth a dedicated audit pass over every workflow using
       `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` as a step/job `env:` key.
+
+701. **`ci_scripts/check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
+    actually fully hosted on riscv64 — the failure is pip hitting transient proxy/network
+    flakiness in this sandbox, not a real registry gap, and the script's own output tells
+    you which (the async-tiff/rasterio case).** Triaging async-tiff, `check_riscv64_deps.py
+    --python 313 314 314t -- rasterio` printed `UNRESOLVABLE` for every interpreter, which
+    at a glance reads exactly like gotcha 84/149's "dependency missing on riscv64" shape —
+    rasterio is a heavy wheel (bundles GDAL) and would be a plausible registry gap to park
+    a test matrix on. It wasn't one: the script's own error text underneath each
+    `UNRESOLVABLE` line read `note: This is an issue with network connectivity, not pip. /
+    hint: Use --resume-retries to configure resume attempt limit.` — pip's own hint for a
+    dropped/stalled download, not a resolver conflict — and it reproduced identically on
+    three immediate retries. A direct `curl pypi.riseproject.dev/simple/rasterio/` (no pip,
+    no retries, no download) immediately showed real `rasterio-1.5.2-cp31{2,3,4}-...-
+    riscv64.whl` and `cp314-cp314t-...riscv64.whl` files already hosted, and
+    `docs/packages/rasterio.yaml` confirms the same set was already published. The actual
+    gap the script was built to catch (gotcha 84) produces a *different*, resolver-shaped
+    error (`ERROR: Exception:` with no further note, or an explicit "no matching
+    distribution"), not this network hint.
+    - **Before trimming a matrix or skipping tests on an `UNRESOLVABLE` verdict, read the
+      text under it.** `note: This is an issue with network connectivity, not pip` (or any
+      `--resume-retries`/timeout/connection-reset wording) means retry or verify by another
+      path, not "the dependency is missing" — a bare `ERROR: Exception:`/"no matching
+      distribution" with no network note is the real signal gotcha 84/149 act on.
+    - **The cheap second opinion is `curl -sS https://pypi.riseproject.dev/simple/<dep>/ |
+      grep <interpreter-tag>`** (gotcha 30/353's check, one dependency at a time) — no pip,
+      no resolver, no retry budget, and it is what actually settled this case in seconds
+      after three identical script retries didn't.
+    - Heavier/larger wheels (GDAL-bundling rasterio here; anything with a multi-hundred-MB
+      riscv64 wheel is the same risk) are more exposed to this than small pure-Python
+      wheels, simply because there is more download to interrupt — treat a verdict change
+      from "ok" to "UNRESOLVABLE" on exactly the heaviest dependency in a batch, with no
+      corresponding registry change, as a flakiness signal rather than a gap.
