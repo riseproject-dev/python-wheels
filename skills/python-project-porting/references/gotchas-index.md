@@ -1762,6 +1762,14 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   reaches the outer default, all headroom for subprocess startup/shutdown disappears and
   `TimeoutExpired` returns. Fix the harness function to pass `timeout=runtime+20`, not just
   the individual tests' `runtime=` values.
+- **710** — Gotcha 693 blamed the wrong variable: a nanobind-bound function's `std::bad_cast`
+  on riscv64 (sleipnirgroup-jormungandr's `Problem.solve()`) fires on entering its
+  `nb::kwargs`-handling branch at all, not on the specific keyword value it happened to see
+  in every failing call — patching `diagnostics=True` to `diagnostics=False` still fails the
+  same 34 tests, since any kwarg (even `max_iterations=0` or `timeout=0.0` alone) triggers
+  it and a bare `problem.solve()` never does. Drop kwargs that only assert default behavior;
+  deselect the few calls that need a genuinely non-default option and so can't avoid the
+  kwargs path.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

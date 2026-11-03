@@ -2149,3 +2149,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
        manifests once the first fix pushes a number far enough. Re-run CI against the actual
        head commit after a timing fix lands, rather than assuming "cited the right gotcha"
        is the same as "green."
+
+710. **Gotcha 693 misattributed a nanobind-bound function's `std::bad_cast` to the specific
+     keyword argument it happened to see in every failing call, not to the real trigger:
+     entering the function's `nb::kwargs`-handling branch at all (sleipnirgroup-jormungandr's
+     `Problem.solve()`).** `Problem.solve()`'s binding
+     (`python/cpp/optimization/bind_problem.cpp`) is one nanobind overload taking
+     `const nb::kwargs&`: whenever the dict is non-empty it loops over the entries and calls
+     `nb::cast<std::string>(key)`/`nb::cast<bool|int|double>(value)` per entry before building
+     an `Options` and forwarding to C++. On `manylinux_2_39_riscv64` (GCC 14.3.1), that cast
+     throws `std::bad_cast` for *every* call that passes at least one keyword argument,
+     regardless of which key or value — `diagnostics=True`, `diagnostics=False`,
+     `max_iterations=0`, `timeout=0.0` and `spy=True` all fail identically; a bare
+     `problem.solve()` (zero kwargs, never entering the loop) always succeeds. Gotcha 693
+     patched every failing call site's `diagnostics=True` to `diagnostics=False` expecting
+     that to fix it, because at the time every kwarg-bearing call in the suite happened to
+     pass `diagnostics=True` and every passing call happened to omit it — a correlation with
+     the one *visible* kwarg, not evidence that its value or the `std::print`/`std::format`
+     path it reasoned about was the actual cause. The `diagnostics=False` patch still fails
+     the identical 34 tests on the next real CI run.
+     - **The fix that actually works:** for every call whose kwarg only asserted default
+       behavior (`diagnostics` changes no solver math — see `options.hpp`), drop the kwarg
+       entirely so the call takes the zero-kwarg path, instead of changing its value. Three
+       calls need a genuinely non-default option and cannot avoid the kwargs path no matter
+       what is passed — `test_max_iterations_exceeded` (`max_iterations=0`), `test_timeout`
+       (`timeout=0.0`) and `test_problem_spy` (`spy=True`) — so those three must stay
+       deselected (`-k`) until nanobind's kwargs-casting is fixed upstream or in the
+       toolchain, same `Upstream-Status: Inappropriate` reasoning as 693.
+     - **A workaround that reduces a failure count without isolating which part of the call
+       changed is not confirmed — it's a plausible story until the next real run.** 693's own
+       text says it never reproduced the mechanism outside a hand-rolled, non-`dlopen()`,
+       non-`nb::kwargs` harness; that gap between "isolated repro" and "the actual failing
+       call shape" is exactly where the wrong variable (the value) got blamed instead of the
+       right one (entering the kwargs branch at all). Before trusting a patched test run,
+       check the *shape* of every call that still fails (kwargs vs. no kwargs, which keys)
+       against every call that already passes, not just the one parameter the patch touched.
