@@ -152,11 +152,17 @@ jobs:
             "$pybin/pip" install -q -U setuptools wheel
             "$pybin/python3" setup.py bdist_wheel --python-tag py2.py3 --plat-name manylinux_2_39_riscv64
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=tbb "$pybin/pip" install -q dist/*.whl
-            "$pybin/python3" - <<PYEOF
+            # As in upstream x86_64 daal wheel, libonedal_core and libonedal leave the
+            # _daal_* threading-layer symbols undefined (no NEEDED on libonedal_thread),
+            # and libonedal and libonedal_parameters reference each other, with only
+            # libonedal_parameters carrying a NEEDED on libonedal.so.4. A consumer links
+            # all four; to mimic that, load thread and core RTLD_GLOBAL first, then let
+            # libonedal_parameters pull libonedal.so.4 in from the wheel lib dir.
+            LD_LIBRARY_PATH="${pybin%/bin}/lib:${LD_LIBRARY_PATH}" "$pybin/python3" - <<PYEOF
           import ctypes, os, sysconfig
           libdir = os.path.join(sysconfig.get_path("data"), "lib")
-          for name in ("libonedal_core.so.4", "libonedal_thread.so.4", "libonedal.so.4", "libonedal_parameters.so.4"):
-              ctypes.CDLL(os.path.join(libdir, name))
+          for name in ("libonedal_thread.so.4", "libonedal_core.so.4", "libonedal_parameters.so.4", "libonedal.so.4"):
+              ctypes.CDLL(os.path.join(libdir, name), mode=ctypes.RTLD_GLOBAL)
               print("loaded", name)
           PYEOF
           '
