@@ -183,9 +183,9 @@ publish:
 ```
 
 `_publish-wheel.yml` fills the version's entry of `docs/packages/<pkg>.yaml` with the
-release tag and wheel files (`ci_scripts/update_doc.py`) and adds the package to
-`ci_scripts/packages.txt` on first publish, so beyond the YAML **a new package needs no
-manual registration anywhere**. Per-version `patched: true`, `comment:` and `warning:` keys
+release tag and wheel files (`ci_scripts/update_doc.py`). The package YAML is also the
+package registry, so beyond the YAML **a new package needs no manual registration
+anywhere**. Per-version `patched: true`, `comment:` and `warning:` keys
 may be pre-filled on the pending entry. `permissions` needs `contents: write` **and**
 `pull-requests: write` (not `contents: read`) because that docs step pushes a branch and
 opens a PR with the default `GITHUB_TOKEN`.

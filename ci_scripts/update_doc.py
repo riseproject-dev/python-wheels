@@ -32,7 +32,6 @@ import yaml
 REPO = "riseproject-dev/python-wheels"
 CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
-PACKAGES_FILE = CI_SCRIPTS_DIR / "packages.txt"
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
 RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
@@ -244,21 +243,6 @@ def append_version(
     return "\n".join(lines) + "\n"
 
 
-def read_packages_file():
-    """Return (header lines, package entries) of ci_scripts/packages.txt."""
-    lines = PACKAGES_FILE.read_text().splitlines()
-    header_end = next(
-        i for i, line in enumerate(lines) if line and not line.startswith("#")
-    )
-    return lines[:header_end], [line for line in lines[header_end:] if line]
-
-
-def add_to_packages_file(slug):
-    header, entries = read_packages_file()
-    entries = sorted(set(entries) | {slug}, key=str.casefold)
-    PACKAGES_FILE.write_text("\n".join(header + entries) + "\n")
-
-
 def git_run(*args, check=True):
     return subprocess.run(["git", *args], check=check)
 
@@ -410,13 +394,12 @@ def main():
     pr_title = f"{slug}: update packages"
 
     def compute_content():
-        """Read the current YAML and return (is_new, old_content, new_content)."""
+        """Read the current YAML and return (old_content, new_content)."""
         if not yaml_path.exists():
             raise SystemExit(
                 f"{yaml_path} does not exist; a package's first PR must add it "
                 "(see docs/development.md)"
             )
-        is_new = slug not in read_packages_file()[1]
         old_content = yaml_path.read_text()
         package_data = yaml.safe_load(old_content) or {}
         new_content = append_version(
@@ -428,10 +411,10 @@ def main():
             publication,
             comment,
         )
-        return is_new, old_content, new_content
+        return old_content, new_content
 
     if DRY_RUN:
-        is_new, old_content, new_content = compute_content()
+        old_content, new_content = compute_content()
         if new_content is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
@@ -446,8 +429,6 @@ def main():
             tofile=str(yaml_path),
         )
         sys.stdout.writelines(diff)
-        if is_new:
-            print(f"[dry-run] Would add '{slug}' to {PACKAGES_FILE}")
         print(
             f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main"
         )
@@ -458,7 +439,7 @@ def main():
 
     # Compute the change against the package branch's contents, so a version
     # declared by the nightly workflow is retained and filled in here.
-    is_new, _old_content, new_content = compute_content()
+    _old_content, new_content = compute_content()
     if new_content is None:
         print(f"{slug} {version} is already documented; nothing to do")
         return
@@ -466,12 +447,7 @@ def main():
     yaml_path.write_text(new_content)
     git_run("add", str(yaml_path))
 
-    if is_new:
-        add_to_packages_file(slug)
-        git_run("add", str(PACKAGES_FILE))
-        git_run("commit", "-s", "-m", f"docs: add {slug}\n\nAdd version {version}")
-    else:
-        git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
+    git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
 
     # The rebase rewrote whatever was on the branch, so the push is no longer a
     # fast-forward; the lease keeps it from clobbering a concurrent update.

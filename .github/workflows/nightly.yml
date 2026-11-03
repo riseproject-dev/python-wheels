@@ -100,12 +100,12 @@ jobs:
             uv run --with-requirements ci_scripts/requirements.txt python3 \
               ci_scripts/check_versions.py --declare --base-file "$RUNNER_TEMP/base-$slug.yaml" "$package" || return 1
 
-            if git diff --quiet -- docs/packages patches ci_scripts/packages.txt ci_scripts/deprecated.txt; then
+            if git diff --quiet -- docs/packages patches; then
               echo "$package: nothing to declare"
               return 0
             fi
 
-            git add docs/packages patches ci_scripts/packages.txt ci_scripts/deprecated.txt || return 1
+            git add docs/packages patches || return 1
             git commit -s -m "$title" || return 1
 
             git push origin "$branch" || return 1
@@ -148,8 +148,9 @@ jobs:
       - name: Verify riscv64 wheels still published
         run: |
           ret=0
-          while IFS= read -r pkg; do
-            [[ -z "$pkg" || "$pkg" =~ ^[[:space:]]*# ]] && continue
+          for package_yaml in docs/packages/*.yaml; do
+            grep -q '^deprecated:' "$package_yaml" || continue
+            pkg=$(basename "$package_yaml" .yaml)
 
             if ! output=$(curl -sf "https://pypi.org/pypi/${pkg}/json"); then
               echo "Failed to fetch $pkg, skipping..."
@@ -166,20 +167,8 @@ jobs:
               echo "$pkg does not distribute riscv64 or pure-Python wheel anymore!"
               ret=1
             fi
-          done < ci_scripts/deprecated.txt
+          done
           exit $ret
-
-  check_installation:
-    runs-on: ubuntu-24.04-riscv
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install packages inside riscv64 container
-        working-directory: ci_scripts
-        run: |
-          sed -Ei 's/^scipy.*$//' packages.txt
-          sed -Ei 's/^patchelf.*$//' packages.txt
-          ./list-packages.sh python-wheels
 
   pip_audit:
     runs-on: ubuntu-24.04-riscv

@@ -33,8 +33,6 @@ from update_doc import normalize_name, version_blocks
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "docs" / "packages"
 PATCHES_DIR = ROOT_DIR / "patches"
-PACKAGES_FILE = "ci_scripts/packages.txt"
-DEPRECATED_FILE = "ci_scripts/deprecated.txt"
 REPO = "riseproject-dev/python-wheels"
 
 # Python versions (interpreter tags) a package must have upstream riscv64
@@ -44,22 +42,17 @@ TARGET_PYTHON_VERSIONS = ["3.12", "3.13", "3.14", "3.14t"]
 
 
 def read_packages() -> List[str]:
-    """Read the list of packages from packages.txt."""
+    """Read active package names from docs/packages/<pkg>.yaml files."""
     packages = []
-    try:
-        with open(PACKAGES_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    packages.append(line)
-    except FileNotFoundError:
-        print(f"Error: {PACKAGES_FILE} not found")
-        sys.exit(1)
+    for yaml_file in sorted(DOCS_DIR.glob("*.yaml")):
+        package_data = yaml.safe_load(yaml_file.read_text()) or {}
+        if "deprecated" in package_data:
+            continue
+        packages.append(yaml_file.stem)
     return packages
 
 
 def package_yaml(package: str) -> Path:
-    # packages.txt keeps PyPI's spelling (PyYAML), the YAMLs use the normalized name.
     return DOCS_DIR / f"{normalize_name(package)}.yaml"
 
 
@@ -75,20 +68,15 @@ def declared_versions(package_data: Dict) -> Set[str]:
 
 
 def get_registry_latest_version(package_data: Dict) -> Optional[str]:
-    """
-    Latest version published to the riscv64 registry, read from the package
-    YAML. Entries without `files` are declared but not built yet.
-    """
-    released = []
+    """Latest version tracked in the package YAML, published or pending."""
+    tracked = []
     for entry in package_data.get("versions") or []:
-        if "files" not in entry:
-            continue
         raw = str(entry["version"])
         try:
-            released.append((version.parse(raw), raw))
+            tracked.append((version.parse(raw), raw))
         except version.InvalidVersion:
             continue
-    return max(released)[1] if released else None
+    return max(tracked)[1] if tracked else None
 
 
 def get_pypi_package_info(package: str, retries: int = 3) -> Optional[Dict]:
@@ -205,28 +193,15 @@ def find_upstream_issue(package: str) -> Optional[str]:
 
 def deprecate_package(package: str) -> bool:
     """
-    Deprecate our wheel in the working tree: prefix docs/packages/<pkg>.yaml
-    with `deprecated:`, drop the package from packages.txt and add it to
-    deprecated.txt. Returns False when it is already deprecated.
+    Deprecate our wheel in the working tree by prefixing
+    docs/packages/<pkg>.yaml with `deprecated:`. Returns False when it is
+    already deprecated.
     """
     yaml_file = package_yaml(package)
     content = yaml_file.read_text()
     if content.startswith("deprecated:"):
         return False
     yaml_file.write_text(f"deprecated:\n{content}")
-
-    packages_file = Path(PACKAGES_FILE)
-    lines = [line for line in packages_file.read_text().splitlines() if line.strip() != package]
-    packages_file.write_text("\n".join(lines) + "\n")
-
-    deprecated_file = Path(DEPRECATED_FILE)
-    lines = deprecated_file.read_text().splitlines()
-    i = next(i for i, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#"))
-    comments, deprecated_packages = lines[:i], lines[i:]
-    if package not in deprecated_packages:
-        deprecated_packages.append(package)
-        deprecated_packages.sort(key=str.lower)
-        deprecated_file.write_text("\n".join(comments + deprecated_packages) + "\n")
     return True
 
 
@@ -440,7 +415,7 @@ def check_package(
     With `since`, every stable release uploaded since that date and missing
     from the YAML counts as an upgrade, not just the ones newer than the
     registry. With `declare`, the upgrade, deprecation or yanked marking is
-    written to docs/packages/<pkg>.yaml (and packages.txt/deprecated.txt) for
+    written to docs/packages/<pkg>.yaml for
     the caller to commit. Versions yanked upstream are reported in the
     result's `yanked` alongside the upgrade/deprecation status.
     """
@@ -452,8 +427,8 @@ def check_package(
 
     registry_version = get_registry_latest_version(package_data)
     if registry_version is None:
-        print(f"[X] No released version in {package_yaml(package).relative_to(ROOT_DIR)}")
-        return {"status": "error", "package": package, "error": "No released version in YAML"}
+        print(f"[X] No tracked version in {package_yaml(package).relative_to(ROOT_DIR)}")
+        return {"status": "error", "package": package, "error": "No tracked version in YAML"}
 
     pypi_info = get_pypi_package_info(package)
     if pypi_info is None:
@@ -570,7 +545,7 @@ def check_upgrade(
 def deprecation_result(package: str, registry_version: str, pypi_version: str, reason: str, declare: bool) -> Dict[str, any]:
     upstream_issue = find_upstream_issue(package)
     if declare and deprecate_package(package):
-        print(f"    [+] deprecated {package} in {package_yaml(package).relative_to(ROOT_DIR)}, packages.txt and deprecated.txt")
+        print(f"    [+] deprecated {package} in {package_yaml(package).relative_to(ROOT_DIR)}")
     return {
         "status": "can_deprecate",
         "package": package,
@@ -809,13 +784,13 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Check package versions between riscv64 registry and PyPI")
-    parser.add_argument("packages", nargs="*", help="Specific packages to check (default: all packages from packages.txt)")
+    parser.add_argument("packages", nargs="*", help="Specific packages to check (default: active docs/packages/*.yaml files)")
     parser.add_argument("--since", type=parse_since, metavar="DATE|Nd|Nm",
                         help="Treat every stable release uploaded since this date (YYYY-MM-DD) or duration (e.g. 12m, 90d) "
                              "that docs/packages/<pkg>.yaml does not list as a version to add, uncapped")
     parser.add_argument("--declare", action="store_true",
                         help="Apply the outcome to the working tree: declare new versions and mark yanked ones in "
-                             "docs/packages/<pkg>.yaml, deprecate packages in the YAML, packages.txt and deprecated.txt")
+                             "docs/packages/<pkg>.yaml, and deprecate packages in the YAML")
     parser.add_argument("--base-file", type=Path, metavar="FILE",
                         help="Base branch copy of the package YAML (as for pending_versions.py): with --declare, "
                              "only versions it does not declare get the previous version's patches")
