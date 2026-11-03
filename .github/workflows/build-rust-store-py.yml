@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/coenddt/rust-store/blob/v5.2.1/.github/workflows/release-pypi.yml
+# and the `py-binding` job of
+# https://github.com/coenddt/rust-store/blob/v5.2.1/.github/workflows/ci.yml
+name: Build rust-store-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rust-store-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rust-store-py.yml'
+      - 'docs/packages/rust-store-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rust-store-py.yml'
+      - 'docs/packages/rust-store-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rust-store-py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rust-store-py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      RUST_STORE_PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rust-store v${{ env.RUST_STORE_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: coenddt/rust-store
+          ref: v${{ env.RUST_STORE_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: core-py
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+
+      - name: Check the wheel ships the extension
+        run: |
+          set -euo pipefail
+          python3 - core-py/dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"rust_store_py-{os.environ['RUST_STORE_PY_VERSION']}-"), whl
+          sos = [n for n in zipfile.ZipFile(whl).namelist() if n.endswith(".so")]
+          assert any(n.startswith("rust_store_py/rust_store_py.") for n in sos), sos
+          print(whl, "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Run tests
+        run: |
+          uv pip install core-py/dist/*.whl pytest
+          python -m pytest core-py/test/parity_test.py -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-store-py-${{ env.RUST_STORE_PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: core-py/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rust-store-py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: rust-store-py-${{ matrix.version }}-*-manylinux_riscv64

@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on the `build_wheels` job of
+# https://github.com/boschresearch/pylife/blob/2.3.1/.github/workflows/pypi-deploy.yml
+name: Build pylife wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pylife.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylife.yml'
+      - 'docs/packages/pylife.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylife.yml'
+      - 'docs/packages/pylife.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pylife
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pylife ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp314t excluded: upstream builds no free-threaded wheel either (pypi-deploy.yml's
+        # CIBW_BUILD stops at cp314) and the Cython extensions are untested under
+        # Py_GIL_DISABLED.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    env:
+      PYLIFE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pylife ${{ env.PYLIFE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: boschresearch/pylife
+          ref: ${{ env.PYLIFE_VERSION }}
+          fetch-depth: 0  # setuptools_scm derives the version from the git tag
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/cython are build-time deps and numpy, scipy, pandas and h5py are runtime
+          # ones; only our registry has riscv64 wheels for them, and PIP_ONLY_BINARY keeps a
+          # newer PyPI sdist from winning the resolution and compiling from source.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,h5py,cython
+          CIBW_TEST_REQUIRES: pytest
+          # tests/stress/rainflow/test_fkm_nonlinear.py opens its reference JSON fixtures by a
+          # path relative to the process cwd (e.g. 'tests/stress/rainflow/reference-fkm-nonlinear/
+          # reference_first_second-4.json'), not relative to __file__. cibuildwheel runs
+          # CIBW_TEST_COMMAND from an isolated test_cwd, not from {project}, so those opens
+          # raise FileNotFoundError regardless of interpreter or arch (gotcha 104/111; see also
+          # gotcha 243 on not assuming a CIBW_TEST_COMMAND failure is riscv64-specific). pylife
+          # uses a src/ layout (package lives at src/pylife, not at the checkout root), so
+          # cd'ing into {project} does not risk shadowing the installed wheel with the local
+          # source tree.
+          CIBW_TEST_COMMAND: cd {project} && pytest tests/stress/rainflow tests/strength/fkm_linear
+
+      - name: Check the wheel ships the licence and the compiled extensions
+        run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+
+          names = zipfile.ZipFile(glob.glob("wheelhouse/*.whl")[0]).namelist()
+          assert any(n.endswith("dist-info/licenses/LICENSE") for n in names), names
+          for ext in ("rainflow_ext", "_fkm_linear_functions"):
+              assert any(n.startswith(f"pylife/{ext}.") and n.endswith(".so") for n in names), names
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylife-${{ env.PYLIFE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylife ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pylife-${{ matrix.version }}-*-manylinux_riscv64

@@ -26,6 +26,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **672** — A `before-build` hook that `uv pip install --require-hashes`s from a PEP 751
   `pylock.toml` fails outright on riscv64 if that lock file's `environments` never lists a
   `riscv64` marker (the turbohtml PGO case).
+- **707** — A workflow-level `env:` var isn't visible inside `CIBW_BEFORE_ALL_LINUX`/
+  `CIBW_BEFORE_BUILD_LINUX` unless it's passed through `CIBW_ENVIRONMENT_PASS_LINUX`.
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -1287,3 +1289,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       `--constraint` file with hashes) verbatim on riscv64, check whether that lock file was
       actually resolved for the target triple — a hash-pinned install has no fallback path
       the way an unconstrained `pip install` does.
+
+707. **A workflow-level `env:` var isn't visible inside `CIBW_BEFORE_ALL_LINUX`/
+    `CIBW_BEFORE_BUILD_LINUX` unless it's passed through `CIBW_ENVIRONMENT_PASS_LINUX`
+    (the netgen-mesher OCCT build case).** The job-level (or top-of-file) `env:` block is a
+    GitHub Actions construct: it's injected into every ordinary `run:` step's shell on the
+    runner, but `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX` execute *inside* the
+    manylinux Docker container cibuildwheel drives — a separate process environment that
+    only sees what cibuildwheel explicitly forwards. netgen-mesher's workflow set
+    `OCCT_VERSION: 7.8.1` at the top-level `env:` so the version was easy to find and bump,
+    then referenced `${OCCT_VERSION}` inside `CIBW_BEFORE_ALL_LINUX` to download and build
+    OCCT from source. With no pass-through, the container's shell saw an unset variable; the
+    script's own `set -eux` (which includes `-u`) turned that into an immediate "OCCT_VERSION:
+    unbound variable" failure on the `curl .../V${OCCT_VERSION//./_}.tar.gz | tar xz` line —
+    before `dnf install` even mattered — not a timeout or a flake, despite the job's generous
+    `timeout-minutes: 1440` for the (unreached) OCCT compile.
+    - **The fix**: add `CIBW_ENVIRONMENT_PASS_LINUX: OCCT_VERSION` alongside
+      `CIBW_ENVIRONMENT_LINUX` in the cibuildwheel step's own `env:`, so cibuildwheel forwards
+      that host var into the container unchanged. `build-libuuu.yml` (`TINYXML2_VERSION`) and
+      `build-resiliparse.yml` (`ABSEIL_VERSION RE2_VERSION LEXBOR_REF UCHARDET_VERSION`)
+      already use this exact pattern for the same reason — a source version pinned once at
+      the top of the file, consumed by a container-side `before-all` build script.
+    - **Tell this apart from gotcha 107's cascade**: `CIBW_ENVIRONMENT_PASS_LINUX` doesn't
+      *set* a value, it only forwards one that's already defined somewhere the container
+      can't otherwise reach; it has no effect on a var that's merely missing everywhere.

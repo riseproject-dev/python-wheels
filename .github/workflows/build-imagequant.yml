@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/wanadev/imagequant-python/blob/v1.1.5/.github/workflows/python-packages.yml
+name: Build imagequant wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/imagequant.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-imagequant.yml'
+      - 'docs/packages/imagequant.yaml'
+      - 'patches/imagequant/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-imagequant.yml'
+      - 'docs/packages/imagequant.yaml'
+      - 'patches/imagequant/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: imagequant
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build imagequant ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): libimagequant_build.py's cffi ffibuilder
+        # links the version-specific ABI, same as upstream's own cp3x-cp3x wheels.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      IMAGEQUANT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout imagequant v${{ env.IMAGEQUANT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wanadev/imagequant-python
+          ref: v${{ env.IMAGEQUANT_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # libimagequant's GPL-3.0-or-later notice has to travel with the
+      # statically-compiled C sources it covers; upstream's wheel carries only
+      # imagequant's own BSD-3-Clause LICENSE.
+      - name: Patch imagequant source
+        run: |
+          git apply python-wheels/patches/imagequant/${{ env.IMAGEQUANT_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cffi, a build-time dependency via setup.py's setup_requires (pulled
+          # in through PEP 517's get_requires_for_build_wheel), has no riscv64
+          # wheel on public PyPI.
+          #
+          # pillow (CIBW_TEST_REQUIRES below) has a riscv64 wheel only on our
+          # own registry, not on public PyPI - with PIP_EXTRA_INDEX_URL alone,
+          # pip resolves the highest version across *both* indexes, so a newer
+          # PyPI release than anything built for pillow here loses to a
+          # sdist-only pillow and tries to compile it, failing with
+          # `RequiredDependencyException: jpeg` (no libjpeg headers in the
+          # manylinux test venv). PIP_ONLY_BINARY pins pip to wheel-only
+          # candidates, landing on our registry's newest built version instead
+          # (gotcha 291).
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=pillow
+          CIBW_TEST_REQUIRES: pytest pillow
+          CIBW_TEST_SOURCES: example.png
+          # --doctest-modules --pyargs imagequant would also collect
+          # libimagequant_build.py, which the wheel ships but crashes on import
+          # (it reads imagequant/libimagequant.h, a build-time-only file not
+          # installed); target __init__.py directly to run only its own doctests
+          # against the installed wheel. The license assertion proves the patch
+          # above landed in the actual built wheel.
+          CIBW_TEST_COMMAND: >-
+            python -c "import imagequant._libimagequant as ext, importlib.metadata as m;
+            assert ext.__file__.endswith('.so'), ext.__file__;
+            l = sorted(str(p).split('licenses/', 1)[1] for p in m.files('imagequant') if '.dist-info/licenses/' in str(p));
+            assert l == ['LICENSE', 'libimagequant/COPYRIGHT'], l" &&
+            python -m pytest --doctest-modules "$(python -c "import imagequant, os; print(os.path.join(os.path.dirname(imagequant.__file__), '__init__.py'))")"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: imagequant-${{ env.IMAGEQUANT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish imagequant ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: imagequant-${{ matrix.version }}-*-manylinux_riscv64

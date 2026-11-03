@@ -1,0 +1,221 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build`/`pypi-publish` jobs of
+# https://github.com/enola-labs/enola/blob/v0.4.38/.github/workflows/release.yml
+# and its packaging/pypi/build_wheel.py.
+name: Build enola-cli wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/enola-cli.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-enola-cli.yml'
+      - 'docs/packages/enola-cli.yaml'
+      - 'patches/enola-cli/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-enola-cli.yml'
+      - 'docs/packages/enola-cli.yaml'
+      - 'patches/enola-cli/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: enola-cli
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build enola-cli ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      ENOLA_CLI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout enola v${{ env.ENOLA_CLI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: enola-labs/enola
+          ref: v${{ env.ENOLA_CLI_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/enola-cli/${{ env.ENOLA_CLI_VERSION }}/*.patch
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # enola links the tree-sitter C grammars (Swift, Dart, Scala, C#) via cgo,
+      # so unlike a CGO_ENABLED=0 Go CLI this needs a real C toolchain. Upstream's
+      # own build step gets one from the manylinux/musllinux image it builds
+      # inside; this runner has none baked in.
+      - name: Install the C toolchain for cgo (tree-sitter grammars)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc binutils libc6-dev
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Mirrors upstream's own "Build binary" step's wheel-bound build (the
+      # PIPFLAGS leg): same -s -w and Version stamp, plus InstallMethod=pip,
+      # which internal/upgrade reads to refuse self-updating a pip install.
+      # GOARCH=riscv64 is the runner's own arch here (no cross-compiling), kept
+      # explicit to match upstream's env vars.
+      - name: Build the enola binary
+        env:
+          GOOS: linux
+          GOARCH: riscv64
+          CGO_ENABLED: 1
+          GOFLAGS: -buildvcs=false
+        run: |
+          mkdir -p wheelbin
+          go build \
+            -ldflags "-s -w -X github.com/enola-labs/enola/internal/version.Version=${ENOLA_CLI_VERSION} -X github.com/enola-labs/enola/internal/version.InstallMethod=pip" \
+            -o wheelbin/enola ./cmd/enola
+
+      # packaging/pypi/build_wheel.py is upstream's own wheel packer (stdlib
+      # only, no build backend); manylinux_2_39_riscv64 matches
+      # packaging/pypi/linux_test.sh's own measured glibc floor for an
+      # ubuntu:24.04 build image, which is what this runner is.
+      - name: Build wheel
+        run: |
+          python3 packaging/pypi/build_wheel.py \
+            --binary wheelbin/enola \
+            --version "${ENOLA_CLI_VERSION}" \
+            --platform-tag manylinux_2_39_riscv64 \
+            --outdir dist
+
+      - name: Verify the wheel ships the riscv64 enola binary
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          version = os.environ["ENOLA_CLI_VERSION"]
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith(f"enola_cli-{version}-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              binary = f"enola_cli-{version}.data/scripts/enola"
+              assert binary in names, names
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE", "NOTICE"], licenses
+              header = zf.read(binary)[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: enola-cli-${{ env.ENOLA_CLI_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test enola-cli ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      ENOLA_CLI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout enola v${{ env.ENOLA_CLI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: enola-labs/enola
+          ref: v${{ env.ENOLA_CLI_VERSION }}
+          path: enola-src
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: enola-cli-${{ env.ENOLA_CLI_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --find-links . "enola-cli==${ENOLA_CLI_VERSION}"
+
+      # There is no Python inside this wheel to run upstream's own `go test`
+      # suite against; drive the installed binary instead, the same way its
+      # own README quickstart suggests checking a fresh install: point enola
+      # at a real repository (its own checkout) and read what comes back.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          enola --version --json | tee /tmp/version.json
+          python3 -c "
+          import json, os
+          v = json.load(open('/tmp/version.json'))
+          assert v['version'] == os.environ['ENOLA_CLI_VERSION'], v
+          "
+          enola --help >/dev/null
+
+          cd enola-src
+          output=$(enola --explain .)
+          echo "$output"
+          facts=$(echo "$output" | grep -oP 'Total facts:\s*\K[0-9]+')
+          [ -n "$facts" ] && [ "$facts" -gt 0 ]
+
+  publish:
+    name: Publish enola-cli ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: enola-cli-${{ matrix.version }}-py3-none-manylinux_riscv64
