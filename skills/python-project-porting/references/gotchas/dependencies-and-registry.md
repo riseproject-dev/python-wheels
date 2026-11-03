@@ -1066,6 +1066,51 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       native toolchain. Worth a dedicated audit pass over every workflow using
       `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` as a step/job `env:` key.
 
+709. **A `CIBW_TEST_REQUIRES` extra's compiled half can be the one thing missing a cp314t
+    wheel everywhere, while the plain package underneath it is pure Python and installs
+    fine (the pgtask/psycopg[binary] case).** Gotcha 149 is the shape one level up: there
+    the *package under test's own runtime dependency* has no free-threaded wheel on any
+    architecture, so the honest move is to build and skip only the tests. Here the blocking
+    distribution is not a hard runtime dependency at all — pgtask's wheel depends on plain
+    `psycopg>=3.2` (which ships `py3-none-any`, so it is free-threading-agnostic), and only
+    the *test venv's* `CIBW_TEST_REQUIRES` asked for the `[binary]` extra, pulling in
+    `psycopg-binary`. That sibling distribution has never published a `cp314t` wheel for
+    any platform (checked through 3.3.6), so pip backtracks every release trying to satisfy
+    it and dies with `ResolutionImpossible` — *after* the wheel itself had already built,
+    been repaired, and installed cleanly, inside the plain `pip install <test deps>` step,
+    on the free-threaded job only (the same tell gotcha 55/97 give for a test dependency
+    gone wrong, but the failure text here is a dependency-resolution conflict, not a build
+    backend traceback, because `psycopg-binary` is a normal wheel-only PyPI distribution).
+    - **Confirm the gap is in the extra, not the base package, before changing anything**:
+      read the base distribution's own `Requires-Dist`/`info.requires_dist` and the
+      sibling's PyPI JSON file list side by side. `psycopg` core is `py3-none-any` back to
+      3.1; `psycopg-binary` (checked via `{u['filename'].split('-')[2] for u in
+      releases[ver]}`) tops out at `cp315`/`cp314`, never `cp314t`. The project's own test
+      suite only needs to matter here: grep it for anything that pins to the C
+      implementation (`psycopg.pq.__impl__`, a direct `psycopg_c`/`psycopg_binary` import);
+      finding none means the pure-Python fallback is enough to run the real suite, not a
+      reason to skip it.
+    - **Fix by driving `CIBW_TEST_REQUIRES` from the matrix, the way gotcha 97 drives a
+      version pin**, so only the `cp314t` leg drops the extra and every other leg still
+      matches upstream's own test/dev dependency group unchanged:
+      ```yaml
+      include:
+        - tag: cp310-abi3
+          test_requires: pytest anyio 'psycopg[binary]'
+        - tag: cp314t
+          test_requires: pytest anyio psycopg
+      ...
+          CIBW_TEST_REQUIRES: ${{ matrix.test_requires }}
+      ```
+      This keeps the `cp314t` entry buildable *and* fully tested (unlike gotcha 149's
+      skip-the-tests shape, which this package never needed), and it is a one-line,
+      upstream-explainable deviation rather than a matrix-wide downgrade to the slower
+      pure-Python driver on every interpreter.
+    - **Don't reach for gotcha 511's "drop `cp314t`" instead** — that gotcha is for a
+      dependency named in the *wheel's own* `Requires-Dist`, where no pin or test-skip can
+      help because `pip install <your wheel>` itself cannot complete anywhere. A
+      test-only extra has a real escape hatch: stop asking for the extra.
+
 701. **`ci_scripts/check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
     actually fully hosted on riscv64 — the failure is pip hitting transient proxy/network
     flakiness in this sandbox, not a real registry gap, and the script's own output tells

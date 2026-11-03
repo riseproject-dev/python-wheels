@@ -593,6 +593,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   package): check what happens when it's absent (a named, working fallback vs. every call
   failing) and what the sdist itself already builds before parking it as a hard
   `vendored-binary` block (the nanobot-ai case).
+- **706** — A plain `git` Cargo dependency pinned by rev into a third-party org's private repo,
+  gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux build exactly
+  as hard as gotcha 600/670/704's missing checkout would, even with a fully public wrapper
+  repo and a clean Python dependency closure (the chalk-remote-call-python case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -764,6 +768,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   includes a `riscv64` marker, before the real build ever starts — add a riscv64
   `[[tool.cibuildwheel.overrides]]` that drops the hook, the same shape as a PyPy override
   dropping it for a different reason (the turbohtml PGO case).
+- **707** — A workflow-level `env:` var (e.g. a pinned `OCCT_VERSION`) isn't visible inside
+  `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX`, which run inside the container, not on
+  the runner — forward it explicitly with `CIBW_ENVIRONMENT_PASS_LINUX`, or the container's
+  shell dies with "unbound variable" under `set -u` (the netgen-mesher OCCT case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -1327,6 +1335,7 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
 - **678** — `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` are not real `uv` env vars (unlike
 - **701** — `check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
+- **709** — A `CIBW_TEST_REQUIRES` extra's compiled half can be the one thing missing a
 - **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
 - **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
   answer plain `404`, not `302` — the check logic is unaffected, but scripts written
@@ -1747,6 +1756,22 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `qemu-riscv64-static` did not reproduce it. Patch the tests to pass `diagnostics=False`
   (leaving independent `spy=True` calls untouched) as a workaround (the
   sleipnirgroup-jormungandr case).
+- **708** — Widening a watch-mode test's inner `--runtime` budget to fix gotcha 38's
+  discovery race can collide with a *different*, hardcoded outer `communicate(timeout=10)`
+  default the harness never exposes (cyclonedds-python's `test_ddsls.py`); once `runtime`
+  reaches the outer default, all headroom for subprocess startup/shutdown disappears and
+  `TimeoutExpired` returns. Fix the harness function to pass `timeout=runtime+20`, not just
+  the individual tests' `runtime=` values.
+- **711** — A test that caps `RLIMIT_AS` at "VmSize + small headroom" to force a
+  `MemoryError` out of a large allocation silently allocates anyway under free-threaded
+  CPython (cp314t) — `RLIMIT_AS` only gates new `mmap`/`brk` growth, and cp314t's
+  mimalloc-backed allocator reserves large per-thread arenas up front, so later large
+  allocations are carved from address space already mapped before the test's own
+  `setrlimit` call. Confirmed off riscv64 and off the package's own code with a ~20-line
+  pure-stdlib repro (GIL: `MemoryError`; free-threaded: allocates all 192 MiB, no error,
+  baseline `VmSize` >1 GiB before touching the module under test). Deselect the specific
+  test for `cp314t` only (matrix `include:`, gotcha 149's shape), citing this gotcha —
+  don't chase it as a port bug.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

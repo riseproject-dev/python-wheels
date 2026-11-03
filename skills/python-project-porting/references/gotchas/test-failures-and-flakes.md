@@ -2112,3 +2112,73 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
        riscv64 runner directly) rather than a cross-compiled approximation, and check whether
        the failure needs the real Python/nanobind `dlopen()` + `STABLE_ABI` runtime — not just
        a hand-rolled `dlopen()` host — to reproduce.
+
+708. **Widening a test's inner subprocess budget to fix gotcha 38's discovery race can
+     silently collide with a *different*, hardcoded outer kill-timeout the harness itself
+     never exposes — the two numbers look independent until one is raised far enough to
+     meet the other (cyclonedds-python's `test_ddsls.py` watch-mode harness).**
+     `run_ddsls_watchmode()`/`run_ddsls_async_watch()` launch `ddsls --watch --runtime N`
+     as a subprocess and hand it to `run_ddsls(args, timeout=10)` — whose `timeout` kwarg
+     has its own hardcoded default of 10s and is never passed through by the watch-mode
+     callers, so every watch-mode test's `process.communicate()` kill-timeout is a fixed
+     10s regardless of what `--runtime N` the caller asked for. While `N` stayed at the
+     original 5, this left 5s of accidental headroom for subprocess startup (interpreter
+     boot + `cyclonedds` import, before the tool's own `--runtime` clock even starts) and
+     shutdown (DDS domain-participant teardown, stdout flush, process exit) on top of the
+     watch window itself. Gotcha 38's own fix for this suite (raising `test_ddsls_qos_change`
+     and `test_ddsls_qos_change_in_verbose` from `runtime=5` to `runtime=10` to fix a
+     discovery/qos-propagation race) pushed the inner budget up to exactly the outer
+     kill-timeout's value, deleting that headroom entirely — the next CI run then failed
+     both tests with `subprocess.TimeoutExpired` at 10s, one with a partial stdout capture
+     (the subprocess was genuinely still working, not deadlocked) and the `--lf` rerun with
+     none at all (an even busier host left zero room for even the first print).
+     - **A `TimeoutExpired` whose captured stdout is non-empty but incomplete is evidence of
+       a margin problem, not a hang** — same read as gotcha 568's awscrt case, applied to a
+       different harness shape (an outer wrapper's own default swallowing the inner value
+       instead of a single hardcoded wall clock).
+     - **The fix is to stop treating the inner and outer timeouts as independent**: thread a
+       `timeout` through to `run_ddsls()` from `run_ddsls_async_watch()` that is always
+       `runtime` plus a fixed, comfortable headroom (20s), so any future bump to a test's
+       `runtime=` argument can never again close the gap to the harness's own default.
+       Patching only the three tests' `runtime=` values (as the first pass did) treats the
+       symptom; patching the harness function closes the whole class of collision for every
+       current and future caller in the file.
+     - **Resolving "gotcha 38" in a comment or commit message doesn't mean the fix for that
+       citation is complete** — a correct fix for the race gotcha 38 describes can still
+       expose a second, unrelated bug (this harness's hardcoded kill-timeout) that only
+       manifests once the first fix pushes a number far enough. Re-run CI against the actual
+       head commit after a timing fix lands, rather than assuming "cited the right gotcha"
+       is the same as "green."
+
+711. **A test that caps `RLIMIT_AS` at "current VmSize + small headroom" to force a
+     `MemoryError` out of a large allocation passes under the GIL build and silently
+     passes allocation under free-threaded CPython (cp314t) instead — this is a property
+     of cp314t's own allocator, confirmed off riscv64 and off the package's own code
+     entirely (wolfxl's `test_streaming_oom_error.py::test_allocation_failure_raises_memory_error_not_panic`).**
+     The test measures its own `VmSize` right after opening a reader, sets
+     `RLIMIT_AS` to that plus 64 MiB, then allocates well past the cap (192 MiB of
+     distinct strings) expecting `MemoryError`. `RLIMIT_AS` is a *virtual address
+     space* limit the kernel enforces only on calls that grow a process's mappings
+     (`mmap`/`brk`/`mremap`); it does nothing to memory inside a mapping a process
+     already holds. Reproduced with a ~20-line pure-stdlib script (no wolfxl, no
+     Rust, no riscv64 — run on x86_64) that does exactly the same
+     measure-VmSize/setrlimit/allocate sequence: under CPython 3.11 (GIL), a 192 MiB
+     allocation with a 64 MiB headroom correctly raises `MemoryError`; under CPython
+     3.14 free-threaded, the identical sequence allocates all of it with no error —
+     and the free-threaded interpreter's own baseline `VmSize` at measurement time
+     was already **>1 GiB**, against ~14 MiB for the GIL build, before either process
+     touched the module under test. Free-threaded CPython's object allocator
+     (mimalloc-backed, replacing pymalloc's role for anything not tiny) reserves its
+     per-thread arenas in large chunks up front; later large allocations are carved
+     out of address space already mapped before the test ever calls `setrlimit`, so
+     they never issue the new `mmap` that `RLIMIT_AS` would have gated. This is not
+     a riscv64 bug and not a defect in the package under test's Rust/PyO3 allocation
+     path — it is cp314t's allocator defeating this specific test technique on any
+     architecture. Do not spend more time chasing it as a build or porting bug; where
+     a port's upstream suite contains this exact RLIMIT_AS-headroom-then-allocate
+     pattern, deselect it for `cp314t` only (matrix `include:` entry adding a
+     `test_deselect` key gotcha 149 shows the shape of, interpolated into the pytest
+     invocation) with a comment citing this gotcha, and leave it running on
+     cp312/cp313/cp314. `Upstream-Status: To discuss upstream` — the test's technique
+     is simply incompatible with a `Py_GIL_DISABLED` build, which the package may not
+     have had a cp314t leg to discover yet.

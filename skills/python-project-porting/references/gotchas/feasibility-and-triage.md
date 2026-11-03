@@ -373,6 +373,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   and native engine alike — inside a private monorepo with no public checkout at any layer, so
   there is no repo to even clone; the wheel's own bundled SBOM is the only artifact that proves
   it (the istari-digital-core case).
+- **706** — Gotcha 600/670/704's private-monorepo shape doesn't need a path dependency or a
+  submodule to bite: a plain `git` Cargo dependency pinned by rev into a third-party org's
+  private repo, gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux
+  build exactly as hard as a missing checkout would, even though the wrapper's own repo is
+  fully public and the Python dependency closure resolves clean (the chalk-remote-call-python
+  case).
 
 ---
 
@@ -6430,3 +6436,51 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       yes, there is nothing to port: the gap is in one optional feature, not in the package,
       and a riscv64 wheel of the base package would carry the same zero-arch-specific bytes
       pip's sdist fallback already produces. `parked`/no real gap, not `vendored-binary`.
+
+706. **Gotcha 600/670/704's private-monorepo wall doesn't require a path dependency or a
+    missing checkout — a plain `git` Cargo dependency, gated only on `cfg(target_os =
+    "linux")`, blocks the exact Linux target we build on even though the wrapper's own repo
+    is fully public (the chalk-remote-call-python case).** chalk-remote-call-python is an
+    open setuptools-rust/pyo3 project (tonic gRPC server) with a self-contained sdist
+    (`chalk-remote-call-rs/`, `Cargo.lock` committed, proto sources pre-generated) and no
+    vendored binary blob — none of gotcha 157/246/600/670/704's "no source anywhere" tells
+    fire, and `ci_scripts/check_riscv64_deps.py` confirms its one hard Python runtime dep
+    (`pyarrow>=14.0.0`) resolves clean on riscv64 for cp312/cp313/cp314/cp314t. PyPI ships
+    manylinux_2_28 + musllinux_1_2 wheels for x86_64/aarch64 (plus macOS/Windows), zero
+    riscv64 — a real-looking gap. The wall is one `Cargo.toml` stanza:
+    `chalk-remote-call-server`'s `[target.'cfg(target_os = "linux")'.dependencies]` pulls
+    `chalk-queue`, `chalk_metrics` and `chalk_statsd` as `git` dependencies (not `path`, not
+    crates.io) pinned by commit rev to `github.com/chalk-ai/chalk-private.git` — a private
+    repo belonging to Chalk AI, not this project's org, and not one this repo's CI has (or
+    could legitimately request) credentials for.
+    - **Confirm the git source from `Cargo.lock`, not just `Cargo.toml`'s URL.** The lock
+      file's resolved entries read `source = "git+https://github.com/chalk-ai/chalk-private.
+      git?rev=61b67cc862036cfee5346807de1f24415a5fbfba#…"` — an unambiguous, independently
+      verifiable statement that `cargo build`/`cargo fetch` must clone that exact private
+      repo at that exact commit, with no registry fallback.
+    - **Confirm the modules are unconditional, not a Cargo feature anyone could turn off.**
+      `lib.rs` declares `#[cfg(target_os = "linux")] mod self_consumer;` and `mod metrics;`
+      directly (no `[features]` gate in `Cargo.toml` controls them) — upstream's own comment
+      explains the *reason* for the OS gate (rdkafka's `sasl` feature needs cyrus-sasl, no
+      Windows support; chalk-protos needs `protoc`), but the gate's *condition* is the one
+      that matters for us: `target_os = "linux"`, true for every Linux wheel including ours.
+    - **The gate doesn't pick out riscv64 — it picks out the same OS upstream already ships
+      Linux wheels for, which is exactly why this isn't a build-portability question.**
+      Chalk AI's own CI can fetch its own private repo to build the x86_64/aarch64/
+      musllinux Linux wheels already on PyPI; a third-party build from a public checkout
+      cannot, on any CPU architecture — riscv64 is not specially blocked, *all* from-source
+      Linux builds outside Chalk AI's own CI are. Gotcha 40/126's "which party's problem is
+      this" framing applies: report the credential wall, not an architecture investigation.
+    - **There is no non-divergent fix.** Patching `self_consumer`/`metrics` out (the only way
+      to drop the private deps, since no feature flag already does it) would ship a
+      `chalk-remote-call-python` wheel missing functionality every other platform's wheel
+      has — the same not-an-equivalent-artifact problem as gotcha 50 (psycopg2) and gotcha
+      670 (ovito), just reached through a git dependency instead of a sibling package name
+      or a submodule boundary.
+    - **The shared `chalk` prefix is coincidence, not relation — check before assuming a
+      sibling.** This repo already carries `chalkpy-rs` and `chalk-viztracer`; both are
+      separate PyPI projects with separate upstream repos, built from entirely different
+      source trees, and neither's status transfers to `chalk-remote-call-python`.
+    - **Verdict: `parked`.** Revisit only if Chalk AI publishes the `chalk-queue`/
+      `chalk_metrics`/`chalk_statsd` source (or a Linux build mode that doesn't need it), or
+      ships a riscv64 wheel themselves.
