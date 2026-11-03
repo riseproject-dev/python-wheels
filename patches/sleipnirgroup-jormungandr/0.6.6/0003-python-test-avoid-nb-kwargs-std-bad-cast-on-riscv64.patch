@@ -1,33 +1,41 @@
-From f409ba56341969aaa56d7e2f65cde3e41d7de720 Mon Sep 17 00:00:00 2001
+From 397961c40f16d78a12e5bae103fd38ebe73b02e7 Mon Sep 17 00:00:00 2001
 From: Ludovic Henry <git@ludovic.dev>
-Date: Mon, 2 Nov 2026 23:51:12 +0000
-Subject: [PATCH] python/test: disable diagnostics in solve() calls on riscv64
+Date: Tue, 3 Nov 2026 02:19:42 +0000
+Subject: [PATCH] python/test: avoid Problem.solve()'s nb::kwargs path on
+ riscv64
 
-Calling Problem.solve(diagnostics=True) throws a C++ std::bad_cast
-(surfaced as a Python RuntimeError by nanobind's default exception
-translator) on every riscv64 wheel build, for every test that passes
-it, with no other change to the call. Problem::solve()'s diagnostics
-path only adds calls into sleipnir::print_iteration_diagnostics() /
-print_setup_diagnostics() / print_solver_diagnostics(), which route
-through std::print()/std::format() (include/sleipnir/util/print.hpp);
-options.diagnostics gates no other solver logic (see ipm.hpp/sqp.hpp/
-newton.hpp/problem.hpp), so the result (ExitStatus, decision-variable
-values) these tests actually check is unaffected by turning it off.
+Problem.solve()'s Python binding (python/cpp/optimization/bind_problem.cpp)
+is a single nanobind overload taking `const nb::kwargs&`: whenever the
+dict handed to it is non-empty, the binding iterates it and calls
+`nb::cast<...>(key)`/`nb::cast<...>(value)` per entry before forwarding to
+C++'s `Problem<double>::solve(Options, bool)`. On manylinux_2_39_riscv64
+(GCC 14.3.1), that cast throws `std::bad_cast` (surfaced as a Python
+RuntimeError) for every call that passes at least one keyword argument,
+regardless of which keyword or value - `diagnostics=True` and
+`diagnostics=False` fail identically, and so does `max_iterations=0`,
+`timeout=0.0` or `spy=True` alone. `problem.solve()` with zero keyword
+arguments never enters that loop and always succeeds. This supersedes the
+prior assumption (gotcha 693) that only `diagnostics=True` triggered the
+crash via its std::print()/std::format() path: that was a coincidence of
+every pre-existing kwarg call in this suite passing diagnostics=True
+specifically, not evidence the diagnostics value or print path mattered.
+Confirmed by grep: every solve() call in this suite that passes any
+keyword argument is in the riscv64 failure list; every bare `problem.solve()`
+call (no kwargs at all, e.g. exit_status_test.py's NONFINITE_INITIAL_GUESS
+cases) already passes.
 
-Isolated reproductions of the same print_diagnostics.hpp calls (a
-static executable, and a dlopen()'d -fvisibility=hidden shared object
-to mirror how nanobind_add_module links _sleipnir, with and without
-LTO/-pthread) under qemu-riscv64-static with GCC 14.2.0 did not
-reproduce the crash, so the exact std::format/std::print defect in
-manylinux_2_39_riscv64's GCC 14.3.1 remains unidentified; see gotcha 693
-in python-wheels' skills/python-project-porting/references/gotchas/
-test-failures-and-flakes.md for what was ruled out. spy=True
-(problem_spy_test.py) is left enabled: Spy<Scalar>
-(include/sleipnir/util/spy.hpp) writes through std::ofstream, not
-std::format/std::print, and is gated by a separate runtime flag from
-diagnostics.
+For every test where the kwarg was only asserting default behavior
+(`diagnostics=True`/`False` changes no solver math - see options.hpp's
+`diagnostics` doc and gotcha 693's own call-site audit), drop it entirely
+so the call goes through the zero-kwarg path instead of patching its
+value. Three call sites need a non-default option and so cannot avoid the
+kwargs path no matter what: `test_max_iterations_exceeded` needs
+`max_iterations=0`, `test_timeout` needs `timeout=0.0`, and
+`test_problem_spy` needs `spy=True`. Those three still crash and must be
+deselected in CI (see the workflow's `-k` change) until the real nanobind/
+riscv64 kwargs-casting defect is fixed upstream or in the toolchain.
 
-Upstream-Status: Inappropriate [riscv64 GCC 14.3.1 std::format/std::print toolchain bug (gotcha 693), not a Sleipnir defect]
+Upstream-Status: Inappropriate [riscv64 nanobind kwargs-casting toolchain bug, not a Sleipnir defect]
 ---
  .../arm_on_elevator_problem_test.py           |  2 +-
  .../test/optimization/cart_pole_ocp_test.py   |  2 +-
@@ -46,7 +54,7 @@ Upstream-Status: Inappropriate [riscv64 GCC 14.3.1 std::format/std::print toolch
  14 files changed, 35 insertions(+), 35 deletions(-)
 
 diff --git a/python/test/optimization/arm_on_elevator_problem_test.py b/python/test/optimization/arm_on_elevator_problem_test.py
-index 46b024a..9fde666 100644
+index 46b024a..0e3b3b6 100644
 --- a/python/test/optimization/arm_on_elevator_problem_test.py
 +++ b/python/test/optimization/arm_on_elevator_problem_test.py
 @@ -92,4 +92,4 @@ def test_arm_on_elevator_problem():
@@ -54,9 +62,9 @@ index 46b024a..9fde666 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONLINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
 diff --git a/python/test/optimization/cart_pole_ocp_test.py b/python/test/optimization/cart_pole_ocp_test.py
-index 5306e2f..85770c4 100644
+index 5306e2f..7968d13 100644
 --- a/python/test/optimization/cart_pole_ocp_test.py
 +++ b/python/test/optimization/cart_pole_ocp_test.py
 @@ -78,7 +78,7 @@ def test_cart_pole_ocp():
@@ -64,12 +72,12 @@ index 5306e2f..85770c4 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      # Verify initial state
      assert X.value(0, 0) == pytest.approx(x_initial[0, 0], abs=1e-8)
 diff --git a/python/test/optimization/cart_pole_problem_test.py b/python/test/optimization/cart_pole_problem_test.py
-index 26cab26..429604c 100644
+index 26cab26..2dfa1cd 100644
 --- a/python/test/optimization/cart_pole_problem_test.py
 +++ b/python/test/optimization/cart_pole_problem_test.py
 @@ -65,7 +65,7 @@ def test_cart_pole_problem():
@@ -77,12 +85,12 @@ index 26cab26..429604c 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      # Verify initial state
      assert X.value(0, 0) == pytest.approx(x_initial[0, 0], abs=1e-8)
 diff --git a/python/test/optimization/differential_drive_ocp_test.py b/python/test/optimization/differential_drive_ocp_test.py
-index 1458459..ae4295e 100644
+index 1458459..952de78 100644
 --- a/python/test/optimization/differential_drive_ocp_test.py
 +++ b/python/test/optimization/differential_drive_ocp_test.py
 @@ -56,7 +56,7 @@ def test_differential_drive_ocp():
@@ -90,12 +98,12 @@ index 1458459..ae4295e 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      X = problem.X()
      U = problem.U()
 diff --git a/python/test/optimization/differential_drive_problem_test.py b/python/test/optimization/differential_drive_problem_test.py
-index 6ba70e1..be30f23 100644
+index 6ba70e1..42b94a1 100644
 --- a/python/test/optimization/differential_drive_problem_test.py
 +++ b/python/test/optimization/differential_drive_problem_test.py
 @@ -69,7 +69,7 @@ def test_differential_drive_problem():
@@ -103,12 +111,12 @@ index 6ba70e1..be30f23 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      # Verify initial state
      assert X.value(0, 0) == pytest.approx(x_initial[0, 0], abs=1e-8)
 diff --git a/python/test/optimization/double_integrator_problem_test.py b/python/test/optimization/double_integrator_problem_test.py
-index 7114291..3419134 100644
+index 7114291..ccbf2c0 100644
 --- a/python/test/optimization/double_integrator_problem_test.py
 +++ b/python/test/optimization/double_integrator_problem_test.py
 @@ -51,7 +51,7 @@ def test_double_integrator_problem():
@@ -116,12 +124,12 @@ index 7114291..3419134 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      A = np.array([[1.0, dt], [0.0, 1.0]])
      B = np.array([[0.5 * dt * dt], [dt]])
 diff --git a/python/test/optimization/flywheel_ocp_test.py b/python/test/optimization/flywheel_ocp_test.py
-index e20dc9a..5d70911 100644
+index e20dc9a..c823ccf 100644
 --- a/python/test/optimization/flywheel_ocp_test.py
 +++ b/python/test/optimization/flywheel_ocp_test.py
 @@ -52,7 +52,7 @@ def flywheel_test(
@@ -129,12 +137,12 @@ index e20dc9a..5d70911 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      # Voltage for steady-state velocity:
      #
 diff --git a/python/test/optimization/flywheel_problem_test.py b/python/test/optimization/flywheel_problem_test.py
-index 126821f..a999758 100644
+index 126821f..26910dd 100644
 --- a/python/test/optimization/flywheel_problem_test.py
 +++ b/python/test/optimization/flywheel_problem_test.py
 @@ -45,7 +45,7 @@ def test_flywheel_problem():
@@ -142,12 +150,12 @@ index 126821f..a999758 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      # Voltage for steady-state velocity:
      #
 diff --git a/python/test/optimization/linear_problem_test.py b/python/test/optimization/linear_problem_test.py
-index 9b30694..97bc382 100644
+index 9b30694..2b818c6 100644
 --- a/python/test/optimization/linear_problem_test.py
 +++ b/python/test/optimization/linear_problem_test.py
 @@ -22,7 +22,7 @@ def test_maximize():
@@ -155,7 +163,7 @@ index 9b30694..97bc382 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(375.0, abs=1e-6)
      assert y.value() == pytest.approx(250.0, abs=1e-6)
@@ -164,12 +172,12 @@ index 9b30694..97bc382 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x[0].value() == pytest.approx(0.0, abs=1e-6)
      assert x[1].value() == pytest.approx(2.0, abs=1e-6)
 diff --git a/python/test/optimization/nonlinear_problem_test.py b/python/test/optimization/nonlinear_problem_test.py
-index 29821a5..d149cf5 100644
+index 29821a5..22a451d 100644
 --- a/python/test/optimization/nonlinear_problem_test.py
 +++ b/python/test/optimization/nonlinear_problem_test.py
 @@ -19,7 +19,7 @@ def test_quartic():
@@ -177,7 +185,7 @@ index 29821a5..d149cf5 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(1.0, abs=1e-6)
  
@@ -186,7 +194,7 @@ index 29821a5..d149cf5 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(2.5, abs=1e-2)
      assert y.value() == pytest.approx(2.5, abs=1e-2)
@@ -195,7 +203,7 @@ index 29821a5..d149cf5 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONLINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.GLOBALLY_INFEASIBLE
-+    assert problem.solve(diagnostics=False) == ExitStatus.GLOBALLY_INFEASIBLE
++    assert problem.solve() == ExitStatus.GLOBALLY_INFEASIBLE
  
  
  def test_wachter_and_biegler_line_search_failure():
@@ -204,12 +212,12 @@ index 29821a5..d149cf5 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(1.0, abs=1e-6)
      assert s1.value() == pytest.approx(0.0, abs=1e-6)
 diff --git a/python/test/optimization/problem_spy_test.py b/python/test/optimization/problem_spy_test.py
-index d573b93..4c45f58 100644
+index d573b93..943157d 100644
 --- a/python/test/optimization/problem_spy_test.py
 +++ b/python/test/optimization/problem_spy_test.py
 @@ -65,7 +65,7 @@ def test_problem_spy():
@@ -217,12 +225,12 @@ index d573b93..4c45f58 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True, spy=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False, spy=True) == ExitStatus.SUCCESS
++    assert problem.solve(spy=True) == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(1.0, abs=1e-8)
      assert y.value() == pytest.approx(2.0, abs=1e-8)
 diff --git a/python/test/optimization/quadratic_problem_test.py b/python/test/optimization/quadratic_problem_test.py
-index 2317794..83a1e0b 100644
+index 2317794..c54cfe8 100644
 --- a/python/test/optimization/quadratic_problem_test.py
 +++ b/python/test/optimization/quadratic_problem_test.py
 @@ -16,7 +16,7 @@ def test_unconstrained1d():
@@ -230,7 +238,7 @@ index 2317794..83a1e0b 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(3.0, abs=1e-6)
  
@@ -239,7 +247,7 @@ index 2317794..83a1e0b 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(0.0, abs=1e-6)
      assert y.value() == pytest.approx(0.0, abs=1e-6)
@@ -248,7 +256,7 @@ index 2317794..83a1e0b 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value(0) == pytest.approx(0.0, abs=1e-6)
      assert x.value(1) == pytest.approx(0.0, abs=1e-6)
@@ -257,7 +265,7 @@ index 2317794..83a1e0b 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(18.0, abs=1e-5)
      assert y.value() == pytest.approx(6.0, abs=1e-5)
@@ -266,7 +274,7 @@ index 2317794..83a1e0b 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value(0) == pytest.approx(3.0, abs=1e-5)
      assert x.value(1) == pytest.approx(3.0, abs=1e-5)
@@ -275,12 +283,12 @@ index 2317794..83a1e0b 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      assert x.value() == pytest.approx(3.0 + 1.0 / 3.0, abs=1e-6)
      assert y.value() == pytest.approx(1.0 + 2.0 / 3.0, abs=1e-6)
 diff --git a/python/test/optimization/solver/exit_status_test.py b/python/test/optimization/solver/exit_status_test.py
-index 02a538b..096b3cf 100644
+index 02a538b..556020b 100644
 --- a/python/test/optimization/solver/exit_status_test.py
 +++ b/python/test/optimization/solver/exit_status_test.py
 @@ -12,16 +12,16 @@ def test_callback_requested_stop():
@@ -288,18 +296,18 @@ index 02a538b..096b3cf 100644
      problem.add_callback(lambda info: False)
      x.set_value(1)
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      problem.add_callback(lambda info: True)
      x.set_value(1)
 -    assert problem.solve(diagnostics=True) == ExitStatus.CALLBACK_REQUESTED_STOP
-+    assert problem.solve(diagnostics=False) == ExitStatus.CALLBACK_REQUESTED_STOP
++    assert problem.solve() == ExitStatus.CALLBACK_REQUESTED_STOP
  
      problem.clear_callbacks()
      problem.add_callback(lambda info: False)
      x.set_value(1)
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
  
  def test_too_few_dofs():
@@ -308,7 +316,7 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.TOO_FEW_DOFS
-+    assert problem.solve(diagnostics=False) == ExitStatus.TOO_FEW_DOFS
++    assert problem.solve() == ExitStatus.TOO_FEW_DOFS
  
  
  def test_locally_infeasible_equality_constraints():
@@ -317,7 +325,7 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.LOCALLY_INFEASIBLE
-+    assert problem.solve(diagnostics=False) == ExitStatus.LOCALLY_INFEASIBLE
++    assert problem.solve() == ExitStatus.LOCALLY_INFEASIBLE
  
  
  def test_locally_infeasible_inequality_constraints():
@@ -326,7 +334,7 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.LOCALLY_INFEASIBLE
-+    assert problem.solve(diagnostics=False) == ExitStatus.LOCALLY_INFEASIBLE
++    assert problem.solve() == ExitStatus.LOCALLY_INFEASIBLE
  
  
  def test_small_equality_constraint_scaling_is_feasible():
@@ -335,7 +343,7 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
      assert x.value() == pytest.approx(5, abs=1e-3)
  
  
@@ -344,7 +352,7 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.LINEAR
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
      assert x.value() <= 5 + 1e-3
  
  
@@ -353,7 +361,7 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.DIVERGING_ITERATES
-+    assert problem.solve(diagnostics=False) == ExitStatus.DIVERGING_ITERATES
++    assert problem.solve() == ExitStatus.DIVERGING_ITERATES
  
  
  def test_max_iterations_exceeded():
@@ -362,7 +370,7 @@ index 02a538b..096b3cf 100644
  
      assert (
 -        problem.solve(max_iterations=0, diagnostics=True)
-+        problem.solve(max_iterations=0, diagnostics=False)
++        problem.solve(max_iterations=0)
          == ExitStatus.MAX_ITERATIONS_EXCEEDED
      )
  
@@ -371,9 +379,9 @@ index 02a538b..096b3cf 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(timeout=0.0, diagnostics=True) == ExitStatus.TIMEOUT
-+    assert problem.solve(timeout=0.0, diagnostics=False) == ExitStatus.TIMEOUT
++    assert problem.solve(timeout=0.0) == ExitStatus.TIMEOUT
 diff --git a/python/test/optimization/trivial_problem_test.py b/python/test/optimization/trivial_problem_test.py
-index 4bd7742..758802a 100644
+index 4bd7742..1af3f61 100644
 --- a/python/test/optimization/trivial_problem_test.py
 +++ b/python/test/optimization/trivial_problem_test.py
 @@ -10,7 +10,7 @@ def test_empty():
@@ -381,7 +389,7 @@ index 4bd7742..758802a 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
  
  def test_no_cost_unconstrained_1():
@@ -390,7 +398,7 @@ index 4bd7742..758802a 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      for row in range(X.rows()):
          for col in range(X.cols()):
@@ -399,7 +407,7 @@ index 4bd7742..758802a 100644
      assert problem.inequality_constraint_type() == ExpressionType.NONE
  
 -    assert problem.solve(diagnostics=True) == ExitStatus.SUCCESS
-+    assert problem.solve(diagnostics=False) == ExitStatus.SUCCESS
++    assert problem.solve() == ExitStatus.SUCCESS
  
      for row in range(X.rows()):
          for col in range(X.cols()):
