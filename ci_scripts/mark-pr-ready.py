@@ -44,7 +44,7 @@ from github.WorkflowRun import WorkflowRun
 
 REPOSITORY = "riseproject-dev/python-wheels"
 PASSING_CONCLUSIONS = {"success", "skipped"}
-MERGE_REJECTED_STATUSES = {405, 409, 422}
+MERGE_REJECTED_STATUSES = {403, 405, 409, 422}
 
 
 def convert_to_draft(token: str, pr: PullRequest) -> None:
@@ -137,9 +137,9 @@ def sync_pull_request(
                     result = pr.merge(merge_method="squash", sha=pr.head.sha)
                 except GithubException as exc:
                     # GitHub answers 405 when the PR cannot be merged (e.g. merge
-                    # conflicts), 409 when its head moved since we looked, and
-                    # 422 for other validation failures.  These affect only this
-                    # PR, so report them and carry on with the rest.
+                    # conflicts), 409 when its head moved since we looked, 422 for other
+                    # validation failures and 403 when the token may not merge it.  These
+                    # affect only this PR, so report them and carry on with the rest.
                     if exc.status not in MERGE_REJECTED_STATUSES:
                         raise
                     message = (

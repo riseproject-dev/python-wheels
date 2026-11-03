@@ -81,8 +81,20 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # pandas/pyarrow riscv64 wheels only exist on our own registry.
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # The [dbapi] test install pulls pandas; PyPI's newest pandas has no
+          # riscv64 wheel and its sdist fails to build (meson/xsimd), so install it
+          # wheel-only, with the registry visible, and let pip back off to a release
+          # that has one. CIBW_ENVIRONMENT does not reach the test stage.
+          # The registry has no free-threaded (cp314t) pandas wheel at all, so that
+          # leg cannot go wheel-only: it caps pandas below 3.1 instead (the 3.1 sdist
+          # is the one that fails to build) and builds the 3.0 sdist, as 1.12.0 did.
+          # The cap has to reach the `wheel[dbapi]` install itself, which runs before
+          # CIBW_TEST_REQUIRES and would otherwise pick pandas 3.1: a pip constraints
+          # file, written by before-test (which runs ahead of that install).
+          CIBW_BEFORE_TEST: ${{ matrix.python == 'cp314t' && 'echo "pandas<3.1" > /tmp/pandas-constraint.txt' || '' }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.python == 'cp314t' && 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_CONSTRAINT=/tmp/pandas-constraint.txt' || 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas' }}
           CIBW_TEST_EXTRAS: dbapi
-          CIBW_TEST_REQUIRES: pytest>=9
+          CIBW_TEST_REQUIRES: ${{ matrix.python == 'cp314t' && 'pytest>=9 pandas<3.1' || 'pytest>=9' }}
           CIBW_TEST_SOURCES: python/adbc_driver_manager/tests python/adbc_driver_manager/pyproject.toml
           # Mirrors upstream's own python_util.sh test_packages(): the driver_manager
           # wheel ships no actual drivers, so its "sqlite"-marked tests (which dynamically

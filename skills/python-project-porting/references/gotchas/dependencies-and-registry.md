@@ -526,8 +526,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     variable names gotcha 30 and friends use everywhere else in this repo, because most
     other test steps run inside cibuildwheel's `CIBW_TEST_ENVIRONMENT`, which shells out to
     plain `pip` and does read them. `uv`'s pip-compatible subcommand does not: it reads
-    `UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, and `UV_ONLY_BINARY` instead (`uv help pip
-    install` lists the `[env: UV_…]` name for every pip-shaped flag). With the `PIP_*` names
+    `UV_EXTRA_INDEX_URL` and `UV_INDEX_STRATEGY` instead. With the `PIP_*` names
     unrecognized, uv silently fell back to its defaults — default index only (public PyPI,
     no riscv64 wheels), no only-binary restriction — resolved `pyarrow==25.0.1` against
     PyPI's sdist, and source-built it. pyarrow's sdist needs the real Apache Arrow C++
@@ -539,21 +538,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     registry already had the exact riscv64 wheel needed
     (`pyarrow-25.0.1-cp312-cp312-manylinux_2_39_riscv64.whl`); it was simply never
     consulted.
-    - **The fix is renaming the three vars, not touching indexes or CMake.** Swap to
-      `UV_EXTRA_INDEX_URL` / `UV_ONLY_BINARY`, and add `UV_INDEX_STRATEGY:
-      unsafe-best-match` alongside them — uv's default `first-index` strategy stops at
-      the first index that lists the package *name* at all (here, PyPI, which lists
-      pyarrow but not a riscv64 build of it) and never reaches a second index for a
-      platform-specific wheel, the same reasoning build-matplotlib.yml's and
-      build-onnx.yml's `env:` blocks already document for their own `uv pip install`/
-      `uv pip download` steps.
+    - **CORRECTION (gotcha 678 found this the hard way on the kyrax port): `UV_ONLY_BINARY`
+      is NOT a real env var — it is a silent no-op.** This entry originally claimed `uv help
+      pip install` lists an `[env: UV_…]` binding "for every pip-shaped flag," and told
+      readers to rename `PIP_ONLY_BINARY` to `UV_ONLY_BINARY`. That is wrong for uv 0.11.32
+      and 0.13.6 (verified empirically: setting `UV_ONLY_BINARY=<pkg>` has zero effect on
+      resolution across repeated dry-runs, while the `--only-binary <pkg>` CLI flag
+      correctly rejects/backtracks). The index-related flags this entry also mentions
+      (`--extra-index-url` → `UV_EXTRA_INDEX_URL`, `--index-strategy` → `UV_INDEX_STRATEGY`)
+      **do** have working env bindings — only the build-control flags (`--only-binary`,
+      `--no-binary`, `--no-build`) don't. So the real fix for daft's own "Test wheel" step
+      is `UV_EXTRA_INDEX_URL` + `UV_INDEX_STRATEGY: unsafe-best-match` as env, **plus**
+      `--only-binary numpy,pandas,pyarrow` passed on the `uv pip install` command line
+      itself, not as a step `env:` entry. See gotcha 678 for the verification method and
+      for auditing other workflows that may have copied the now-corrected (wrong) guidance.
     - **Any bare `uv pip install`/`uv pip download` step is a signal to check this** —
       not just ones added fresh. cibuildwheel-driven steps (`CIBW_TEST_ENVIRONMENT`,
       `CIBW_ENVIRONMENT`) are unaffected since those still shell out to `pip`; the risk is
       specifically a workflow step that invokes `uv` directly (`setup-uv` + `uv pip
       install`, as build-daft.yml's and build-polars-runtime.yml's "Test wheel" steps do)
       and reuses the `PIP_*` names out of habit from the cibuildwheel case elsewhere in
-      the same file.
+      the same file — or, per gotcha 678, sets the build-control flags as `UV_*` env vars
+      believing (as this entry used to claim) that uv reads them there.
 
 291. **A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
     `PIP_ONLY_BINARY` for packages you never named, because *its* runtime deps are the ones
@@ -1025,3 +1031,115 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     - **Not image skew.** Each job pulls the image once in its own step, and the later
       `docker run` reuses the local copy without re-pulling. A floating tag cannot change
       between a job's build step and its test step, so pinning a digest does not fix this.
+
+678. **`UV_ONLY_BINARY` (and `UV_NO_BINARY`/`UV_NO_BUILD`) are not real `uv` env vars —
+    setting them is a silent no-op, unlike `UV_EXTRA_INDEX_URL`/`UV_INDEX_STRATEGY`, which
+    do work (corrects gotcha 244's own fix; the kyrax case).** Gotcha 244 told readers to
+    rename a `PIP_ONLY_BINARY` step `env:` entry to `UV_ONLY_BINARY` when a workflow invokes
+    `uv pip install` directly instead of going through cibuildwheel. That advice does not
+    work: verified empirically against real `uv` binaries (0.11.32 and 0.13.6) that setting
+    `UV_ONLY_BINARY=<pkg>` has zero effect on dependency resolution across repeated
+    dry-runs, while passing `--only-binary <pkg>` on the `uv pip install` command line
+    itself correctly rejects/backtracks a no-wheel-available package instead of silently
+    falling through to an sdist build. Reproduced the exact failure and the fix with
+    `uv pip install --python-platform riscv64-unknown-linux --python-version 3.14 pillow`
+    against the real `pypi.riseproject.dev` + public-PyPI indexes: without `--only-binary`
+    it resolves PyPI's latest (sdist-only on riscv64) and tries to build it from source
+    (failing on missing system headers, e.g. libjpeg); with it, it correctly backtracks to
+    whatever riscv64 wheel this registry actually has.
+    - **Only the build-control flags are unsupported as env vars — the index flags work
+      fine.** `--extra-index-url` → `UV_EXTRA_INDEX_URL` and `--index-strategy` →
+      `UV_INDEX_STRATEGY` are genuine, working bindings (gotcha 244's other half is
+      correct); it is specifically `--only-binary`/`--no-binary`/`--no-build` that uv's
+      `[env: UV_…]` documentation implies exist but don't actually take effect.
+    - **The fix is putting `--only-binary <pkgs>` on the command line, not in `env:`.**
+      Keep `UV_EXTRA_INDEX_URL`/`UV_INDEX_STRATEGY: unsafe-best-match` as step `env:` (those
+      still work), and move the only-binary constraint onto the actual `uv pip install ...`
+      invocation as a CLI flag.
+    - **This means build-daft.yml itself — gotcha 244's own motivating example — may still
+      have the exact bug that gotcha was written to fix**, since its "Test wheel" step sets
+      `UV_ONLY_BINARY` as `env:` rather than passing `--only-binary` on the command line.
+      Any other workflow that copied gotcha 244's old (wrong) guidance has the same latent
+      gap: a silently-ignored only-binary constraint that lets a version-skewed or
+      riscv64-wheel-less dependency fall through to an sdist build, which may or may not
+      fail depending on whether the manylinux image happens to carry that dependency's
+      native toolchain. Worth a dedicated audit pass over every workflow using
+      `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` as a step/job `env:` key.
+
+709. **A `CIBW_TEST_REQUIRES` extra's compiled half can be the one thing missing a cp314t
+    wheel everywhere, while the plain package underneath it is pure Python and installs
+    fine (the pgtask/psycopg[binary] case).** Gotcha 149 is the shape one level up: there
+    the *package under test's own runtime dependency* has no free-threaded wheel on any
+    architecture, so the honest move is to build and skip only the tests. Here the blocking
+    distribution is not a hard runtime dependency at all — pgtask's wheel depends on plain
+    `psycopg>=3.2` (which ships `py3-none-any`, so it is free-threading-agnostic), and only
+    the *test venv's* `CIBW_TEST_REQUIRES` asked for the `[binary]` extra, pulling in
+    `psycopg-binary`. That sibling distribution has never published a `cp314t` wheel for
+    any platform (checked through 3.3.6), so pip backtracks every release trying to satisfy
+    it and dies with `ResolutionImpossible` — *after* the wheel itself had already built,
+    been repaired, and installed cleanly, inside the plain `pip install <test deps>` step,
+    on the free-threaded job only (the same tell gotcha 55/97 give for a test dependency
+    gone wrong, but the failure text here is a dependency-resolution conflict, not a build
+    backend traceback, because `psycopg-binary` is a normal wheel-only PyPI distribution).
+    - **Confirm the gap is in the extra, not the base package, before changing anything**:
+      read the base distribution's own `Requires-Dist`/`info.requires_dist` and the
+      sibling's PyPI JSON file list side by side. `psycopg` core is `py3-none-any` back to
+      3.1; `psycopg-binary` (checked via `{u['filename'].split('-')[2] for u in
+      releases[ver]}`) tops out at `cp315`/`cp314`, never `cp314t`. The project's own test
+      suite only needs to matter here: grep it for anything that pins to the C
+      implementation (`psycopg.pq.__impl__`, a direct `psycopg_c`/`psycopg_binary` import);
+      finding none means the pure-Python fallback is enough to run the real suite, not a
+      reason to skip it.
+    - **Fix by driving `CIBW_TEST_REQUIRES` from the matrix, the way gotcha 97 drives a
+      version pin**, so only the `cp314t` leg drops the extra and every other leg still
+      matches upstream's own test/dev dependency group unchanged:
+      ```yaml
+      include:
+        - tag: cp310-abi3
+          test_requires: pytest anyio 'psycopg[binary]'
+        - tag: cp314t
+          test_requires: pytest anyio psycopg
+      ...
+          CIBW_TEST_REQUIRES: ${{ matrix.test_requires }}
+      ```
+      This keeps the `cp314t` entry buildable *and* fully tested (unlike gotcha 149's
+      skip-the-tests shape, which this package never needed), and it is a one-line,
+      upstream-explainable deviation rather than a matrix-wide downgrade to the slower
+      pure-Python driver on every interpreter.
+    - **Don't reach for gotcha 511's "drop `cp314t`" instead** — that gotcha is for a
+      dependency named in the *wheel's own* `Requires-Dist`, where no pin or test-skip can
+      help because `pip install <your wheel>` itself cannot complete anywhere. A
+      test-only extra has a real escape hatch: stop asking for the extra.
+
+701. **`ci_scripts/check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
+    actually fully hosted on riscv64 — the failure is pip hitting transient proxy/network
+    flakiness in this sandbox, not a real registry gap, and the script's own output tells
+    you which (the async-tiff/rasterio case).** Triaging async-tiff, `check_riscv64_deps.py
+    --python 313 314 314t -- rasterio` printed `UNRESOLVABLE` for every interpreter, which
+    at a glance reads exactly like gotcha 84/149's "dependency missing on riscv64" shape —
+    rasterio is a heavy wheel (bundles GDAL) and would be a plausible registry gap to park
+    a test matrix on. It wasn't one: the script's own error text underneath each
+    `UNRESOLVABLE` line read `note: This is an issue with network connectivity, not pip. /
+    hint: Use --resume-retries to configure resume attempt limit.` — pip's own hint for a
+    dropped/stalled download, not a resolver conflict — and it reproduced identically on
+    three immediate retries. A direct `curl pypi.riseproject.dev/simple/rasterio/` (no pip,
+    no retries, no download) immediately showed real `rasterio-1.5.2-cp31{2,3,4}-...-
+    riscv64.whl` and `cp314-cp314t-...riscv64.whl` files already hosted, and
+    `docs/packages/rasterio.yaml` confirms the same set was already published. The actual
+    gap the script was built to catch (gotcha 84) produces a *different*, resolver-shaped
+    error (`ERROR: Exception:` with no further note, or an explicit "no matching
+    distribution"), not this network hint.
+    - **Before trimming a matrix or skipping tests on an `UNRESOLVABLE` verdict, read the
+      text under it.** `note: This is an issue with network connectivity, not pip` (or any
+      `--resume-retries`/timeout/connection-reset wording) means retry or verify by another
+      path, not "the dependency is missing" — a bare `ERROR: Exception:`/"no matching
+      distribution" with no network note is the real signal gotcha 84/149 act on.
+    - **The cheap second opinion is `curl -sS https://pypi.riseproject.dev/simple/<dep>/ |
+      grep <interpreter-tag>`** (gotcha 30/353's check, one dependency at a time) — no pip,
+      no resolver, no retry budget, and it is what actually settled this case in seconds
+      after three identical script retries didn't.
+    - Heavier/larger wheels (GDAL-bundling rasterio here; anything with a multi-hundred-MB
+      riscv64 wheel is the same risk) are more exposed to this than small pure-Python
+      wheels, simply because there is more download to interrupt — treat a verdict change
+      from "ok" to "UNRESOLVABLE" on exactly the heaviest dependency in a batch, with no
+      corresponding registry change, as a flakiness signal rather than a gap.

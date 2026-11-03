@@ -30,10 +30,6 @@ permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # The release workflow tags first and commits the version bump afterwards, so
-  # the v3.14.5 tag still reads 3.14.4; this is "chore: bump version to v3.14.5",
-  # whose tree matches the 3.14.5 PyPI sdist. Update alongside STRONGTYPING_VERSION.
-  STRONGTYPING_REF: 0d92e98db40276615786220bb7f9d5534b5be2e4
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -58,12 +54,34 @@ jobs:
       STRONGTYPING_VERSION: ${{ matrix.version }}
 
     steps:
+      # The release workflow tags first and commits the version bump afterwards, so
+      # the vX.Y.Z tag still reads the previous version; each commit below is the
+      # one whose tree matches that version's PyPI sdist (3.14.5: "chore: bump
+      # version to v3.14.5"; 3.14.6: the "updated project version to 3.14.6"
+      # commit, no tag). Add a line for every new version in docs/packages/strongtyping.yaml.
+      - name: Resolve source commit for ${{ env.STRONGTYPING_VERSION }}
+        id: src
+        run: |
+          case "$STRONGTYPING_VERSION" in
+            3.14.5) ref=0d92e98db40276615786220bb7f9d5534b5be2e4 ;;
+            3.14.6) ref=bf4d8276a605bd99dbfe377f1a7d9b51c2f73f7a ;;
+            *) echo "::error::No upstream commit recorded for strongtyping $STRONGTYPING_VERSION; add it to this case statement"; exit 1 ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout FelixTheC/strongtyping ${{ env.STRONGTYPING_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: FelixTheC/strongtyping
-          ref: ${{ env.STRONGTYPING_REF }}
+          ref: ${{ steps.src.outputs.ref }}
           persist-credentials: false
+
+      - name: Check the checked-out source declares ${{ env.STRONGTYPING_VERSION }}
+        run: |
+          declared=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)
+          if [ "$declared" != "$STRONGTYPING_VERSION" ]; then
+            echo "::error::pyproject.toml declares '$declared' but building $STRONGTYPING_VERSION"; exit 1
+          fi
 
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0

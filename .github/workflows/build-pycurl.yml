@@ -153,10 +153,19 @@ jobs:
           # paramiko's cryptography/bcrypt deps have no riscv64 wheel below cp312;
           # fall back to the rest of the dev requirements so its sftp tests, which are
           # pytest.importorskip'd, skip instead of failing metadata generation.
+          # 7.49.0 replaced requirements-dev.txt with a `test` dependency group in
+          # pyproject.toml (`pip install --group test`); older releases still ship the file.
           CIBW_BEFORE_TEST_LINUX: >-
-            pip install flake8 -r {package}/requirements-dev.txt ||
-            { grep -v '^paramiko' {package}/requirements-dev.txt > /tmp/requirements-dev.txt &&
-              pip install flake8 -r /tmp/requirements-dev.txt; } &&
+            if [ -f {package}/requirements-dev.txt ]; then
+              pip install flake8 -r {package}/requirements-dev.txt ||
+              { grep -v '^paramiko' {package}/requirements-dev.txt > /tmp/requirements-dev.txt &&
+                pip install flake8 -r /tmp/requirements-dev.txt; };
+            else
+              pip install flake8 --group {package}/pyproject.toml:test ||
+              { pip install tomli &&
+                python -c "import tomli; print(*[r for r in tomli.load(open('{package}/pyproject.toml', 'rb'))['dependency-groups']['test'] if not r.startswith('paramiko')], sep='\n')" > /tmp/requirements-test.txt &&
+                pip install flake8 -r /tmp/requirements-test.txt; };
+            fi &&
             make -C {package}/tests/fake-curl/libcurl
           CIBW_TEST_COMMAND: pytest -v -ra {project}/tests
 

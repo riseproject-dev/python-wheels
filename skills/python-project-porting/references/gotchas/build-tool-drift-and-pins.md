@@ -30,6 +30,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **658** — A Cython extension that `cimport numpy` and names a flag numpy 2 dropped from
   `__init__.pxd` (`np.NPY_OWNDATA`) still *compiles* — Cython falls back to a Python attribute
   lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
+- **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
+  path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
+- **682** — `build-system.requires` can carry packages that only enable an optional runtime
+- **689** — A monorepo's sibling Go-binary packages can each pin the same custom build tool
+  feature the wheel being built does not even ship — on riscv64 that is still a doomed
+  from-source build, not a no-op (the eclipse-sumo case).
+- **698** — A distro-apt `swig` can be too *old* for the target CPython, failing cp314 and
+  cp314t identically with no free-threading angle at all (the ufal.udpipe case).
 
 ---
 
@@ -691,3 +699,115 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       (ppwwyyxx/cocoapi) already carries the identical fix; forks of the same file rarely do.
     - Reproduces on x86_64 in a minute — `pip wheel --no-build-isolation` against numpy 2
       in a venv, then call `mask.decode(mask.encode(m))`.
+
+663. **setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` — `ValueError:
+    Version file path must be relative, got absolute: …` from `build_py` (the pyarrow 16.1.0
+    case; see `build-pyarrow.yml`).** Older `setup.py`s commonly build the path from their own
+    location, e.g. pyarrow ≤ 16's `use_scm_version={'root': os.path.dirname(setup_dir),
+    'write_to': os.path.join(setup_dir, 'pyarrow/_generated_version.py')}` with
+    `setup_dir = os.path.abspath(...)`. Traceback: `_integration/build_py.py` `run` →
+    `_write_version_files` → `_is_inside_package` → `_sanitize_relative_path`. Same family as
+    gotchas 29/588 — a build dep left unpinned on an old release's `--no-isolation` build
+    drifts past the API that release was written against.
+    - **Boundary, bisected from the wheels**: 9.2.2 (and 8.x) has no `build_py` integration;
+      `_integration/dump_version.py` explicitly accepts an absolute `write_to` under `root`
+      (`write_to.relative_to(root)` → `target = write_to`). 10.0.5 adds the `build_py`
+      mixin but still just does `build_lib / relative_path` (pathlib keeps the absolute
+      side). 10.1.1 is the first release containing `_sanitize_relative_path`; 10.1.x–10.3.4
+      all fail. A ten-line `setup.py` with that `use_scm_version` dict plus `setup.py
+      build_py` against setuptools 81 reproduces it on x86_64: 9.2.2/10.0.5 pass, 10.1.2/10.3.4
+      fail with the identical message.
+    - **`SETUPTOOLS_SCM_PRETEND_VERSION*` does not help** — it skips the git lookup, not the
+      version-file write.
+    - Fix: pin `setuptools_scm<10` (resolves 9.2.2, the pre-`build_py` codepath the release
+      was written against) next to the other build-dep pins. A project-specific prefix knob
+      also works when one exists — pyarrow's `SETUPTOOLS_SCM_VERSION_WRITE_TO_PREFIX=python`
+      makes `write_to` relative to `root` and 10.3.4 then builds clean (the file still lands
+      in `build_lib`, copied as an ordinary package module) — but that is per-project, while
+      the pin is the generic answer. Upstreams that moved to `[tool.setuptools_scm]
+      version_file = '<pkg>/...'` (pyarrow 25.0.1's scikit-build-core `pyproject.toml`)
+      never hit it.
+
+682. **`build-system.requires` can carry packages that only enable an optional *runtime*
+    feature the wheel being built does not even ship — on riscv64 that is still a doomed
+    from-source build, not a no-op (the eclipse-sumo case; see `build-eclipse-sumo.yml`).**
+    eclipse-sumo's `pyproject.toml` lists `lxml`, `numpy`, `pandas` and `matplotlib` in
+    `[build-system] requires` with upstream's own comment: "all dependencies below (except
+    for scikit) are just to enable the tool detection in netedit" — a GUI tool this port's
+    `CHECK_OPTIONAL_LIBS=OFF`/`ENABLE_FOX=OFF` configuration excludes from the wheel
+    entirely (confirmed by grepping the checkout: nothing under `tools/build_config/sumo`,
+    the only subtree this wheel packages, imports any of the four). None of the four have a
+    riscv64 wheel on PyPI, so PEP 517 build isolation source-builds the whole stack before
+    `scikit-build-core` ever runs, and it dies two hours in — `numpy`/`pandas`/`matplotlib`/
+    `contourpy` all build fine, but matplotlib's own dependency **Pillow** does not:
+    `RequiredDependencyException: jpeg` / "The headers or library files could not be found
+    for jpeg" — because this workflow's `CIBW_BEFORE_ALL_LINUX` deliberately skips upstream's
+    `install_dependencies.sh` (which installs `libjpeg-turbo-devel` for the GUI/FOX leg we
+    don't build).
+    - **The fix is not "install `libjpeg-turbo-devel`"** — that would make a multi-hour
+      from-source build of numpy/pandas/matplotlib/Pillow succeed just to throw the result
+      away unused, and adds a GUI-only system package to a headless build for a feature this
+      wheel cannot expose. The narrow fix is a patch dropping the unused entries down to
+      `requires = ["scikit-build-core>=0.10"]` (`patches/eclipse-sumo/1.28.0/`,
+      `Upstream-Status: Inappropriate` — riscv64-only, since x86_64/aarch64/mac/win all have
+      prebuilt wheels for the four and never hit this).
+    - **Check what a `build-system.requires` entry is actually *for* before patching around
+      its absence.** `[project] dependencies` (the wheel's real runtime deps) is the
+      authoritative list; an entry only in `[build-system] requires` with no matching
+      CMake/scikit-build-core usage (`grep` the checkout's `CMakeLists.txt`/`cmake/` for the
+      package name) is either a genuine build-time tool or, as here, upstream copying its
+      full-GUI-build dependency list into every configuration regardless of what that
+      configuration ships.
+    - Same family as gotcha 422 (a from-source build dying on Pillow), but a different root
+      cause: 422 is a missing `PIP_EXTRA_INDEX_URL` on the build container; this is an
+      upstream `requires` entry that is simply dead weight for the wheel shape being built.
+
+689. **A monorepo's sibling Go-binary packages can each pin the same custom build tool
+    independently — fixing one project's `pyproject.toml` for riscv64 does not fix its
+    siblings' (the onyx-devtools-audit case).** onyx-devtools (`tools/ods`) and
+    onyx-devtools-audit (`tools/ods-audit`) share one `hatch_build.py` build hook — the
+    latter's `pyproject.toml` points `[tool.hatch.build.targets.wheel.hooks.custom].path` at
+    `../ods/hatch_build.py` next door — that asks `manygo.is_goos()`/`is_goarch()` for the
+    wheel's platform tag from `GOOS`/`GOARCH`. onyx-devtools already needed manygo bumped
+    0.2.0 -> 0.3.0 for `is_goarch("riscv64")` to return true at all (otherwise hatchling
+    silently falls back to the build host's own interpreter-specific tag for a wheel that
+    holds a riscv64 binary), patched in `patches/onyx-devtools/0.13.0/`. But
+    `[build-system] requires` is read from each project's **own** `pyproject.toml`, resolved
+    into a separate PEP 517-isolated build environment per project — a shared build *hook*
+    (the Python code) does not imply a shared build *environment*. onyx-devtools-audit's own
+    `tools/ods-audit/pyproject.toml` still pinned `manygo==0.2.0` at the exact same upstream
+    tag, and needed the identical bump applied a second time, to a second file, in a second
+    `patches/<pkg>/<version>/` directory, even though the first fix had already landed and
+    the shared hook's code was already proven correct.
+    - **Check every sibling package's own `[build-system] requires` for a shared custom
+      build hook's pinned tool**, even when the hook's source file is known-good for
+      riscv64 already — the fix does not travel with the hook.
+
+698. **A distro-apt `swig` can be too *old* for the target CPython, not too new —
+    `build-cgal.yml`/`build-lalsuite.yml` each pin `swig` down because the image's default
+    is too *new* for their old typemaps, but here it is the reverse, and it fails cp314 and
+    cp314t identically with no free-threading angle at all (the ufal.udpipe case).**
+    `swig -builtin` mode generates a static `PyHeapTypeObject` initializer that hardcodes the exact field layout of that
+    struct as of the SWIG release's own knowledge of CPython. CPython 3.14 added two fields
+    to it (`ht_token`, and the trailing getitem-cache struct's `init`); SWIG 4.2.0 — what
+    `apt-get install swig` gives on `ubuntu-latest` — predates that and still emits the
+    pre-3.14 layout. The resulting aggregate initializer is two entries short, so the
+    compiler folds the next real member's brace-list into the `void*` slot that used to be
+    the struct's end, erroring `cannot convert '<brace-enclosed initializer list>' to
+    'void*' in initialization` on every `-builtin`-wrapped class's closing `};` — ufal.udpipe
+    hit this ~20 times, once per class SWIG wraps. It fails byte-for-byte identically on
+    cp314 and cp314t (both expose the same public struct; this is a CPython-version gap, not
+    a free-threading safety problem), so **do not drop cp314t from the matrix for this** —
+    confirm first by diffing the generated `.cpp` around the failing line against a newer
+    SWIG's output (`swig -O -c++ -outcurrentdir -python -builtin <pkg>.i`, run twice with
+    `SWIG_LIB` pointed at each version's `share/swig/<ver>/python`) before assuming free
+    threading is the culprit. The fix is a newer SWIG, not a patch to the generated code:
+    pin a PyPI `swig` wheel new enough to know about 3.14 (`>=4.4.0`; `4.3.1.post0` — what
+    `build-lalsuite.yml` already pins for the *opposite* kind of drift — still lacks it)
+    instead of whatever the OS repo ships, the same `pipx install "swig==<ver>"` pattern
+    `build-cgal.yml` and `build-lalsuite.yml` already use. Where SWIG actually runs on a
+    plain `ubuntu-latest` job rather than inside the manylinux container (as for a
+    self-contained sdist generated ahead of the riscv64 build, see `build-ufal-udpipe.yml`),
+    there is no existing pipx venv to patch in place — `pipx install` a fresh one and prepend
+    its bin dir to `$GITHUB_PATH` so the later step that invokes a bare `swig` picks it up
+    ahead of apt's.

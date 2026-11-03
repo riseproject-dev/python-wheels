@@ -2,8 +2,7 @@
 
 Merging pushes the pending `- version:` entry to `main`, and the workflow's `push` trigger
 builds and publishes it — **do not dispatch anything**. Four steps remain, all scriptable —
-`.git/pw-postmerge.py <pr> <pkg>` does them and is idempotent (`--no-trigger` is now the only
-mode that makes sense):
+`uv run ci_scripts/package-postmerge.py <pr> <pkg>` does them and is idempotent:
 
 1. **Check the publish**: `gh run list --workflow build-<pkg>.yml --branch main --limit 3`
    must show the `push` run; when it is green, the package PR (`package/<pkg>`, titled

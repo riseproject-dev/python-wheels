@@ -78,20 +78,27 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # 4.2.12 opts into the limited API through PIPDEPTREE_ABI3=1 (meson.build) instead of
+          # the cp315 cibuildwheel override earlier releases carried in pyproject.toml; the
+          # variable is simply ignored by those, whose override still applies.
           # The checkout carries no git history, so tools/version.py can't derive the version
           # from tags; PIPDEPTREE_VERSION is the override switch upstream's own CI uses for the
           # same reason (a container build over a checkout it doesn't own).
           CIBW_ENVIRONMENT_LINUX: >-
             PATH=$HOME/.cargo/bin:$PATH
             PIPDEPTREE_VERSION=${{ env.PIPDEPTREE_VERSION }}
+            PIPDEPTREE_ABI3=${{ matrix.python == 'cp315' && '1' || '0' }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # --graph-output/--output=graphviz-* shell out to the `dot` binary.
           CIBW_BEFORE_TEST_LINUX: dnf -y install graphviz
           # pytest-cov pulls in coverage: test_render_explicit_extras renders pluggy's
           # "testing" extra, which lists coverage as a requirement. pluggy 1.7.0 dropped
           # its extras, so older pipdeptree tests need an earlier pluggy.
-          CIBW_TEST_REQUIRES: pytest pytest-cov pluggy<1.7
-          CIBW_TEST_SOURCES: tests docs
+          # pytest-mock supplies the `mocker` fixture tests/tools/test_release.py uses.
+          CIBW_TEST_REQUIRES: pytest pytest-cov pytest-mock pluggy<1.7
+          # tests/tools/ (new in 4.2.10) imports the tools package (tools/release.py,
+          # tools/check_release_wheels.py), which has to be staged next to the tests.
+          CIBW_TEST_SOURCES: tests docs tools
           # tests/test_build_version.py (new after 4.2.3) reads build.rs/tools/version.py off the
           # project root and a scratch git repo to check the version-derivation tooling itself;
           # CIBW_TEST_SOURCES stages only tests/docs, so it has no wheel behavior to verify here.

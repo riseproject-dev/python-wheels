@@ -71,10 +71,15 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Upstream's build[uv] frontend asserts a host uv in the audit step.
           CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-          # click 8.5 makes get_text_stream untyped, so mypyc rejects djlint's source.
+          # --no-isolation makes `build` check the mypyc hook's dependencies against what is
+          # installed, and since 1.47.1 upstream pins them exactly (hatch-mypyc, click, mypy, ...:
+          # the wheels are compiled against those versions), so install exactly the pins the
+          # checkout declares. (Before 1.47.1 the list was unpinned, and click 8.5 made
+          # get_text_stream untyped so mypyc rejected djlint's source: those versions need
+          # "click<8.5" on top.)
           CIBW_BEFORE_BUILD: >-
-            pip install hatchling hatch-mypyc "click<8.5" cssbeautifier jsbeautifier
-            json5 types-pyyaml types-regex typing-extensions
+            python -c "import tomllib; print(*tomllib.load(open('pyproject.toml', 'rb'))['tool']['hatch']['build']['targets']['wheel']['hooks']['mypyc']['dependencies'], sep='\n')" > /tmp/mypyc-requirements.txt
+            && pip install hatchling -r /tmp/mypyc-requirements.txt typing-extensions
           # Restates upstream's [tool.cibuildwheel] environment, which this replaces.
           CIBW_ENVIRONMENT: >-
             HATCH_BUILD_HOOK_ENABLE_MYPYC=1
@@ -93,7 +98,10 @@ jobs:
           # cibuildwheel errors out on a missing test source, so it is only
           # listed for the other versions. The non-empty value must sit in the
           # && branch because an empty string is falsy in `a && '' || b`.
-          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml docs README.md src/djlint/rules.yaml src/djlint/settings.py ${{ matrix.version != '1.46.5' && 'LICENSE-THIRD-PARTY' || '' }}
+          # uv.lock is read from the working directory by
+          # test_mypyc_dependencies_match_the_lock (new in 1.47.1), which compares the
+          # mypyc pins against the lock; every tag ships it.
+          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml uv.lock docs README.md src/djlint/rules.yaml src/djlint/settings.py ${{ matrix.version != '1.46.5' && 'LICENSE-THIRD-PARTY' || '' }}
           # Upstream never tests its wheels; run the suite its CI runs.
           # The import assert catches a silently-uncompiled (pure-Python) wheel.
           #
