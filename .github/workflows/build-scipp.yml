@@ -78,16 +78,17 @@ jobs:
         run: git apply python-wheels/patches/scipp/${{ env.SCIPP_VERSION }}/00*.patch
 
       # pyproject.toml's build-system.requires pins pybind11 to no version at all, so
-      # pip resolves whatever is newest at build time. pybind11 3.x changed overload
-      # resolution for a plain Python int against overloads of (double, int64_t)
-      # registered in that order (as scipp's bind_operators.h does for Variable's
-      # scalar arithmetic): 2.x picks int64_t, 3.x now picks double. That silently
-      # promotes int-valued scalars/results to float64 throughout scipp's Python
-      # layer (copy, add_equals, concat, ...), which is what actually failed 22 of
-      # upstream's own tests here, not a riscv64 codegen issue (confirmed: those
-      # same operations behave correctly against the official x86_64 PyPI wheel).
-      - name: Pin pybind11 below the major that reorders numeric overload resolution
-        run: echo 'pybind11<3' >> build-constraints.txt
+      # pip resolves whatever is newest at build time - and scipp 26.8.0's own
+      # lib/python/dtype.cpp/bind_data_access.h now use pybind11 3.x-only API
+      # (dtype::normalized_num/num_of, py::make_scalar), so pinning pybind11<3 no
+      # longer even compiles. The actual bug this pin used to work around (pybind11
+      # 3.x loosening float's conversion check to accept int, so a double/int64_t
+      # overload pair registered double-first now dispatches a plain Python int to
+      # the double overload instead of int64_t, silently promoting int-valued
+      # scalars/results to float64 throughout scipp's Python layer - what actually
+      # failed 22 of upstream's own tests, not a riscv64 codegen issue) is fixed at
+      # the source instead: see patches/scipp/26.8.0/0002-*, which registers the
+      # int64_t overload first.
 
       # pyproject.toml's license-files is an explicit ["LICENSE"] list (patched to also
       # match LICENSE.*), so scikit-build-core's default licence glob never runs. The CPM
@@ -110,13 +111,9 @@ jobs:
           # pip resolves cmake>=3.28 (our registry's newest is 4.0.3); CPM-fetched
           # dependencies' own cmake_minimum_required predates CMake 4's floor. The
           # patched (dirty) checkout would otherwise read as 26.8.1.dev0+g<sha>.
-          # pip >= 26 ignores PIP_CONSTRAINT inside isolated build environments --
-          # PIP_BUILD_CONSTRAINT is the replacement, and it reaches nested builds.
           CIBW_ENVIRONMENT: >-
             CMAKE_POLICY_VERSION_MINIMUM=3.5
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SCIPP=${{ env.SCIPP_VERSION }}
-            PIP_CONSTRAINT=build-constraints.txt
-            PIP_BUILD_CONSTRAINT=build-constraints.txt
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           CIBW_TEST_EXTRAS: test
           CIBW_TEST_REQUIRES: scipy graphviz pooch hypothesis
