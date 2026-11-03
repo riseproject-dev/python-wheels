@@ -49,11 +49,14 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # Matches upstream's own build_wheels.yml matrix (cp310-cp313); it
-        # does not build cp314/cp314t.
+        # Upstream's own build_wheels.yml matrix is cp310-cp313; narrowed here to
+        # cp312-cp313. The [test] extras this wheel is installed with (below) pull in
+        # tables, pillow and h5py: this registry's tables is abi3-py311 (no cp310
+        # wheel at all), its h5py has no cp310 or cp311 wheel, and even its pillow
+        # only starts at cp311 -- so cp310 can never satisfy [test] and cp311 is
+        # missing h5py specifically. cp312/cp313 are the only legs every one of
+        # those three dependencies actually covers.
         python:
-          - "cp310"
-          - "cp311"
           - "cp312"
           - "cp313"
 
@@ -86,10 +89,16 @@ jobs:
           # (and now public PyPI) carries a riscv64 numpy wheel for every
           # interpreter in this matrix, so it isn't starved the way cython
           # would be (gotcha 12).
+          # cibuildwheel's default test step (no CIBW_TEST_COMMAND override here) runs
+          # `pip install <wheel>[test]`, whose [test] extras pull in tables/pillow/h5py
+          # too; the same reasoning as numpy/scipy/pandas above applies to all three --
+          # add them to PIP_ONLY_BINARY so pip uses this registry's riscv64 wheels
+          # instead of reaching for a newer sdist-only PyPI release (tables needs
+          # HDF5 headers, pillow needs libjpeg headers, neither on this image).
           CIBW_ENVIRONMENT: >-
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ZIPLINE_RELOADED=${{ env.ZIPLINE_RELOADED_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas
+            PIP_ONLY_BINARY=numpy,scipy,pandas,tables,pillow,h5py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
