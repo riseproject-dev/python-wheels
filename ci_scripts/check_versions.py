@@ -393,25 +393,33 @@ def carry_over_patches(
 
 def fill_python_versions(yaml_file: Path, package_info: Dict) -> List[str]:
     """
-    Add `python-versions` to every entry of the package YAML that lacks it and
-    whose version PyPI has, preserving the rest of the file byte-for-byte, and
-    return the versions that were filled in.
+    Add or update `python-versions` for every entry whose version PyPI has,
+    preserving the rest of the file byte-for-byte, and return the versions
+    that changed.
     """
     lines = yaml_file.read_text().splitlines()
-    filled = []
+    changed = []
     # Bottom-up so earlier block ranges stay valid after inserts.
     for start, end in reversed(list(version_blocks(lines))):
         raw = str(yaml.safe_load("\n".join(lines[start:end]))[0].get("version"))
-        if any(line.startswith("  python-versions:") for line in lines[start:end]):
-            continue
         pythons = upstream_python_versions(package_info, raw)
         if pythons is None:
             continue
-        lines.insert(start + 1, python_versions_line(pythons))
-        filled.append(raw)
-    if filled:
+        new_line = python_versions_line(pythons)
+        existing = next(
+            (i for i in range(start, end) if lines[i].startswith("  python-versions:")),
+            None,
+        )
+        if existing is None:
+            lines.insert(start + 1, new_line)
+        elif lines[existing] == new_line:
+            continue
+        else:
+            lines[existing] = new_line
+        changed.append(raw)
+    if changed:
         yaml_file.write_text("\n".join(lines) + "\n")
-    return filled[::-1]
+    return changed[::-1]
 
 
 def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
@@ -829,6 +837,24 @@ def _self_test():
     assert python_versions_line(["3.10", "3.14t"]) == "  python-versions: ['3.10', '3.14t']"
     assert yaml.safe_load(python_versions_line(["3.10"]).strip()) == {"python-versions": ["3.10"]}
 
+    # Existing python-versions are refreshed, while current values remain untouched.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        package_file = Path(tmp) / "pkg.yaml"
+        package_file.write_text(
+            "versions:\n"
+            "- version: '1.0'\n"
+            "  python-versions: ['3.10']\n"
+            "- version: '2.0'\n"
+            "  python-versions: ['3.12']\n"
+        )
+        info = {"releases": {
+            "1.0": files(">=3.11", "cp311-cp311", "cp312-cp312"),
+            "2.0": files(">=3.12", "cp312-cp312"),
+        }}
+        assert fill_python_versions(package_file, info) == ["1.0"]
+        assert "  python-versions: ['3.11', '3.12']\n" in package_file.read_text()
+
     # Per-package PR titles, one PR per package.
     upgrade = {"status": "need_upgrade", "package": "PyYAML", "registry_version": "6.0",
                "new_versions": ["6.0.1", "6.0.2"], "yanked": []}
@@ -841,7 +867,6 @@ def _self_test():
     assert "docs/packages/pyyaml.yaml" in package_report(upgrade)
 
     # Patches are carried over only from the immediately preceding version.
-    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         for name in ("1.0.0", "2.0.0"):
@@ -879,8 +904,8 @@ def main():
                         help="Base branch copy of the package YAML (as for pending_versions.py): with --declare, "
                              "only versions it does not declare get the previous version's patches")
     parser.add_argument("--python-versions", action="store_true",
-                        help="Only add the python-versions upstream builds for to every entry of "
-                             "docs/packages/<pkg>.yaml lacking it (e.g. a new port's pending version)")
+                        help="Add or update every docs/packages/<pkg>.yaml entry with the "
+                             "python-versions that upstream builds (e.g. a new port's pending version)")
     parser.add_argument("--report", type=Path, metavar="FILE", help="Write a Markdown summary of the whole run")
     parser.add_argument("--report-dir", type=Path, metavar="DIR",
                         help="Write one Markdown PR body per changed package, plus a packages.json manifest, "
@@ -904,9 +929,9 @@ def main():
             pypi_info = get_pypi_package_info(package_data.get("package-name", package))
             if pypi_info is None:
                 sys.exit(f"[X] Could not get PyPI info for {package}")
-            filled = fill_python_versions(package_yaml(package), pypi_info)
-            print(f"[+] {package}: python-versions added for "
-                  f"{', '.join(f'v{v}' for v in filled) or 'nothing'}")
+            changed = fill_python_versions(package_yaml(package), pypi_info)
+            print(f"[+] {package}: python-versions updated for "
+                  f"{', '.join(f'v{v}' for v in changed) or 'nothing'}")
         return
 
     if args.packages:

@@ -472,7 +472,7 @@ def main():
             "--head",
             branch,
             "--reviewer",
-            "threexc,luhenry",
+            "luhenry",
             "--title",
             pr_title,
             "--body",
