@@ -38,6 +38,10 @@ env:
   # `ninja`, never `bin/fetch-gn` (no riscv64 CIPD gn). Same revision already
   # proven on this image by build-skia-python.yml.
   GN_REVISION: 0625da07ece7b1a374ec0719b6f40ebe3d0950c1
+  # Must match skia-bindings 0.99.0's own pin (its Cargo.toml
+  # [package.metadata] "skia" key) -- it's what skia-bindings' build.rs would
+  # download itself if SKIA_SOURCE_DIR weren't set below.
+  SKIA_TAG: m150-0.98.1
 
 jobs:
   setup:
@@ -98,8 +102,21 @@ jobs:
           # skia-bindings --target=riscv64-linux-gnu, so clang loads no config
           # and C++ fails with "'cstdint' file not found" (woofwoof); alias
           # the config files to those triples.
+          #
+          # Unlike skia-python's own skia checkout (patched directly, see
+          # patches/skia-python), skia-bindings fetches and syncs Skia itself
+          # inside its `cargo build` build-script run, with no git checkout of
+          # ours to patch. That script's un-opt-outable `skia/tools/git-sync-deps`
+          # call (gotcha 423) unconditionally runs `skia/bin/fetch-gn` next,
+          # which KeyErrors on riscv64 and aborts the whole build before `gn
+          # gen`/`ninja` are ever reached, regardless of SKIA_GN_COMMAND/
+          # SKIA_NINJA_COMMAND below. Presync the exact Skia checkout
+          # ourselves and point SKIA_SOURCE_DIR at it instead: build.rs takes
+          # a different, offline path whenever SKIA_SOURCE_DIR is set, which
+          # skips git-sync-deps (and so fetch-gn) entirely and goes straight
+          # to `gn gen`/`ninja`.
           CIBW_BEFORE_ALL_LINUX: |
-            set -e
+            set -eo pipefail
             dnf --enablerepo=crb install -y fontconfig-devel clang libstdc++-static
             for t in riscv64-unknown-linux-gnu riscv64-linux-gnu; do
               for d in clang clang++; do
@@ -111,6 +128,13 @@ jobs:
             git -C /tmp/gn checkout ${{ env.GN_REVISION }}
             (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
             install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
+            mkdir -p /tmp/skia-src
+            curl --proto '=https' --tlsv1.2 -sSfL -A "python-wheels/dxpdf-build" \
+              https://codeload.github.com/rust-skia/skia/tar.gz/${{ env.SKIA_TAG }} \
+              | tar xz -C /tmp/skia-src --strip-components=1
+            (cd /tmp/skia-src && GIT_SYNC_DEPS_SKIP_EMSDK=1 python3 tools/git-sync-deps) || true
+            [ -n "$(ls -A /tmp/skia-src/third_party/externals/freetype 2>/dev/null)" ]
+            install -D -m 0755 /usr/local/bin/gn /tmp/skia-src/bin/gn
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
@@ -118,6 +142,7 @@ jobs:
             CXX=clang++
             SKIA_GN_COMMAND=/usr/local/bin/gn
             SKIA_NINJA_COMMAND=ninja
+            SKIA_SOURCE_DIR=/tmp/skia-src
           # Upstream's own wheel check: skia-safe's `embed-freetype` must
           # statically link FreeType, not dynamically -- a regression brings
           # back "undefined symbol: FT_Palette_Data_Get" on older system
