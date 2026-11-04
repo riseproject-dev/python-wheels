@@ -929,6 +929,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   crate's own direct `ndarray` dep, and any crate it calls into directly, must land on the
   same major numpy-rust's internal one uses, checked via `cargo tree -i ndarray@<ver>`, not
   by reading either Cargo.toml alone (the DeepFilterLib/pyDF case).
+- **713** — A `build.rs` that downloads and syncs its own external C++ source tree mid-build
+  (gotcha 423's unconditional `fetch-gn` call, reached with no checkout of ours to patch)
+  can be fixed with no patch at all: pre-sync that tree ourselves in `CIBW_BEFORE_ALL_LINUX`
+  and point the crate's own documented `SKIA_SOURCE_DIR` env var at it, which takes a wholly
+  different code path that never calls the broken step (the dxpdf/skia-bindings case; see
+  `build-dxpdf.yml`).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
