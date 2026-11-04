@@ -75,14 +75,27 @@ jobs:
           v="${v#cp}"
           echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
 
+      # Up to 0.10.0 the extension is a standalone crate in rust/; from 0.11.0 it is
+      # crates/cassetter-python in a cargo workspace whose version is
+      # [workspace.package] and whose internal crates pin each other as "=0.0.0",
+      # with the manifest path given by pyproject.toml's [tool.maturin].
       - name: Set version from tag
-        run: sed -i "s/^version = \".*\"/version = \"${CASSETTER_VERSION}\"/" rust/Cargo.toml
+        id: manifest
+        run: |
+          if [ -f rust/Cargo.toml ]; then
+            sed -i "s/^version = \".*\"/version = \"${CASSETTER_VERSION}\"/" rust/Cargo.toml
+            echo "args=--manifest-path rust/Cargo.toml" >> "$GITHUB_OUTPUT"
+          else
+            sed -i "s/^version = \".*\"/version = \"${CASSETTER_VERSION}\"/" Cargo.toml
+            grep -rl '=0\.0\.0' --include=Cargo.toml . | xargs -r sed -i "s/\"=0\.0\.0\"/\"=${CASSETTER_VERSION}\"/"
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
           target: riscv64gc-unknown-linux-gnu
-          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist --manifest-path rust/Cargo.toml
+          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist ${{ steps.manifest.outputs.args }}
           manylinux: '2_39'
 
       - name: Install Python
