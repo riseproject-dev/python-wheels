@@ -87,7 +87,12 @@ jobs:
 
       - name: Apply patches
         working-directory: vgf-library
-        run: git apply -v ../python-wheels/patches/ai-ml-sdk-vgf-library/${{ env.VGF_VERSION }}/*.patch
+        run: |
+          # 0.11.0 moved setup.py to the repo root and dropped the BDistWheel platform
+          # table that 0001 patched, so only versions that still need it carry a patch.
+          if compgen -G "../python-wheels/patches/ai-ml-sdk-vgf-library/${VGF_VERSION}/*.patch" >/dev/null; then
+            git apply -v ../python-wheels/patches/ai-ml-sdk-vgf-library/${VGF_VERSION}/*.patch
+          fi
 
       - name: Build wheel
         env:
@@ -136,6 +141,14 @@ jobs:
 
           # No auditwheel: like upstream's wheels, vgf_dump/vgf_updater sit in .data/purelib, which it rejects.
           cp pip_package/dist/*.whl wheelhouse/
+          # Newer sources no longer name the platform themselves and produce a plain
+          # linux_riscv64 wheel; retag it to the image's manylinux flavour.
+          for w in wheelhouse/*.whl; do
+            case "${w}" in
+              *manylinux*) ;;
+              *) "${python_exe}" -m wheel tags --platform-tag manylinux_2_39_riscv64 --remove "${w}" ;;
+            esac
+          done
           SCRIPT
 
       - name: Upload build log
