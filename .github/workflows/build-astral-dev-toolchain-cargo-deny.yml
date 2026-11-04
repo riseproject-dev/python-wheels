@@ -153,6 +153,41 @@ jobs:
         run: |
           set -euxo pipefail
           cargo-deny --version | grep -Fx "cargo-deny ${CARGO_DENY_VERSION}"
+
+          # cargo-deny 0.20.2's own tree (checked out above) fails its self-test
+          # check against its own committed Cargo.lock: RUSTSEC has since
+          # published advisories against the zstd/zstd-safe/zstd-sys versions it
+          # pins (reached via its dev-dep on spdx) and against the
+          # rustls/rustls-webpki/webpki-roots versions it pins (reached via its
+          # dev-dep on ureq). None of this touches the riscv64 binary under
+          # test. Bump each crate the way its advisory's own "Solution" line
+          # recommends, and allow the BSD-3-Clause license the zstd crates
+          # adopted as of those fixed versions - upstream's own deny.toml
+          # allow-list predates that relicensing and only lists
+          # MIT/Apache-2.0/ISC/Unicode-3.0/Zlib.
+          cargo update -p zstd --precise 0.13.4
+          cargo update -p zstd-safe --precise 7.4.0
+          cargo update -p zstd-sys --precise 2.1.2
+          cargo update -p rustls --precise 0.23.46
+          cargo update -p rustls-webpki --precise 0.103.16
+          cargo update -p webpki-roots --precise 1.0.10
+          python3 - <<'PATCH'
+          with open("deny.toml") as f:
+              s = f.read()
+          needle = "exceptions = [\n]"
+          assert needle in s, "deny.toml licenses.exceptions block not found in expected shape"
+          s = s.replace(
+              needle,
+              'exceptions = [\n'
+              '    { allow = ["BSD-3-Clause"], name = "zstd" },\n'
+              '    { allow = ["BSD-3-Clause"], name = "zstd-safe" },\n'
+              '    { allow = ["BSD-3-Clause"], name = "zstd-sys" },\n'
+              ']',
+          )
+          with open("deny.toml", "w") as f:
+              f.write(s)
+          PATCH
+
           cargo deny -L debug --all-features --locked check
 
   publish:
