@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `python-wheels`/`python-smoke` jobs of
+# https://github.com/matyushkin/djvu-rs/blob/v0.43.0/.github/workflows/publish-packages.yml
+name: Build djvu-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/djvu-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-djvu-rs.yml'
+      - 'docs/packages/djvu-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-djvu-rs.yml'
+      - 'docs/packages/djvu-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: djvu-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build djvu-rs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # The workspace release profile is lto=fat, codegen-units=1 (upstream's
+    # own choice, kept as-is); a cold riscv64 build runs noticeably longer
+    # than the default timeout because of it.
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      DJVU_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout djvu-rs v${{ env.DJVU_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: matyushkin/djvu-rs
+          ref: v${{ env.DJVU_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --manifest-path djvu-py/Cargo.toml -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+
+      - name: Check wheel contents
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          for whl in sys.argv[1:]:
+              assert os.path.basename(whl).startswith(f"djvu_rs-{os.environ['DJVU_RS_VERSION']}-"), whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("djvu_rs/djvu_rs.") and n.endswith(".so") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install "djvu-rs==${DJVU_RS_VERSION}" --no-index --find-links dist --force-reinstall
+
+      # Mirrors upstream's own djvu-py pytest job (ci.yml): numpy and pillow
+      # back the buffer-protocol/zero-copy tests. Pinned to binary-only so uv
+      # doesn't resolve a newer sdist-only release with no riscv64 wheel
+      # (CLAUDE.md gotcha 210).
+      - name: Install test dependencies
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: uv pip install pytest --only-binary numpy,pillow numpy pillow
+
+      - name: Run tests
+        run: python -m pytest djvu-py/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: djvu-rs-${{ env.DJVU_RS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish djvu-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: djvu-rs-${{ matrix.version }}-*-manylinux_riscv64
