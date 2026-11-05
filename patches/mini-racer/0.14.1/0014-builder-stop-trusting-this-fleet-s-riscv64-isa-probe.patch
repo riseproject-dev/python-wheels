@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 16 Oct 2026 00:00:00 +0200
+Subject: [PATCH] builder: stop trusting this fleet's riscv64 ISA extension
+ probe
+
+With the maglev Float64Min/Max fix in place, the riscv64 build_dll job
+finally compiled and linked V8 end to end. build_wheel got as far as
+actually running it, and died immediately:
+
+  Fatal Python error: Illegal instruction
+  ...
+  File ".../py_mini_racer/_mini_racer.py", line 162 in eval
+  File ".../py_mini_racer/_mini_racer.py", line 66 in __init__
+  File ".../tests/test_babel.py", line 12 in test_babel
+
+This is the first time this series has reached execution at all --
+every prior riscv64 fix (gclient, CIPD, DEPS, gn args, the four GCC
+compat issues, the sandbox guard, the maglev linker error) was a
+compile- or link-time failure. SIGILL on a binary that just finished
+compiling for the same architecture it now runs on almost always means
+it contains an instruction for an ISA extension the actual CPU lacks.
+
+V8's riscv64 CPU::CPU() (src/base/cpu.cc) asks the kernel via the
+riscv_hwprobe syscall (falling back to /proc/cpuinfo's "isa" string on
+pre-6.4 kernels) whether the V/Zba/Zbb/Zbs extensions are present, and
+CpuFeatures::IsSupported() lets V8's RISC-V MacroAssembler emit the
+corresponding instructions when it says yes -- unconditionally,
+regardless of this same build's own riscv_use_rvv/riscv_use_zba/
+riscv_use_zbb/riscv_use_zbs GN args, which already all default to
+false (i.e. this build already targets the plain rv64gc baseline at
+the source level): that runtime probe is a wholly separate mechanism,
+not gated by them.
+
+This exact fleet's riscv64 CI hardware has already demonstrated, twice
+independently in this repo, that it cannot be trusted to self-report
+these optional/newer extensions correctly: zlib-ng's own V-extension
+runtime probe (a vsetvli instruction) SIGILLs the moment it executes,
+and openvino's RVV-1.0 probe brings the whole process down instead of
+safely reporting "unsupported" (see patches/zlib-ng/1.0.0/0001-*.patch
+and patches/openvino/2026.4.1/0001-*.patch). A third, V8-internal
+instance of the same class of bug -- some bit this probe reports set
+that the real silicon does not actually implement -- is the simplest
+explanation for a crash that appears only once JS actually executes.
+
+Make V8's own riscv64 probe agree with this build's already-stated
+intent: keep the FPU bit it must report for this process to have
+gotten this far at all, and stop trusting it for V/Zba/Zbb/Zbs. Every
+CpuFeatures::IsSupported() caller already has a correctness-preserving
+fallback for when a feature is absent (the cross-compile/snapshot path
+already runs with all of these off), so this only removes now-unsafe
+optimized paths, it does not remove any functionality.
+
+Upstream-Status: Inappropriate [riscv64 CI-hardware-only ISA probe reliability issue; not a defect in V8 upstream, which has no way to know this fleet's hwprobe answers do not hold]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/0002-riscv64-disable-unreliable-isa-ext-probes.patch | 43 ++++++++++++++++++++++
+ builder/v8_build.py                                          | 22 +++++++++++
+ 2 files changed, 65 insertions(+)
+ create mode 100644 builder/0002-riscv64-disable-unreliable-isa-ext-probes.patch
+
+diff --git a/builder/0002-riscv64-disable-unreliable-isa-ext-probes.patch b/builder/0002-riscv64-disable-unreliable-isa-ext-probes.patch
+new file mode 100644
+index 0000000..19e7648
+--- /dev/null
++++ b/builder/0002-riscv64-disable-unreliable-isa-ext-probes.patch
+@@ -0,0 +1,43 @@
++--- src/base/cpu.cc	2026-10-16 00:00:00
+++++ src/base/cpu.cc	2026-10-16 00:00:00
++@@ -1004,30 +1004,24 @@
++   riscv_hwprobe pairs[] = {{RISCV_HWPROBE_KEY_IMA_EXT_0, 0}};
++   if (!syscall(__NR_riscv_hwprobe, &pairs,
++                sizeof(pairs) / sizeof(riscv_hwprobe), 0, nullptr, 0)) {
++-    if (pairs[0].value & RISCV_HWPROBE_IMA_V) {
++-      has_rvv_ = true;
++-    }
+++    // Deliberately do not trust RISCV_HWPROBE_IMA_V/EXT_ZBA/EXT_ZBB/EXT_ZBS:
+++    // on this fleet's riscv64 CI hardware, the kernel's hwprobe answer (and
+++    // the /proc/cpuinfo "isa" string it falls back from below) has already
+++    // been observed reporting optional RISC-V extensions as present when
+++    // the real silicon does not implement them, which SIGILLs the first
+++    // caller that acts on it -- see the zlib-ng and openvino riscv64
+++    // patches in this repo, both hitting that same class of bug for the V
+++    // extension. Only trust the one bit that must be set for this process
+++    // to have gotten this far at all.
++     if (pairs[0].value & RISCV_HWPROBE_IMA_FD) {
++       has_fpu_ = true;
++     }
++-    if (pairs[0].value & RISCV_HWPROBE_EXT_ZBA) {
++-      has_zba_ = true;
++-    }
++-    if (pairs[0].value & RISCV_HWPROBE_EXT_ZBB) {
++-      has_zbb_ = true;
++-    }
++-    if (pairs[0].value & RISCV_HWPROBE_EXT_ZBS) {
++-      has_zbs_ = true;
++-    }
++   }
++ #else
++   char* features = cpu_info.ExtractField("isa");
++ 
++   if (HasListItem(features, "rv64imafdc")) {
++     has_fpu_ = true;
++   }
++-  if (HasListItem(features, "rv64imafdcv")) {
++-    has_fpu_ = true;
++-    has_rvv_ = true;
++-  }
+++  // See the comment above: do not trust the isa string's "v" suffix either.
++ #endif
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index 498516c..58b0c66 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -433,6 +433,28 @@ def build_v8(args: Args) -> None:
+         #   V8's main branch now does.
+         apply_patch("0001-riscv64-gcc-compat.patch")
+ 
++        # The riscv64 build/test cycle got past every GCC-compat and linker
++        # issue above and now runs V8, which promptly dies with SIGILL
++        # inside tests that just construct a MiniRacer() and eval() a
++        # trivial script: src/base/cpu.cc's riscv64 CPU::CPU() probes the
++        # kernel (riscv_hwprobe, falling back to /proc/cpuinfo's "isa"
++        # string) for the V/Zba/Zbb/Zbs extensions and, if it reports any of
++        # them present, CpuFeatures::IsSupported() lets V8's RISC-V
++        # MacroAssembler emit the corresponding instructions -- unconditionally,
++        # regardless of this same build's own use_rvv/use_zba/use_zbb/use_zbs
++        # GN args (all false; see run_build() above), since that probe isn't
++        # gated by them. This repo has already hit the same class of bug
++        # twice on this fleet's riscv64 CI hardware for the V extension
++        # alone (the zlib-ng and openvino riscv64 patches), so a third,
++        # V8-internal instance of a probed extension not actually being
++        # safe to use here is the most likely explanation for a SIGILL that
++        # only appears once real JS executes (as opposed to at compile or
++        # link time, where every prior riscv64 fix in this series showed up
++        # instead). Stop trusting that probe for the optional extensions;
++        # only the FPU bit it must report once this process has gotten this
++        # far at all is kept.
++        apply_patch("0002-riscv64-disable-unreliable-isa-ext-probes.patch")
++
+     build_dir = get_v8_path() / "out.gn" / "build"
+ 
+     run_build(build_dir, args)
+--
+2.43.0
+

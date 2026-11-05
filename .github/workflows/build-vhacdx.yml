@@ -31,10 +31,6 @@ permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # Upstream cuts releases without git tags, so pin the release commit: `main`
-  # HEAD is byte-identical (source-wise) to the 0.0.10 PyPI sdist. Update it
-  # alongside VHACDX_VERSION.
-  VHACDX_REF: 1dbf2874b7c00d79c2f4ea56379b9a3c20a4693b
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
@@ -63,12 +59,34 @@ jobs:
       VHACDX_VERSION: ${{ matrix.version }}
 
     steps:
+      # Upstream cuts releases without git tags, so map each version to the
+      # commit whose source is byte-identical (ignoring .github/.gitignore) to
+      # that version's PyPI sdist. Add a line for every new version in
+      # docs/packages/vhacdx.yaml.
+      - name: Resolve source commit for ${{ env.VHACDX_VERSION }}
+        id: src
+        run: |
+          case "$VHACDX_VERSION" in
+            0.0.10) ref=1dbf2874b7c00d79c2f4ea56379b9a3c20a4693b ;;
+            0.1.0) ref=13d47bc82b92da808fb4bf177b59f6b8a89fd100 ;;
+            0.1.1) ref=02d00ea2857cc6cb54965152a70b55e9e41a2caf ;;
+            *) echo "::error::No upstream commit recorded for vhacdx $VHACDX_VERSION; add it to this case statement"; exit 1 ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout vhacdx ${{ env.VHACDX_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: trimesh/vhacdx
-          ref: ${{ env.VHACDX_REF }}
+          ref: ${{ steps.src.outputs.ref }}
           persist-credentials: false
+
+      - name: Check the checked-out source declares ${{ env.VHACDX_VERSION }}
+        run: |
+          declared=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)
+          if [ "$declared" != "$VHACDX_VERSION" ]; then
+            echo "::error::pyproject.toml declares '$declared' but building $VHACDX_VERSION"; exit 1
+          fi
 
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         env:

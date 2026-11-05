@@ -58,6 +58,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   `CONAN_OPENSSL_CONFIGURATION` overrides it, but `linux64-riscv64`'s AES asm `jal`s a global
   symbol and overflows `R_RISCV_JAL` once `libcrypto.a` lands in a big `.so` — use
   `linux-generic64` (the sqlcipher3 case).
+- **661** — `VTK_INSTALL_SDK=ON`'s headers/cmake-config output is a free side effect of a
+  build step that already runs; tar it up and upload it as its own artifact rather than
+  rebuilding anything or touching the published wheel (the vtk / cadquery-ocp case).
+- **691** — Splitting a non-relocatable native-deps build into its own job breaks CMake
+  `find_package()` for the later build job unless both jobs agree on the same literal
+  absolute install path (the meshioplusplus / netCDF case).
+- **702** — A build-time cross-toolchain downloader's own host-arch match list can simply be
+  stale against the toolchain project's *own* current release matrix — check the toolchain's
+  own CI/releases directly and bypass via an existing path/URL override, no patch needed (the
+  componentize-py / WASI-SDK case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -890,3 +900,133 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
     - The same recipe falls through to `linux-generic32` for any other arch it doesn't
       list, so check its `_targets` table whenever a Conan-built OpenSSL targets a new arch.
 
+661. **A wheel-only publish of a large C++ library can leave `VTK_INSTALL_SDK=ON`'s own
+    output on the build-room floor, blocking an unrelated downstream port that needs the
+    headers rather than the `.so`s (the vtk / cadquery-ocp case).** `build-vtk.yml` already
+    configures with `-DVTK_INSTALL_SDK=ON` and runs `cmake --build /build --target install`,
+    which writes a full `include/` tree and the generated `vtk-config.cmake` package files to
+    `CMAKE_INSTALL_PREFIX` — but the workflow only ever packages `vtkmodules/*.so` into the
+    wheel (`setup.py bdist_wheel`), so none of that SDK output ever left the runner. A
+    downstream consumer that needs to `find_package(VTK)` at build time (cadquery-ocp's CMake
+    does) has no riscv64 headers to point it at, even though the matching `.so`s are sitting
+    right there in the published wheel.
+    - **No extra compute is needed — the SDK is a side effect of a build step that already
+      runs.** Don't rebuild anything to get it; just `tar` up the already-installed
+      `include/` directory and the directory holding `vtk-config.cmake` (`find
+      /build/install -iname 'vtk-config.cmake'` locates it regardless of
+      `CMAKE_INSTALL_LIBDIR` being `lib` vs `lib64`), then `actions/upload-artifact` it
+      separately from the wheel. This is additive: it doesn't touch the existing wheel build
+      or its publish step at all.
+    - **One matrix leg's SDK is enough when the interpreter matrix doesn't configure
+      identically.** If a free-threaded leg (or any other) disables an extra module
+      (`VTK_MODULE_ENABLE_VTK_IONetCDF=NO` for `cp314t` here) that the other legs keep on,
+      pick a leg whose module set matches what the downstream consumer actually needs rather
+      than assuming every leg's install tree is interchangeable.
+    - **A plain GitHub Actions artifact, not a second published wheel, is the conservative
+      choice when the consumer isn't ready yet.** `_publish-wheel.yml`'s GitHub Release path
+      is the only durable (non-expiring) destination this repo has, and it's wired for wheels
+      (plus one GPL-sources tarball) only; extending it to a non-wheel SDK tarball is a
+      shared-workflow change that affects every package, not a one-package addition. An
+      artifact with a lengthened `retention-days` is the additive option — note in the PR that
+      it is time-limited and will need re-cutting (or a proper publish path) once the
+      downstream port actually resumes.
+
+691. **Splitting a non-relocatable native-deps build into its own job breaks CMake
+     `find_package()` for the later build job unless both jobs agree on the same literal
+     absolute install path (the meshioplusplus / netCDF case).** meshioplusplus vendors
+     upstream's `build-permissive-libs.sh`, whose own header warns the install prefix "is not
+     relocatable" because netCDF's generated `netCDFConfig.cmake` records its dependencies'
+     paths (e.g. HDF5's) as absolute strings, not ones computed relative to the config file's
+     own location. Splitting the deps build into its own job (to amortize it across the
+     `cp312`/`cp313`/`cp314` matrix) built them with `-DCMAKE_INSTALL_PREFIX=/project/deps`
+     (the deps job's own `GITHUB_WORKSPACE` bind-mount), tarred that up, and untarred it into
+     `/opt/meshioplusplus-deps` in the separate `cibuildwheel` container the matrix jobs run
+     in — a different absolute path than the one baked into the CMake config files. Every
+     matrix leg's CMake configure step failed identically: `netCDFConfig.cmake: File or
+     directory /project/deps referenced by variable netCDF_INSTALL_PREFIX does not exist!`
+     - **The fix is to build at the same absolute path the later job extracts into, not to
+       patch the dependency's CMake files.** Bind-mount the deps job's `docker run` so the
+       library is built directly at `/opt/meshioplusplus-deps` (the literal path
+       `CIBW_BEFORE_ALL_LINUX` later untars the same tarball into), instead of building at
+       one path and relying on the tarball to make it "portable" — a non-relocatable prefix
+       has no portable form, only a consistent one.
+     - **This generalizes beyond netCDF.** Any native dependency built in a separate "deps"
+       job from the one that links it — the build-once-C++/dep-wheel-pattern shape gotcha 17
+       describes — needs its install prefix checked for this before splitting jobs: a
+       CMake/pkg-config/`*-config.cmake` file that embeds an absolute path for *any* of its
+       own dependencies (common when one dependency's `find_package()` result is baked into
+       another's exported config, as HDF5's is into netCDF's) will fail the same way the
+       moment the prefix moves, even though the library's own files land at the expected
+       path.
+
+692. **A vcpkg port's own per-architecture feature denylist can simply predate riscv64 and
+     say nothing about it, which reads as "untested" rather than the "silently unsupported"
+     it actually is (the cppcheck/pcre case).** `cppcheck-wheel` vendors an overlay vcpkg
+     port for PCRE 8.45 (legacy PCRE1) whose `portfile.cmake` already turns `PCRE_SUPPORT_JIT`
+     off for architectures its bundled JIT doesn't cover:
+     `if(VCPKG_TARGET_ARCHITECTURE MATCHES "(loongarch|^s390)")`. The build failed on riscv64
+     anyway: `pcre_jit_compile.c:65:2: error: #error Unsupported architecture`, from
+     `pcre_jit_compile.c`'s own `#if SLJIT_CONFIG_UNSUPPORTED` guard around the
+     `SLJIT_CONFIG_AUTO` arch-detection block it `#include`s `sljit/sljitLir.c` through.
+     - **The denylist isn't stale, it's just never been asked the question.** `loongarch` and
+       `s390` were added because someone hit this exact `#error` porting *to* those arches;
+       riscv64 was never added because upstream has no riscv64 wheel to test, not because
+       riscv64 is fine. Don't read an architecture's absence from a hand-maintained allow/deny
+       list as a signal either way — check the thing the list is gating.
+     - **Gotcha 231's check answers it directly: `ls`/`grep` the bundled code generator's own
+       source tree for an arch-named backend file.** Unzipping the pcre-8.45 tarball and
+       listing `sljit/sljitNative*.c` shows X86, ARM (32/64/T2), MIPS (32/64), PPC (32/64),
+       SPARC and TILEGX — no RISC-V file at all, confirming this specific sljit fork (frozen
+       with the rest of legacy PCRE1, last released 2021) genuinely cannot build for riscv64
+       and that disabling JIT is correct, not a workaround for a config quirk. This is the
+       mirror image of gotcha 231's blosc2/minicc finding (a bundled JIT that *does* have a
+       real riscv64 backend file, so don't assume unsupported) — here the file-listing check
+       settles it the other way, and PCRE2's separately-maintained, newer sljit fork (gotcha
+       541's `pcre2-sys` case) having a real riscv64 backend is irrelevant: it diverged from
+       this one long before RISC-V support existed in either.
+     - **Fix: extend the existing denylist, don't patch the generated `#error` or try to add
+       a riscv64 sljit backend.** One line,
+       `"(loongarch|^s390)"` → `"(loongarch|^s390|riscv64)"`, patched into the vendored
+       overlay port via `patches/cppcheck/<version>/`, the same `git apply`-after-checkout
+       mechanism `build-ale-py.yml` uses for a patch against an upstream checkout outside this
+       repo. cppcheck itself has no runtime dependency on PCRE's JIT (JIT only accelerates
+       regex matching); turning it off is a build fix with no feature-level downside, matching
+       the proportionality already applied to loongarch/s390.
+
+702. **A build-time cross-toolchain downloader's own host-arch match list can simply be stale
+     against the toolchain project's *own* current release matrix — check the toolchain's own
+     CI/releases directly, not the consuming package's hardcoded list, and bypass via an
+     existing path/URL override env var instead of patching (the componentize-py / WASI-SDK
+     case).** componentize-py (Bytecode Alliance, maturin/pyo3) cross-compiles an embedded
+     CPython to `wasm32-wasip2` at build time using WASI-SDK's `clang`, which has to run
+     *natively on the build host* — unlike the wasm32 output it produces, this is a genuine
+     host-architecture dependency. `build.rs`'s `find_wasi_sdk()` only auto-downloads a
+     WASI-SDK release for `("x86_64"|"aarch64", "linux"|"windows"|"macos")`, `bail!`ing on
+     anything else, and upstream's own `release.yaml`/`CONTRIBUTING.md` only ever hardcode
+     `x86_64-linux`/`arm64-linux`/`arm64-macos`/`x86_64-macos`/`x86_64-windows` URLs — reading
+     as a hard host-architecture lock on the WASI-SDK step, separate from (and easy to conflate
+     with) the wasm32 *target* being architecture-neutral.
+     - **It isn't one: the match list is just older than the toolchain's own CI.**
+       `WebAssembly/wasi-sdk`'s `.github/workflows/main.yml` has its own `riscv64-linux` matrix
+       entry (`CMAKE_SYSTEM_PROCESSOR=riscv64`, `riscv64-linux-gnu-gcc`), cross-compiled on an
+       `ubuntu-24.04` runner and published as a release asset — confirmed directly, not
+       inferred: `wasi-sdk-33.0-riscv64-linux.tar.gz` and `wasi-sdk-34.0-riscv64-linux.tar.gz`
+       both download with HTTP 200 from `github.com/WebAssembly/wasi-sdk/releases/download/
+       wasi-sdk-<N>/`. componentize-py's own `build.rs` just never got updated to know this
+       exists; componentize-py's wasi-sdk-33 pin predates nothing — the riscv64-linux asset
+       has shipped since at least that release.
+     - **No patch needed: the override the build script already exposes is the fix.**
+       `find_wasi_sdk()` checks `WASI_SDK_PATH` first and returns immediately if it exists, so
+       downloading the riscv64-linux tarball ourselves in `CIBW_BEFORE_ALL_LINUX` and
+       extracting it to `/opt/wasi-sdk` (the same default path upstream's own CI uses) skips
+       the stale arch-match branch entirely — zero changes to `build.rs`, in contrast to
+       gotcha 77's pattern where a `continue`/`raise` with no escape hatch forces a real patch.
+     - **The general check: when a build step's host-architecture gate traces back to a
+       *separate* toolchain/SDK project upstream merely downloads, verify that project's own
+       current release matrix before concluding the architecture is unsupported.** The
+       consuming package's hardcoded list only proves what the package author knew about when
+       they wrote it; it says nothing about whether the SDK itself has since grown riscv64
+       support. This is the build-time-host-toolchain mirror of gotcha 550 (a vendored
+       *binary*'s own downloader lacking a riscv64 entry) — there the fix was exploiting an
+       existing PATH-search fallback because the target binary's upstream truly ships no
+       riscv64 asset; here the fix is a path override because the SDK's upstream already does.
