@@ -14,6 +14,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **106** — A `yum_install <pkg>` that "fails" may have installed exactly what you needed —
 - **124** — A wheel whose compiled payload is a Go binary builds fine and then dies at
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
+- **690** — A `CIBW_BEFORE_ALL_LINUX` that mirrors an upstream recipe's `cp -a
+  /usr/include/<pkg>-*/*` can glob-copy headers from a system `-devel` package the upstream's
+  own (different) image bakes in by default, but manylinux_riscv64 does not.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
@@ -1910,3 +1913,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     is the safe spelling under hatch-vcs) and `fetch-depth: 0` can go. The `ziglang` PyPI
     wheel itself ships `manylinux_2_31_riscv64.musllinux_1_1_riscv64`, so a hatch-ziglang
     build needs no toolchain setup on either image.
+
+690. **A `CIBW_BEFORE_ALL_LINUX` that mirrors an upstream recipe's `cp -a /usr/include/<pkg>-*/*`
+    can glob-copy headers from a system `-devel` package the upstream's own (different) image
+    bakes in by default, but manylinux_riscv64 does not (the netgen-mesher case).** Netgen's
+    GitLab recipe stages MPI headers into neutral `/opt/openmpi/include` and `/opt/mpich/include`
+    directories (so CMake can find either variant without an arch-suffixed path) by copying out
+    of `/usr/include/openmpi-*/` and `/usr/include/mpich-*/` - on upstream's own manylinux image
+    those directories exist because `openmpi-devel`/`mpich-devel` are preinstalled. The generic
+    `quay.io/pypa/manylinux_2_39_riscv64` image (Rocky 10) has neither package, so under
+    `set -eux` the unglobbed, literal path reaches `cp` as `/usr/include/openmpi-*/*` and fails
+    with `cp: cannot stat '/usr/include/openmpi-*/*': No such file or directory` - a `dnf`-shaped
+    problem disguised as a `cp` error, 3+ minutes into `before_all` after the image pull and the
+    unrelated `tcl-devel`/`tk-devel`/`ninja-build` install already succeeded. Fix: `dnf install`
+    the same `openmpi-devel mpich-devel` the recipe assumes, same line as the other `-devel`
+    packages (`build-mpi4py.yml` and `build-lalsuite.yml` already install one or the other on
+    this image, confirming both are available risc64 CRB/AppStream packages). More generally:
+    every bare `cp -a <glob>` in a transcribed `before-all` is a silent assumption that
+    something upstream's own container provides for free - check the glob resolves (`dnf -q
+    list <pkg>` per gotcha 51, or just inspect `/usr/include` after the install line) before
+    trusting a mirrored recipe on this image.
+
+712. **`ld.lld` linking GCC-compiled C++ with `--gc-sections` (on by default for LLVM's own
+    Release-build CMake settings) can fail on riscv64 with `relocation refers to a symbol in
+    a discarded section: .LEHBnn`/`.LFBnnnn`/`.LEHEnn` on exception-table-heavy translation
+    units - a riscv64-specific interaction between GCC's `.eh_frame` relocation ordering and
+    linker relaxation that confuses lld's section garbage collection (the iree-base-compiler
+    case, building LLVM/MLIR/clang/lld from source with `IREE_ENABLE_LLD=ON`; also tracked as
+    binutils bug 28709, "`[RISC-V] a unused section can't be removed with -gc-sections`", and
+    discussed on the matching lld-side LLVM bug thread). It is not specific to lld-as-chosen-
+    linker, IREE, or even this repo's image - any sufficiently large GCC-compiled C++ codebase
+    with exceptions, linked with lld and `--gc-sections`, on riscv64, can hit it; it also is
+    not fixed by switching `CC`/`CXX` to clang, since upstream's own CI uses the same
+    GCC+lld pairing successfully on other architectures (aarch64) - this is riscv64-relaxation-
+    specific, not a GCC/lld-compiler-mismatch problem. Workaround: pass `-mno-relax` via
+    `CFLAGS`/`CXXFLAGS` (disables the RISC-V linker relaxation that interacts badly with
+    `--gc-sections`'s EH-section stripping) rather than disabling `--gc-sections` or lld
+    wholesale - cheaper to reason about on a build this large, since changing linker flags
+    alone (vs. compiler identity) only risks invalidating cached *link* commands, not every
+    compiled object, if the build system is ever made resumable. Confirm from the log: the
+    failure lands at the very final link of a large binary/shared-object target, specifically
+    naming compiler-generated EH labels (`.LEHB*`/`.LFB*`/`.LEHE*`/local numeric `.L*`
+    symbols) as the discarded-section references, not an undefined external symbol.
