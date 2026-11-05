@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/fpgmaas/python-magic/blob/0.4.29/.github/workflows/wheels.yml
+name: Build python-magic-standalone wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/python-magic-standalone.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-magic-standalone.yml'
+      - 'docs/packages/python-magic-standalone.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-magic-standalone.yml'
+      - 'docs/packages/python-magic-standalone.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: python-magic-standalone
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build python-magic-standalone ${{ matrix.version }} cp312-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+
+    env:
+      PYTHON_MAGIC_STANDALONE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-magic-standalone ${{ env.PYTHON_MAGIC_STANDALONE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: fpgmaas/python-magic
+          ref: ${{ env.PYTHON_MAGIC_STANDALONE_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # add_libmagic.sh compiles and bundles libmagic (file) but the wheel ships only python-magic's LICENSE.
+      - name: Stage libmagic licence
+        run: |
+          version=$(sed -n 's/.*version="file-\([0-9.]*\)".*/\1/p' add_libmagic.sh)
+          curl -fsSL --retry 5 -o LICENSE.libmagic "https://raw.githubusercontent.com/file/file/FILE${version//./_}/COPYING"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: bash add_libmagic.sh
+          CIBW_ENVIRONMENT: LC_ALL=en_US.UTF-8
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            pytest --import-mode=importlib {project}/test &&
+            python -c "import importlib.metadata as md;
+            licenses = {str(f) for f in md.files('python-magic-standalone') if '.dist-info/licenses/' in str(f)};
+            assert any(l.endswith('/LICENSE') for l in licenses), licenses;
+            assert any(l.endswith('/LICENSE.libmagic') for l in licenses), licenses"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-magic-standalone-${{ matrix.version }}-cp312-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-magic-standalone ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: python-magic-standalone-${{ matrix.version }}-*riscv64

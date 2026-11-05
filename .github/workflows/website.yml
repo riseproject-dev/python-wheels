@@ -25,27 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3'
-
-      - name: Install site generator dependencies
-        run: pip install -r ci_scripts/requirements.txt
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
 
       - name: Generate package pages from YAML
-        run: python ci_scripts/generate_packages_doc.py
+        run: uv run --isolated --with-requirements ci_scripts/requirements.txt ci_scripts/generate_packages_doc.py
 
       - name: Restore the dashboard's pypi.org response cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        id: dashboard-requests-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: requests-cache.sqlite
-          key: requests-cache-${{ github.ref }}
-          restore-keys: requests-cache-main
+          key: requests-cache-main-${{ github.run_id }}
+          restore-keys: requests-cache-main-
 
       - name: Generate the dashboard
-        continue-on-error: true
-        run: |
-          python ci_scripts/dashboard/build.py --output-dir docs/dashboard
+        run: uv run --isolated --with-requirements ci_scripts/requirements.txt ci_scripts/dashboard/build.py --output-dir docs/dashboard
 
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697  # v1.0.13
@@ -59,3 +53,10 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./_site
           cname: pypi.riseproject.dev
+
+      - name: Save the dashboard's pypi.org response cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: requests-cache.sqlite
+          key: ${{ steps.dashboard-requests-cache.outputs.cache-primary-key }}
