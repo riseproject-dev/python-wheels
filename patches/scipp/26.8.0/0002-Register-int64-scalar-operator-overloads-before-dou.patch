@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 3 Nov 2026 00:00:00 +0000
+Subject: [PATCH] Register int64 scalar operator overloads before double
+
+bind_in_place_binary_scalars/bind_binary_scalars/bind_reverse_binary_scalars/
+bind_comparison_scalars each register two overloads of the same Python
+method name (__add__, __iadd__, __eq__, ...) onto Variable/DataArray/
+Dataset: one for a C++ double right-hand side, one for int64_t. pybind11
+tries overloads in registration order and takes the first whose argument
+converts, and these always registered the double overload first.
+
+Under pybind11 2.x that didn't matter: a plain Python int failed the
+double overload's (stricter, in that version) conversion check and fell
+through to int64_t. pybind11 3.x loosened float's conversion check to
+accept int (pybind/pybind11#5879, "float now accepts int" for PEP 484
+compatibility), so the double overload now matches first and every
+scalar operation silently promotes int-valued results to float64
+throughout scipp's Python layer (copy, add_equals, concat, ...).
+
+Register int64_t first so the exact-type overload still wins for a
+Python int under either pybind11 generation; double remains available
+for everything else (floats, numpy float scalars, etc.) exactly as
+before. This only reorders registration - none of the operators'
+actual implementations change.
+
+Upstream-Status: To upstream [not yet submitted; this port may only touch riseproject-dev/python-wheels]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ lib/python/bind_operators.h | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/lib/python/bind_operators.h b/lib/python/bind_operators.h
+index d444aab..7848439 100644
+--- a/lib/python/bind_operators.h
++++ b/lib/python/bind_operators.h
+@@ -351,26 +351,26 @@ static void bind_comparison(pybind11::class_<T, Ignored...> &c) {
+
+ template <class T, class... Ignored>
+ void bind_in_place_binary_scalars(pybind11::class_<T, Ignored...> &c) {
+-  OpBinder<ScalarToVariable>::in_place_binary<double>(c);
+   OpBinder<ScalarToVariable>::in_place_binary<int64_t>(c);
++  OpBinder<ScalarToVariable>::in_place_binary<double>(c);
+ }
+
+ template <class T, class... Ignored>
+ void bind_binary_scalars(pybind11::class_<T, Ignored...> &c) {
+-  OpBinder<ScalarToVariable>::binary<double>(c);
+   OpBinder<ScalarToVariable>::binary<int64_t>(c);
++  OpBinder<ScalarToVariable>::binary<double>(c);
+ }
+
+ template <class T, class... Ignored>
+ static void bind_reverse_binary_scalars(pybind11::class_<T, Ignored...> &c) {
+-  OpBinder<ScalarToVariable>::reverse_binary<double>(c);
+   OpBinder<ScalarToVariable>::reverse_binary<int64_t>(c);
++  OpBinder<ScalarToVariable>::reverse_binary<double>(c);
+ }
+
+ template <class T, class... Ignored>
+ void bind_comparison_scalars(pybind11::class_<T, Ignored...> &c) {
+-  OpBinder<ScalarToVariable>::comparison<double>(c);
+   OpBinder<ScalarToVariable>::comparison<int64_t>(c);
++  OpBinder<ScalarToVariable>::comparison<double>(c);
+ }
+
+ template <class T, class... Ignored>
+--
+2.43.0

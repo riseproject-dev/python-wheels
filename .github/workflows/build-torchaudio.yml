@@ -116,7 +116,24 @@ jobs:
           CIBW_TEST_REQUIRES: torch>=2.11 numpy
           CIBW_TEST_COMMAND: python {project}/test/smoke_test/smoke_test.py
 
+      # Since 2.11.1 setup.py builds a single py3-none wheel that loads on every
+      # CPython, so each leg of the matrix produces the same file name. The publish
+      # job downloads all the artifacts into one directory, and four same-named
+      # wheels written over each other come out as a corrupt zip ("Bad magic number
+      # for central directory"). Every leg still builds and tests the wheel on its
+      # own interpreter; only the cp312 leg uploads it. Versions that build one
+      # wheel per CPython (2.11.0) still upload from every leg.
+      - name: Upload a py3-none wheel from one leg only
+        id: dedupe
+        run: |
+          if ls wheelhouse/*-py3-none-*.whl >/dev/null 2>&1 && [ "${{ matrix.python-version }}" != "312" ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: steps.dedupe.outputs.upload == 'true'
         with:
           name: torchaudio-${{ env.TORCHAUDIO_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
           path: ./wheelhouse/*.whl
