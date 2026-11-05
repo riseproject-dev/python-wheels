@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH 6/6] tests: skip profile-based checks when no vector ISA is
+ available
+
+Upstream-Status: To upstream [not yet submitted; mirrors jeffdaily/parasail's own tests/test_basic.c test4 NULL-profile handling]
+
+Profiles (and so the *_profile_* alignments and ssw) need a SIMD ISA;
+with none, parasail_profile_create_*() return NULL by design.
+jeffdaily/parasail's C test suite handles this explicitly: its
+tests/test_basic.c test4 ("if no vector ISA detected at build-time
+and/or run-time, this will fail") prints "NULL profile returned; vector
+ISA not supported" and passes. The Python tests have no such branch, so
+on riscv64 test_basic.test4 and the tail of test_tables error with
+"NULL pointer access", and test_ssw crashed outright.
+
+Skip just the profile-dependent parts when the profile is NULL, keeping
+every scalar check (sw_trace, stats/table/rowcol results, ...) running.
+In test_ssw the skip branch first asserts that ssw_profile() and ssw()
+return None, so the NULL-profile guard is still exercised.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tests/test_basic.py  |  3 +++
+ tests/test_ssw.py    | 28 +++++++++++++++++++---------
+ tests/test_tables.py |  3 +++
+ 3 files changed, 25 insertions(+), 9 deletions(-)
+
+diff --git a/tests/test_basic.py b/tests/test_basic.py
+index b844700..ced0c3b 100644
+--- a/tests/test_basic.py
++++ b/tests/test_basic.py
+@@ -19,6 +19,9 @@ class Tests(TestCase):
+ 
+     def test4(self):
+         profile = parasail.profile_create_8("asdf", parasail.blosum62)
++        if not profile.pointer:
++            # same as parasail's own tests/test_basic.c test4
++            self.skipTest("NULL profile returned; vector ISA not supported")
+         result = parasail.sw_striped_profile_8(profile, "asdf", 10, 1)
+         self.assertEqual(result.score, 20)
+ 
+diff --git a/tests/test_ssw.py b/tests/test_ssw.py
+index 2ee3208..38af010 100644
+--- a/tests/test_ssw.py
++++ b/tests/test_ssw.py
+@@ -8,10 +8,17 @@ class Tests(TestCase):
+         p = parasail.ssw_init("asdf", parasail.blosum62, 1)
+         r = parasail.ssw_profile(p, "asdf", 10, 1)
+ 
+-        print(p.s1)
+-        print(p.s1Len)
+-        print(r.cigarLen)
+-        print(r.cigar[0])
++        with self.subTest("ssw_profile"):
++            if not p.pointer:
++                # no vector ISA: ssw must fail cleanly, not crash
++                self.assertIsNone(r)
++                self.assertIsNone(parasail.ssw(
++                    "asdf", "asdf", 10, 1, parasail.blosum62))
++                self.skipTest("NULL profile returned; vector ISA not supported")
++            print(p.s1)
++            print(p.s1Len)
++            print(r.cigarLen)
++            print(r.cigar[0])
+ 
+         r = parasail.sw_trace("asdf", "asdf", 10, 1, parasail.blosum62)
+         c = r.cigar
+@@ -19,11 +26,14 @@ class Tests(TestCase):
+         print(c.seq[0])
+         print(c.decode)
+ 
+-        p = parasail.profile_create_8("asdf", parasail.blosum62)
+-        r = parasail.sw_trace_striped_profile_8(p, "asdf", 10, 1)
+-        c = r.cigar
+-        print(c.len)
+-        print(c.seq[0])
++        with self.subTest("sw_trace_striped_profile_8"):
++            p = parasail.profile_create_8("asdf", parasail.blosum62)
++            if not p.pointer:
++                self.skipTest("NULL profile returned; vector ISA not supported")
++            r = parasail.sw_trace_striped_profile_8(p, "asdf", 10, 1)
++            c = r.cigar
++            print(c.len)
++            print(c.seq[0])
+ 
+         r = parasail.sw_trace("asdf", "asdf", 10, 1, parasail.blosum62)
+         print(r.query)
+diff --git a/tests/test_tables.py b/tests/test_tables.py
+index abcbe54..3e027d1 100644
+--- a/tests/test_tables.py
++++ b/tests/test_tables.py
+@@ -115,6 +115,9 @@ class Tests(TestCase):
+ 
+         profile = parasail.profile_create_8("asdf",  parasail.blosum62)
+         profile = parasail.profile_create_8("asdf",  parasail.blosum62)
++        if not profile.pointer:
++            # same as parasail's own tests/test_basic.c test4
++            self.skipTest("NULL profile returned; vector ISA not supported")
+         print(profile)
+         print(profile.s1)
+         print(profile.matrix)

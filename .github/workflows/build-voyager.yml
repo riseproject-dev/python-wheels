@@ -39,13 +39,24 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build voyager ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build voyager ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # The wheel is cp312-abi3 whichever interpreter builds it, and building it
+          # on cp314 fails cibuildwheel's abi3audit (ABI violations from symbols the
+          # 3.14 headers expose), so build it once on cp312 and let the newer
+          # interpreters re-test that one wheel via find_compatible_wheel.
+          - tag: cp312-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          # Free-threaded builds get a per-interpreter wheel.
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
 
     env:
       VOYAGER_VERSION: ${{ matrix.version }}
@@ -69,8 +80,9 @@ jobs:
         with:
           package-dir: python
           output-dir: wheelhouse
-          only: ${{ matrix.python }}-manylinux_riscv64
         env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy
@@ -80,7 +92,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: voyager-${{ env.VOYAGER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: voyager-${{ env.VOYAGER_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 

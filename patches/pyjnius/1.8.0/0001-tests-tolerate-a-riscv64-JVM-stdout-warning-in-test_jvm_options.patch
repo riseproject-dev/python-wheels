@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 30 Sep 2026 00:00:00 +0000
+Subject: [PATCH] tests: tolerate a riscv64 JVM stdout warning in
+ test_jvm_options
+
+test_jvm_options spawns a subprocess that imports jnius (starting the JVM)
+and then json.dumps the JVM's own input arguments straight to stdout,
+which the parent process parses with json.loads(stdoutdata.decode()).
+
+On riscv64 the JVM itself prints a startup diagnostic to stdout before
+any Python code runs:
+
+    WARNING: Not able to assign machine() = riscv64 to a cpu value!
+             Using cpu = 'riscv64' instead!
+
+That line lands ahead of the JSON in the same stdout stream, so
+json.loads sees "WARNING: ...\n[...]" and fails with
+JSONDecodeError: Expecting value: line 1 column 1 (char 0), even though
+the JVM started fine and the arguments round-tripped correctly. The
+child's own json.dump() output is always the last line written, so
+parse only that line instead of the whole stream.
+
+Upstream-Status: To upstream [not yet submitted; riscv64-specific JVM startup diagnostic, no reference to check it against yet]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+--- a/tests/test_jvm_options.py
++++ b/tests/test_jvm_options.py
+@@ -27,5 +27,8 @@
+             bufsize=-1, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+         stdoutdata, _ = process.communicate(json.dumps(options).encode())
+         assert process.wait() == 0
+-        actual_options = json.loads(stdoutdata.decode())
++        # The JVM itself can print a startup diagnostic to stdout ahead of
++        # the child's own json.dump() output; that dump is always the last
++        # line written, so parse only it.
++        actual_options = json.loads(stdoutdata.decode().splitlines()[-1])
+         assert list(sorted(options)) == list(sorted(actual_options))
