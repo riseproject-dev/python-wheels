@@ -132,17 +132,16 @@ uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_
 ```
 
 which adds `python-versions` to every entry of the YAML that lacks it. The
-values must be quoted: unquoted, YAML reads `3.10` as the number 3.1.
+field is required, and the packages YAML validation fails if it is missing.
+The values must be quoted: unquoted, YAML reads `3.10` as the number 3.1.
 
 The `setup` job of every build workflow outputs a `matrix` with one entry
-per listed version that cibuildwheel can build for riscv64
+per listed version that cibuildwheel can build for riscv64. Each entry has a
+cibuildwheel `python` tag such as `cp314t` and its `python-version` form such
+as `3.14t`, for jobs that install interpreters directly
 (`RISCV64_PYTHONS` in `ci_scripts/pending_versions.py`: currently 3.9 to 3.15
 and 3.14t/3.15t, but not 3.13t). That list is a technical limit, updated
-when cibuildwheel is bumped, not a policy choice. A version without
-`python-versions` is left out of the matrix with a warning on the run, so
-workflows that still hard-code their interpreters (and ignore the matrix)
-keep working; in a workflow that uses the matrix, that version's build or
-publish fails.
+when cibuildwheel is bumped, not a policy choice.
 
 To build more or fewer interpreters than upstream for one version, edit its
 `python-versions`. To drop interpreters for every version of a package, use
