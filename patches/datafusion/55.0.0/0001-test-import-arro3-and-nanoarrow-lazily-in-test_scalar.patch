@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 19 Sep 2026 10:00:00 +0200
+Subject: [PATCH] test: import arro3 and nanoarrow lazily in
+ test_scalar_conversion
+
+Upstream-Status: Inappropriate [nanoarrow publishes no riscv64 wheel]
+
+python/tests/test_expr.py imports arro3.core and nanoarrow at module
+scope, but the only test using either is test_scalar_conversion. nanoarrow
+is a separate compiled project with no riscv64 wheel on PyPI or on
+pypi.riseproject.dev, so that module-scope import makes the whole file --
+roughly 185 other tests -- fail to collect on riscv64.
+
+Move both imports into the one test that needs them, using
+pytest.importorskip, the mechanism the suite already uses for pandas,
+polars and pyarrow.cffi in test_context.py and test_dataframe.py. The
+rest of the file then runs, and test_scalar_conversion skips instead of
+erroring. The pyarrow and __arrow_c_array__ assertions it also carries
+are covered by the pyarrow-only paths elsewhere in the file.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/python/tests/test_expr.py b/python/tests/test_expr.py
+index 606c6a9..1c891a1 100644
+--- a/python/tests/test_expr.py
++++ b/python/tests/test_expr.py
+@@ -20,8 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
+ from datetime import date, datetime, time, timezone
+ from decimal import Decimal
+
+-import arro3.core
+-import nanoarrow
+ import pyarrow as pa
+ import pytest
+ from datafusion import (
+@@ -973,6 +971,9 @@ def test_literal_metadata(ctx):
+
+
+ def test_scalar_conversion() -> None:
++    arro3_core = pytest.importorskip("arro3.core")
++    nanoarrow = pytest.importorskip("nanoarrow")
++
+     class WrappedPyArrow:
+         """Wrapper class for testing __arrow_c_array__."""
+
+@@ -994,7 +995,7 @@ def test_scalar_conversion() -> None:
+     assert expected_value == lit(na_scalar)
+
+     # Test pyo3
+-    arro3_scalar = arro3.core.Scalar(1, type=arro3.core.DataType.int32())
++    arro3_scalar = arro3_core.Scalar(1, type=arro3_core.DataType.int32())
+     assert expected_value == lit(arro3_scalar)
+
+     generic_scalar = WrappedPyArrow(pa.array([1]))
+@@ -1008,7 +1009,7 @@ def test_scalar_conversion() -> None:
+     na_array = nanoarrow.Array([1, 2, 3], nanoarrow.int32())
+     assert expected_value == lit(na_array)
+
+-    arro3_array = arro3.core.Array([1, 2, 3], type=arro3.core.DataType.int32())
++    arro3_array = arro3_core.Array([1, 2, 3], type=arro3_core.DataType.int32())
+     assert expected_value == lit(arro3_array)
+
+     generic_array = WrappedPyArrow(pa.array([1, 2, 3]))
