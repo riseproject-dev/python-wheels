@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/quantinuum/hugr/blob/hugr-py-v0.18.8/.github/workflows/python-wheels.yml
+# and the `test` job of
+# https://github.com/quantinuum/hugr/blob/hugr-py-v0.18.8/.github/workflows/ci-py.yml
+name: Build hugr wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hugr.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hugr.yml'
+      - 'docs/packages/hugr.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hugr.yml'
+      - 'docs/packages/hugr.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: hugr
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hugr ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      HUGR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout hugr-py ${{ env.HUGR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: quantinuum/hugr
+          ref: hugr-py-v${{ env.HUGR_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --profile release-py --strip --out ../dist
+          manylinux: '2_39'
+          working-directory: hugr-py
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --profile release-py --strip --out ../dist -i python3.14t
+          manylinux: '2_39'
+          working-directory: hugr-py
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hugr-${{ env.HUGR_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    name: Test hugr ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      HUGR_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout hugr-py ${{ env.HUGR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: quantinuum/hugr
+          ref: hugr-py-v${{ env.HUGR_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: hugr-${{ env.HUGR_VERSION }}-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Setup Graphviz
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends graphviz
+
+      - name: Install wheel and test dependencies
+        run: >-
+          uv pip install --only-binary hugr --find-links dist
+          "hugr==${HUGR_VERSION}"
+          "pytest~=9.0" "syrupy~=5.1" "toml>=0.10.0,<0.11" "pytest-benchmark>=5.1.0"
+
+      # --pyargs runs upstream's --doctest-modules against the installed wheel, not hugr-py/src.
+      - name: Run tests
+        run: HUGR_RENDER_DOT=1 python -m pytest -p no:cacheprovider hugr-py/tests --pyargs hugr
+
+  publish:
+    name: Publish hugr ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: hugr-${{ matrix.version }}-manylinux_riscv64

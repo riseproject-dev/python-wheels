@@ -323,6 +323,62 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **653** — Genuinely open, BSD-licensed Python bindings can still be build-time-blocked by a
   closed native shim that is neither the vendor's full engine nor an optional runtime
   accelerator — check what `Extension(libraries=[...])` actually links against (amplpy).
+- **654** — A rename-fork that adds one feature can be blocked by that feature's prebuilt
+  native payload even when the base package is ported: a hard-wired cargo feature pulls a
+  crate whose `build.rs` downloads an x86-only `.so` built in a private repo (hops-deltalake).
+- **655** — A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins
+  is a closed Cython core (all `.so`, no `.py` twins, zero sdist) with no licence —
+  double-locked, source and licence both absent (browser-act-cli).
+- **656** — An XLA-based package's riscv64 verdict depends on the XLA *and* LLVM-overlay
+  revision it pins (LLVM's Bazel `config.bzl` once defaulted unknown Linux arches to an X86
+  native target; XLA once had no `if_llvm_riscv_available`), and a bridge built inside a
+  sibling's source tree (`PYTORCH_LOCAL_DIR = "../"`) is pinned to that sibling's exact
+  version (the torch-xla case).
+- **657** — A GPU loader can pass gotcha 284's dlopen test (no CUDA at build time, `RTLD_NOLOAD`
+  reuse of torch's `libcudart`) and still be dead on riscv64 because its only public API
+  raises for any non-`cuda` device in pure Python (the instanttensor case).
+- **664** — A GPU-interop package can be blocked by two independent upstream-only
+  prebuilt-binary fetches stacked on top of each other, one of which dodges and one of which
+  doesn't (the slangpy case).
+- **669** — A CMake extension's `pyproject.toml` can look fully buildable while the published
+  sdist ships none of the extension's own source — `pip wheel` on any host, not the
+  `requires` list, is what proves a build is even attempted (the mplib case).
+- **674** — A latest release missing an arch every recent prior release shipped can be
+  upstream's own publish-pipeline flake, not a new structural gap — read the commit log
+  right after the release tag before porting (the ayafileio case).
+- **675** — A `py3-none-<platform>` wheel's native payload can be fetched from a *second*,
+  non-PyPI GitHub repo's own release assets at build time, with that sibling's release matrix
+  (not the package's own tree) missing riscv64 (the pydivert/ebpfdivert case).
+- **676** — A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions
+  of the same-named PyPI project signals a full-language rewrite, even when the project's own
+  PyPI summary never updates to say so (the nb-clean case).
+- **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
+  a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
+  with no riscv64 entry (the scrapli/libscrapli case).
+- **679** — An embedded engine's riscv64 support can be real in the upstream source tree and
+  still not be real for the vendored commit a binding pins — check the fix's landing date
+  against the pin's date, not just whether the backend directory exists (the pythonmonkey
+  case).
+- **681** — `MANIFEST.in` can vendor a precompiled binary into every wheel with no platform
+- **684** — A package that embeds a KVM-based hypervisor needs more than a compiling
+  Rust/C target: the vendored engine's riscv64 code can be real but CI-unverified, and even a
+  clean compile needs the host's RISC-V Hypervisor+AIA extensions to actually run (boxlite).
+- **688** — A `PLATFORM_SUPPORT.md`-documented native engine with no riscv64 asset anywhere in
+  its own third-party binary distributor's release matrix looks like a hard architecture lock,
+  but check whether the language binding's *published-wheel* build job actually bundles that
+  specific binary at all before parking on it — an optional engine can dlopen lazily and
+  degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
+- **704** — Gotchas 556/600/601 generalize one layer further: a legitimate, active GitHub org
+  with its own unrelated public repos can still run a product's *entire* build — wrapper layer
+  and native engine alike — inside a private monorepo with no public checkout at any layer, so
+  there is no repo to even clone; the wheel's own bundled SBOM is the only artifact that proves
+  it (the istari-digital-core case).
+- **706** — Gotcha 600/670/704's private-monorepo shape doesn't need a path dependency or a
+  submodule to bite: a plain `git` Cargo dependency pinned by rev into a third-party org's
+  private repo, gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux
+  build exactly as hard as a missing checkout would, even though the wrapper's own repo is
+  fully public and the Python dependency closure resolves clean (the chalk-remote-call-python
+  case).
 
 ---
 
@@ -3664,8 +3720,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       unblock this. **For an archived dependent, resolve the pin to a concrete version before
       writing "revisit once the dep lands"** — otherwise the note promises an unblocking that
       the named work cannot deliver.
-    - **Intersect the pinned dependency window's own *interpreter* coverage with this
-      repo's default matrix; an empty intersection settles the port on its own.** TF
+    - **Intersect the pinned dependency window's own *interpreter* coverage with the
+      matrix the port would build; an empty intersection settles the port on its own.** TF
       2.13.1/2.14.0/2.15.0 ship `cp38`-`cp311` wheels and nothing later, while this repo
       builds cp312/cp313/cp314/cp314t — zero overlap, so no matrix row could be valid even
       with a riscv64 TF 2.15 in hand. This is a cheap PyPI-JSON check (`{f['filename']}`
@@ -5684,3 +5740,747 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       genuinely functional CPU/interpreter backend into `_discover_backends()` (today's
       `cpu_driver.py` is not that). No worktree/branch/workflow/docs entry/patch/PR; scratch
       under `.git/pw-scratch/triton-ascend/` removed.
+
+654. **A fork that renames a package to add one feature can be blocked by exactly that
+     feature's native payload, even when the base package is already ported (the
+     hops-deltalake/delta-rs case).** `hops-deltalake` 1.4.0.post121 is logicalclocks' fork
+     of `delta-rs`, published from the fork's `dev` branch (Cargo `version = "1.4.0-post121"`,
+     commit 607ba098 "release 1.4.0-post121"; `main` is still `1.4.0`, so take the version
+     from the sdist/`git log -S`, not the newest branch). Everything that makes plain
+     `deltalake` portable here still holds — pyo3 `abi3-py310`, maturin, one `cp310-abi3`
+     wheel — but the fork exists to add HopsFS support, and the pyo3 crate's
+     `[dependencies.deltalake] features` list hard-wires `"hdfs"`. That pulls in
+     `deltalake-hdfs` → the crates.io crate `hopsfs-native-object-store` (1.2.1), whose
+     `build.rs` on Linux **downloads a prebuilt `libhdfs-golang` shared library** from
+     `https://repo.hops.works/master/libhdfs/libhdfs-golang-<HOPS_VERSION>.tar.gz`
+     (`HOPS_VERSION` = `3.4.3.1-EE-RC0`) and `create_symlinks()` hardcodes the filter
+     `"linux-amd64"` for the `.so` it links — there is no arch branch at all. The tarball
+     carries only `linux-amd64` (x86-64 ELF) and `darwin-11.0-arm64` payloads; a riscv64 (or
+     even linux-arm64) key 404s, so a riscv64 build either fails the link or bundles an x86-64
+     `.so` (the published `manylinux_2_28_x86_64` wheel does exactly the latter —
+     `deltalake.libs/libhdfs-*.so` is x86-64). The payload is built in a **private** repo
+     (`strings` the `.so`: `/__w/hops-enterprise/hops-enterprise/.../libhdfs-golang/*.go`,
+     Go `hopsworks.ai/libhdfs` importing `logicalclocks/hopsfs-go-client`); the only public
+     libhdfs-golang source (`hopshadoop/hops`, GPL-3) is an older, API-divergent version
+     (`3.2.0.16-SNAPSHOT`) that cannot be version-matched to the `-EE-RC0` payload the wheel
+     needs, so there is no from-source riscv64 path even ignoring the hardcoded `amd64`.
+     Dropping the `hdfs` feature would erase the only reason the fork exists (it would become
+     plain `deltalake`, already published) and is a refuse-shortcut anyway.
+     - Verdict: `parked`. Revisit only if HopsFS ships a riscv64 `libhdfs-golang` at
+       `repo.hops.works` and `hopsfs-native-object-store`'s `build.rs` grows a riscv64 arch
+       branch. No worktree/branch/workflow/docs entry/patch/PR; scratch under
+       `.git/pw-scratch/hops-deltalake/` removed.
+
+655. **A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins is
+     a closed Cython core with no source — the org is the marketing surface, not the source
+     (the browser-act-cli case; same closed-Cython shape as gotchas 601/605/620, same
+     no-licence lock as 372/650).** `browser-act-cli` 1.4.2 (`requires-python ==3.12.*`,
+     one `cp312-cp312` wheel per Linux/macOS/Windows arch) looks like an ordinary CLI, but
+     the wheel is **385 compiled `.cpython-312-*.so` across 7 top-level packages**
+     (`browser_act_cli`, `browser_act_core`, `browser_act_kernel`, `browser_act_captcha_python_sdk`,
+     `cdpeng_rt`, …), **not one of which has a `.py` twin** — `strings` a `.so` shows
+     `_cython_3_2_9`/`cython_runtime`, so it is Cython-compiled, not a vendored foreign binary
+     (gotcha 530's honest-extension case does not apply). **Zero sdist across all 40 releases**
+     (`pip download --no-binary :all:` finds nothing). The upstream install path is
+     `uv tool install browser-act-cli` from PyPI; the `browser-act` GitHub org's repos
+     (`skills`, `claude-code-browser-act`, `browseract-*`) are agent Skill markdown and editor
+     plugins whose own `requirements.txt` is just `requests`/`python-dotenv` — none contains
+     the compiled package's source. Second, independent lock: the wheel ships **no licence at
+     all** (no `License`/`license_expression` field, no licence classifier, no
+     `dist-info/licenses/`), and it is a commercial stealth-browser + captcha-solving product
+     (`service@browseract.com`, `www.browseract.com`) — "all rights reserved" by default
+     (gotcha 650), so there is nothing redistributable even if the source existed.
+     - Verdict: `parked`. Revisit only if BrowserAct publishes the CLI's source and a licence
+       permitting redistribution, or ships a riscv64 wheel. No worktree/branch/PR; resolved
+       read-only via PyPI JSON, the published aarch64 wheel, and a GitHub org/repo search;
+       scratch under `.git/pw-scratch/browser-act-cli/` removed.
+
+656. **An XLA-based package's riscv64 verdict is set by the *revision* of XLA and of LLVM's Bazel
+     overlay it pins, not by "XLA" in general — and a bridge built *inside* a sibling's source
+     tree is pinned to that sibling's exact version (the torch-xla case).** torch-xla 2.9.0 is a
+     Bazel build of OpenXLA from source (`http_archive(name = "xla")` at `92f7b595`, 2025-08-15
+     — no prebuilt XLA/PJRT blob, no hermetic CC toolchain: `.bazelrc` sets
+     `--action_env=CC=gcc` and the WORKSPACE registers no `rules_ml_toolchain` toolchain), so
+     gotcha 343's prebuilt-library wall is absent. Three concrete walls replace it:
+     - **LLVM's Bazel overlay can default every unknown Linux arch to X86.** At the LLVM commit
+       XLA pins (`fc44a4fc`, `third_party/llvm/workspace.bzl`),
+       `utils/bazel/llvm-project-overlay/llvm/config.bzl` maps `linux_aarch64`/`ppc64le`/
+       `s390x` and sends `//conditions:default` to `native_arch_defines("X86",
+       "x86_64-unknown-linux-gnu")`. On a riscv64 host that makes `LLVM_NATIVE_TARGET`
+       `LLVMInitializeX86Target` and `LLVM_HOST_TRIPLE` x86_64, and XLA's CPU JIT
+       (`ir_compiler.cc` `InitializeNativeTarget()` + `EngineBuilder().selectTarget(Triple())`)
+       uses exactly those. LLVM `main` has since added `Label("//llvm:linux_riscv64")`, so the
+       fix is a backport hunk — but it must be checked per pinned LLVM commit.
+     - **XLA's per-arch CodeGen lists may have no RISC-V arm at all.** At `92f7b595`,
+       `xla/service/cpu/BUILD` and `xla/backends/cpu/codegen/BUILD` link
+       `AArch64/PowerPC/SystemZ/X86CodeGen` via `if_llvm_*_available`, and
+       `if_llvm_riscv_available`/`//xla/tsl:riscv64_or_cross` do not exist yet (`grep -ri
+       riscv` over BUILD/.bzl hits only `remote_platform_configure.bzl` and the LLVM target
+       list). The XLA that TF 2.21.0 vendors has them (gotcha 426's counterpoint), and jaxlib
+       0.11.1's later XLA had them but missed `embed_bitcode` (PR #526) — three revisions, three
+       different answers, so grep the pinned tree, never a neighbour's.
+     - **`PYTORCH_LOCAL_DIR = "../"` makes the sibling an in-tree build, not a wheel.**
+       `bazel/torch.BUILD` `cc_import`s `build/lib/libtorch*.so` and `torchgen` YAML from a
+       PyTorch *source checkout* one directory up, and upstream's own recipe
+       (`infra/ansible/roles/build_srcs`) builds PyTorch from `.torch_commit` first. The
+       product only loads against that exact torch (C++ ABI, no `torch` in `Requires-Dist`),
+       so with our registry carrying `torch` 2.13/2.14 only, a torch-xla 2.9.0 wheel would be
+       uninstallable in practice even if the build succeeded — `blocked-on-dependency` on a
+       riscv64 torch 2.9.x, not just "patch XLA". Hermetic pip is *not* a wall here: the
+       `requirements_lock_3_*.txt` set is pure-Python (expecttest, sympy, jinja2, …).
+
+657. **gotcha 284's dlopen test passing is only half the check for a GPU loader. Read the one
+     public entry point for a device gate before calling it portable (the instanttensor
+     case, the opposite of fastsafetensors).** instanttensor ("ultra-fast, distributed
+     Safetensors loader", `scitix/InstantTensor`, Apache-2.0) looks like a clean port: a
+     setuptools pybind11 extension with vendored libaio/liburing (liburing already has
+     `src/arch/riscv64/`), no CUDA headers at build time, `libraries=["dl"]` only. CUDA, HIP,
+     cuFile and NCCL are reached through `dl_binding/*.hpp`, and those bindings `dlopen` with
+     `RTLD_NOLOAD` the `libcudart`/`libamdhip64` torch has *already* mapped (found by scanning
+     `/proc/self/maps`), so the extension would compile and import on riscv64. The package is
+     still dead there. `safe_open.__init__` (`instanttensor/_impl.py`) raises
+     `ValueError("InstantTensor only supports CUDA devices for now")` whenever
+     `torch.device(device).type != "cuda"`, and `safe_open` is the package's only API. The
+     README roadmap lists "CPU loading" as future work, and the gate is the same at the queued
+     0.1.9 and at the newest tag, 0.2.2. Our riscv64 torch is CPU-only, so every call fails.
+     Upstream's own wheel test (`python -c "from instanttensor import safe_open"`) would pass
+     anyway, which is gotcha 419's dead-stub trap. fastsafetensors (published) is the
+     contrast: it has a real CPU device path. Verdict: `parked`. Revisit when a release drops
+     the CUDA-only check in `safe_open`.
+
+664. **A GPU-interop package can be blocked by two independent upstream-only prebuilt-binary
+     fetches stacked on top of each other, one of which dodges and one of which doesn't (the
+     slangpy case).** slangpy (shader-slang/slangpy, Apache-2.0) wraps `sgl`, a setuptools +
+     CMake build (`cmake==3.31.6` pin, `--preset linux-gcc`) that vcpkg-installs only
+     `libjpeg-turbo`/`libpng`/`openexr`/`asmjit` — all portable, and the one riscv64-shaped
+     worry (`asmjit` has no RISC-V JIT backend) is a non-issue: `src/sgl/core/data_struct.cpp`
+     only ever selects `X86Program`/`ARMProgram` under `SGL_X86_64`/`SGL_ARM64`, and falls back
+     to a portable `VMProgram` interpreter on every other arch regardless of whether `asmjit`
+     was found, exactly like gotcha 648's scann scalar fallback. The real wall is one layer
+     down, in the `slang-rhi` submodule's `CMakeLists.txt`, which fetches two separate
+     upstream-only prebuilt binaries by URL and is not shy about it: (1) the Slang shading
+     compiler itself, `shader-slang/slang`'s release asset
+     `slang-<ver>-linux-<arch>.tar.gz` — confirmed only `x86_64`/`aarch64` exist (`-riscv64`
+     404s) — and (2) the Dawn WebGPU implementation, `shader-slang/webgpu-dawn-binaries`'s
+     `webgpu-dawn-<ver>-linux-<arch>.zip`, same `x86_64`/`aarch64`-only shape, same confirmed
+     404. Both paths hit `message(FATAL_ERROR "Unsupported processor architecture")` while
+     just computing the download URL, before any backend-enable option is even consulted. The
+     Dawn one dodges: predefine `-DSLANG_RHI_DAWN_URL=<dummy>` (its `if(NOT DEFINED ...)` guard
+     then skips the FATAL block entirely) and pass `-DSLANG_RHI_ENABLE_WGPU=OFF` so the dummy
+     URL is never actually fetched — WebGPU is an optional backend alongside CPU/Vulkan/CUDA.
+     The Slang compiler fetch does not dodge: it is not an optional backend, it is the thing
+     slangpy exists to wrap (`import slangpy` links against `libslang-compiler.so`), and its
+     only non-prebuilt alternative is `SLANG_RHI_BUILD_FROM_SLANG_REPO=ON`, which pulls in the
+     entire `shader-slang/slang` compiler — its own LLVM-scale CMake tree with its own
+     optional prebuilt `slang-llvm`/`dawn`/`tint` fetches — as a from-scratch second port, not
+     a cibuildwheel knob on this one. No riscv64 work exists upstream in either
+     `shader-slang/slang` or `shader-slang/slangpy` (checked both issue trackers). Verdict:
+     `parked` — a missing-prerequisite-port one level down, not a slangpy-specific defect;
+     revisit once `shader-slang/slang` itself ships a riscv64 compiler release to point
+     `SLANG_RHI_SLANG_URL`/`SLANG_RHI_FETCH_SLANG` at.
+
+669. **A CMake extension's `pyproject.toml` can look fully buildable while the published
+     sdist ships none of the extension's own source — `pip wheel <sdist> --no-deps
+     --no-build-isolation` on any host, not the `[build-system] requires` list, is what
+     proves a build is even attempted (the mplib case).** mplib (a motion-planning library
+     wrapping OMPL/FCL/Pinocchio) reads as straightforwardly portable from packaging
+     metadata alone: a normal `setup.py` `CMakeExtension`/`CMakeBuild` pair, `requires =
+     ["setuptools>=61.0", "setuptools-git-versioning<2", "libclang==11.0.1"]`. The released
+     sdist (`mplib-0.2.1.tar.gz`) contains none of the C++ side: extracting it yields only
+     the Python wrapper tree (`mplib/*.py`, `.pyi` stubs) and packaging files — no
+     `CMakeLists.txt`, no `src/`, no `pybind/`, no `third_party/` anywhere in the archive.
+     `pip wheel <extracted-sdist> --no-deps --no-build-isolation` fails immediately **on
+     x86_64**, with the `cmake <sourcedir>` subprocess erroring because there is nothing to
+     configure — not a riscv64 symptom at all. The real source and its ~13 from-source
+     system C++ dependencies (Eigen, libccd, Boost, OMPL, octomap, a maintainer fork of FCL,
+     CppAD, console_bridge, urdfdom_headers, tinyxml2, urdfdom, pinocchio with autodiff,
+     assimp, orocos_kdl) live only in the upstream git repo plus a hand-maintained
+     `docker/Dockerfile`; upstream's own CI never builds a wheel from the sdist it publishes
+     either — its `build-sdist` job only runs `python -m build --sdist` to produce it, and
+     real wheels come from `cibuildwheel` against the full checkout inside that image. A
+     `[build-system] requires` naming cmake/pybind11/ninja is evidence the project *has* a
+     CMake build, not that the sdist *contains* it — run the local `pip wheel` check before
+     crediting either. (Separately, that same `pyproject.toml`'s `libclang==11.0.1` build
+     pin — which only ever shipped `manylinux1_x86_64`/macOS/Windows wheels — is not itself
+     fatal: it is gotcha 346's exact shape, fixed the same way `build-pymupdfb.yml` fixes
+     it.)
+
+670. **A public git repo can be only the "core" submodule of a private outer repo, and the
+     real published wheel can be built from the outer repo, not the public one (the ovito
+     case).** gitlab.com/stuko/ovito looks like a complete, buildable project: a real
+     CMakeLists.txt tree, GPL-3/MIT dual license, no vendored blobs, and every `find_package()`
+     it calls (Qt6, Boost, OpenSSL, SQLite3; HDF5/NetCDF-C/zstd pulled in as git submodules and
+     statically linked when `OVITO_BUILD_PYPI=ON`) resolves against this repo's existing
+     Rocky-10-riscv64 precedent (shiboken6/pyside6-essentials already build Qt6-dependent
+     extensions there). That tree alone would be a feasible, if large, port. But the actual
+     PyPI `ovito` wheel ships far more than this repo can produce: inspecting the real
+     manylinux_2_39_aarch64 wheel's zip central directory with `ci_scripts/wheel_contents.py`
+     (no download needed) shows compiled plugins for Intel's OSPray/OpenVKL/Embree4/rkcommon/
+     OpenImageDenoise and NVIDIA's ANARI/VisRTX ray-tracing backends, none of which is reachable
+     from any `find_package()`/`FetchContent_Declare()` anywhere in the public CMake tree.
+     `cmake/OvitoTesting.cmake` names the reason directly — a comment points at
+     `proprietary/ovito/anari/CMakeLists.txt` as the ANARI plugin's source location — and
+     `tests/README.md` confirms the shape outright: "These tests live in the `ovito/` submodule
+     (the open-source core repository). Tests covering proprietary plugins live in
+     `proprietary/tests/` in the outer repo." The `proprietary/` directory does not exist in
+     this checkout (no folder, no `.gitmodules` entry, no git history for it at all) — the
+     public repo is itself only the `ovito/` submodule of a private "outer" repo that OVITO
+     GmbH builds the real wheel from, and the ray-tracing plugins baked into that wheel live
+     exclusively in the private half. README.md/CONTRIBUTING.md say the same thing from the
+     product side: this repo builds "OVITO Basic" under GPL-3; the real wheel's own
+     `dist-info/METADATA` instead declares `License-Expression: MIT` and ships Pro-grade
+     renderers, so the artifact being matched is provably not a build of the public repo alone.
+     There is also no public build recipe to mirror even for the part that is public: the
+     repo's own `.gitlab-ci.yml` only runs a Debug `cmake --build . --target install` +
+     `ovito --nogui` smoke test, never packages a wheel, and PyPI ships no sdist for `ovito` to
+     fall back on either. This is gotcha 157/246/582's closed-source-vendor-inside-an-open-
+     looking-package pattern one level up: instead of one vendored binary blob, it's an entire
+     private sibling repo supplying the plugins that make the published artifact what it is.
+     A from-source build of the public repo alone would produce a materially different,
+     degraded `ovito` that silently drops its advertised ray-tracing renderers — not an
+     equivalent artifact under the same name. Verdict: `parked`. Revisit if OVITO GmbH ever
+     publishes the `proprietary/` outer repo, or ships riscv64 wheels itself, or splits a
+     Basic-only (ANARI/OSPray-free) artifact out under a different name.
+
+674. **A latest release missing an arch every recent prior release shipped can be upstream's
+     own publish-pipeline flake, not a new structural gap — read the commit log right after
+     the release tag before porting (the ayafileio case).** ayafileio builds its own riscv64
+     wheels: `build_wheel_ci.yml` runs a dedicated `build-riscv64` job (cibuildwheel under
+     QEMU, split out from the `x86_64`/`aarch64`/macOS/Windows `build` job only because it is
+     "slower than everything else combined") and feeds it into the same `publish` job. PyPI's
+     JSON confirms this actually ships: every release from 1.4.3 through 2.0.3 carries a full
+     `manylinux_2_39_riscv64` set (cp310 through cp315/cp314t/cp315t). 2.0.4, the latest at
+     triage time, has the other 56 wheels and zero riscv64 ones; `pypi.riseproject.dev/simple/
+     ayafileio/` 404s. Read in isolation, that is indistinguishable from a brand-new,
+     in-scope packaging gap. It isn't: `git log` on the real upstream repo
+     (github.com/SaigyoujYuyuko/ayafileio) shows the `chore: release 2.0.4` tag commit
+     immediately followed, two days before this triage, by `fix: let successful soak gate
+     wheel builds`, `fix: require successful wheel builds before publishing`, `fix: run basic
+     tests for every release`, `fix: run release tests as a regular job` and `fix: support x86
+     wheels and parallelize soak` — i.e. the `publish` job used to gate on
+     `needs.build.result == 'success' || needs.build-riscv64.result == 'success'`, so a flaky
+     or slow QEMU riscv64 leg could fail silently and the release would still publish with
+     every other platform's wheels. 2.0.4's own changelog entry is a pure bugfix (Windows/
+     macOS concurrency fixes only, no CI changes), consistent with the riscv64 leg simply
+     flaking on that run rather than anything in the release breaking riscv64 support itself.
+     Porting this into pypi.riseproject.dev would duplicate a CI pipeline upstream already
+     owns and was actively hardening at the moment of triage, and would need deprecating
+     again the moment upstream's next tag republishes riscv64 wheels through its own pipeline.
+     Verdict: `parked`, not `ci-running`. Before treating "latest release missing arch X" as a
+     new gap, diff the latest release's wheel set against the *previous several* releases'
+     sets (not just whether riscv64 404s today) and read upstream's commit log right after the
+     release tag for its own release-pipeline fixes — a gap that was absent on 20+ consecutive
+     prior releases and appears on exactly the newest one is upstream's regression to fix, not
+     ours to backfill.
+
+675. **A `py3-none-<platform>` wheel's native payload can be fetched from a *second*,
+     non-PyPI GitHub repo's own release assets at build time — not compiled by the package
+     being ported at all — and that sibling's release matrix, not anything in the package's
+     own tree, is what riscv64 is missing (the pydivert/ebpfdivert case).** pydivert 4.0.1
+     ships `py3-none-manylinux_2_28_{x86_64,aarch64}` wheels (plus `win_amd64`) containing one
+     arch-specific blob, `pydivert/bpf/libebpfdivert.so` — a real ELF, not a stub (confirmed
+     with `file` on the extracted aarch64 wheel). Its sdist has no C sources for this at all:
+     a hatchling build hook (`hatch_build.py`) runs `scripts/fetch_binaries.py`, which
+     `urllib.request.urlopen`s
+     `github.com/ffalcinelli/ebpfdivert/releases/download/v<ver>/ebpfdivert-v<ver>-linux-<arch>.tar.gz`
+     — release assets of a *different* repository (`ffalcinelli/ebpfdivert`, not on PyPI at
+     all) that pydivert merely pins a version of in `pyproject.toml`
+     (`[tool.pydivert.binaries] ebpfdivert = "0.0.5"`). Cloning that sibling repo shows it
+     genuinely compiles two things, and only one is the riscv64 wall:
+     - **The eBPF half is not the blocker.** `src/ebpfdivert.bpf.c`/`_events.bpf.c` are real
+       BPF programs (`clang -target bpf`, CO-RE via a committed `vmlinux.h`), and that
+       `-target bpf` is LLVM's architecture-independent virtual ISA, resolved against the
+       *running* kernel's BTF by libbpf at load time — the project's own `release.yml` tags
+       the compiled `.bpf.o` "architecture neutral" and uploads it once, from the `amd64` leg
+       only. Nothing here needs a riscv64-specific LLVM/BPF backend (contrast gotcha 425,
+       where the eBPF object genuinely *couldn't* be produced on riscv64 because `bpf-linker`
+       dlopens a shared `libLLVM` the riscv64 Rust dist doesn't ship — not the case for a
+       plain `clang -target bpf` invocation, which any ordinarily-built clang supports
+       regardless of host arch).
+     - **The real payload is an ordinary native `.so`** — `handle.c`/`ebpfdivert.c`/
+       `prefilter.c`/`wd_port.c` plus a statically-linked `libbpf` (vendored submodule) +
+       libelf/zstd/zlib, built with plain `gcc`/`make` inside
+       `quay.io/pypa/manylinux_2_28_$(uname -m)`. This part is riscv64-portable in principle
+       (nothing exotic — the same `manylinux_2_28`-style container and gcc toolchain this repo
+       already uses elsewhere), but `ebpfdivert`'s `release.yml` matrix is hardcoded to two
+       GitHub-hosted runners (`ubuntu-24.04` → amd64, `ubuntu-24.04-arm` → arm64) and
+       publishes exactly those two tarballs — there is no `linux-riscv64` asset at any
+       released tag (`v0.0.1`-`v0.0.5`), and nothing in pydivert's own tree can produce one.
+     - **pydivert's downloader fails hard, not gracefully, on top of that**: `fetch_binaries.py`'s
+       `_linux_arch()` maps only `x86_64`/`aarch64` and `raise RuntimeError(...)` on anything
+       else, and `hatch_build.py`'s `TARGETS` dict (which also sets the wheel's platform tag)
+       has no riscv64 key and `raise ValueError(...)` first — so even pydivert's own
+       `PYDIVERT_EBPFDIVERT_LOCAL` env var (meant to let a developer point at a locally-built
+       `.so`) is unreachable through a real `hatch build`/`pip wheel` invocation, unlike
+       gotcha 550's shfmt-py downloader, whose unknown-platform branch degrades to a `PATH`
+       search instead of raising.
+     - **Verdict: `blocked-on-dependency`, not a build-it-ourselves patch, even though the
+       userspace half looks locally portable.** Vendoring a `CIBW_BEFORE_BUILD` step that
+       clones `ffalcinelli/ebpfdivert` at the pinned tag and compiles `libebpfdivert.so` for
+       riscv64 ourselves (then patching `hatch_build.py`/`fetch_binaries.py` to accept the
+       local build) would mean this repo takes over authoring, testing (that project's own
+       `tests/test_bpf.c` loads the program into a real kernel with `sudo`) and maintaining a
+       packet-capture/injection eBPF loader for a project we don't own — an invented mechanism
+       with no analogue in pydivert's actual upstream CI (goal 2: nothing to hand back as a
+       precedent, since pydivert's own release process is "download a tarball", not "compile
+       ebpfdivert"), that never naturally resolves even once `ebpfdivert` ships riscv64 (goal
+       3: our hack bypasses the fetch entirely, so there is nothing for an upstream fix to
+       replace). Same rule as gotcha 399, one layer further out: the sibling whose own release
+       matrix needs the riscv64 leg isn't a registry dependency this repo could port instead,
+       it's a non-PyPI GitHub project outside this repo's scope — the fix belongs in
+       `ebpfdivert`'s `release.yml`, not in `build-pydivert.yml`.
+
+676. **A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions of
+     the *same*-named PyPI project is the strongest signal of a full-language rewrite, and the
+     project's own PyPI summary/description does not update to say so (the nb-clean case; see
+     `build-nb-clean.yml`).** nb-clean ("Clean Jupyter notebooks for versioning") published a
+     plain `py3-none-any` wheel at every release from 1.0.0 through 4.0.1 — a genuinely
+     pure-Python tool matching its PyPI summary. 5.0.0 and 6.0.0 instead ship five
+     `py3-none-<platform>` wheels (macOS x86_64/arm64, manylinux aarch64/x86_64, win_amd64),
+     zero riscv64. The PyPI summary is unchanged across the flip, and nothing in the
+     project-description text hints at a rewrite. Cloning the real upstream
+     (github.com/srstevenson/nb-clean) at the 6.0.0 tag shows why: `pyproject.toml` is now
+     `build-backend = "maturin"` with `[tool.maturin] bindings = "bin"`, and the *entire* CLI
+     — notebook parsing/cleaning, the Git clean-filter wiring, argument parsing — is Rust
+     (`src/*.rs`: clap, serde_json, rayon, ignore, tempfile; `[lints.rust] unsafe_code =
+     "forbid"`), not a Python package calling into a small extension. This is gotcha 145's
+     shape (a `bindings = "bin"` CLI, honest `py3-none` tag, one native build covers every
+     interpreter) with one added wrinkle: 145's examples (magika, ripgrep) were never
+     pure-Python, so there is no stale description to be misled by. Before trusting a
+     long-known pure-Python package's reputation, or a cached mental model of what it
+     compiles, check the newest release's actual wheel tags against its own history
+     (`pypi.org/pypi/<pkg>/json` → `releases`) — a flip to platform-specific tags at a major
+     version boundary means re-deriving everything from the current tagged source, not from
+     the project's name, description, or earlier-version behaviour. Mirrors upstream's own
+     `wheels.yml` `wheels` job (`PyO3/maturin-action`, `target: riscv64gc-unknown-linux-gnu`,
+     `manylinux: '2_39'`) — the same proven shape as `build-ripgrep.yml`.
+
+677. **Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be a
+     *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
+     with no riscv64 entry, not just a `bindings = "bin"` crate in the same tree (the scrapli
+     case; see `build-scrapli.yml`).** scrapli ("screen scraping client for network devices")
+     shipped a plain `py3-none-any` wheel through 2026.02.20, then flipped at its 2.0 rewrite
+     (PyPI 2026.10.3 onward) to five `py3-none-<platform>` wheels 15-50x larger than before,
+     PyPI summary unchanged. Cloning the real upstream at the matching semver tag (note:
+     upstream switched its git tags from calver to semver at the same boundary, with no
+     algorithmic mapping back to the calver PyPI version it releases under — the mapping has
+     to be hardcoded per release, same idiom as gotcha 3/`build-rtoml.yml`) shows `setup.py`
+     downloads or builds a precompiled `libscrapli` shared object (github.com/scrapli/libscrapli,
+     a *different* repo, built with Zig) and loads it via `ctypes` at import time — no C
+     extension, no Rust, but just as compiled as either. Two wrinkles past 145/676: (1) the
+     wrapper's own `setup.py` *and* its runtime `ffi.py` both hardcode the arch allow-list
+     (`platform.machine()` in `{x86_64, aarch64}` or raise) in two places, so recognizing
+     riscv64 needs patching both the build-time and import-time copies, not just one; (2) the
+     target list that is actually missing riscv64 lives in the *sibling* repo's `build.zig`,
+     which this repo never checks out as the package under build — fetch it at build time
+     into a directory on the runner (not inside the checked-out package tree), patch it there,
+     and point the wrapper's own build-path override env var at that directory so its setup.py
+     skips its normal clone and builds from the patched copy instead. cibuildwheel's Linux
+     containers bind-mount the whole runner filesystem at `/host` (`oci_container.py`,
+     `--volume=/:/host`) specifically so a `CIBW_ENVIRONMENT` value can reach a path like this
+     that sits outside the project directory being built. Mirrors upstream's own
+     `publish.yaml` (loops a `LIBSCRAPLI_ZIG_TRIPLE` env var over per-platform zig builds,
+     done here via cibuildwheel's riscv64 image instead of their shell loop).
+
+679. **An embedded engine's riscv64 support can be real in the upstream *source tree* and still
+     not be real for the *vendored commit a binding pins* — check the fix's landing date against
+     the pin's date, not just whether the backend directory exists (the pythonmonkey case).**
+     pythonmonkey embeds Mozilla SpiderMonkey (gotcha 335/340's embedded-engine family, one notch
+     harder: here the engine is vendored by *source commit*, not a prebuilt crate download).
+     `setup.sh` reads `mozcentral.version` (a bare mozilla-central git SHA), downloads the entire
+     `mozilla-firefox/firefox` monorepo archive at that commit (not a js-engine-only tarball —
+     the whole tree, browser/toolkit/testing included, for a build that only ever touches
+     `js/src`), applies ten upstream-workaround `sed` patches, then runs SpiderMonkey's own
+     `js/src/configure && make` — Mozilla's `moz.configure`/`mozbuild` meta-build system, not a
+     plain CMake/Meson project, with its own pinned Rust (1.85) + `cbindgen` + clang/LLVM
+     version requirements layered under pythonmonkey's *own* CMake+Rust build on top. This is
+     option (a) of the embedded-engine split, never option (b): there is no prebuilt SpiderMonkey
+     download to swap in per platform. `grep -rl riscv64 js/src/jit/riscv64/` shows a complete,
+     real IonMonkey/Baseline backend (`Assembler`/`CodeGenerator`/`Lowering`/`MoveEmitter`/
+     `Simulator`-riscv64.{h,cpp}), and `build/moz.configure/init.configure` and `js/moz.configure`
+     both recognize `riscv64`/`riscv64gc` as a canonical target CPU — so "does SpiderMonkey have
+     any riscv64 precedent at all" is yes, unlike taichi's LLVM-RuntimeDyld wall (gotcha 622).
+     The catch is version alignment: Mozilla's own Bugzilla meta-tracker for this port
+     ("[meta] Linux/riscv64 Port", bug 1717203) is still open, not shipped as a Tier-1/Tier-2
+     platform, with no official Firefox riscv64 build and no Linux distro (Debian/Fedora/Gentoo)
+     currently carrying one; the fix that specifically "allows build with JIT for riscv64" (bug
+     1957559) only landed for Firefox 139, and Gecko Profiler riscv64 support landed even later
+     (Firefox 160), tested on exactly one community board (Milk-V Jupiter) — this is active,
+     recent, lightly-validated upstream work, not a mature port. pythonmonkey 1.4.1's own
+     `mozcentral.version` pins `6bca861985ba51920c1cacc21986af01c51bd690`, a 2025-02-03
+     mozilla-central commit — dated *before* bug 1957559 landed its riscv64 JIT fixes (targeted
+     at Firefox 139, which released months later). Building the exact commit a binding vendors,
+     not whatever is newest on mozilla-central today, is therefore likely to hit the very bugs
+     the later fix addresses, or to fail configure/link outright on an architecture Mozilla's own
+     tree didn't yet support correctly at that SHA — unprovable without actually running the
+     build, and nothing here can run it: no riscv64 hardware exists to rehearse locally, this
+     sandbox's own auto-mode classifier denies executing build commands fetched from an external
+     repo (so even an x86_64 dry run of `setup.sh` against pythonmonkey's own checkout cannot be
+     used to pre-screen the Mozilla-specific patches), and there is no sibling SpiderMonkey/
+     mozbuild port anywhere in this repo to de-risk any piece of it. Parked as disproportionate
+     scope on the same bar as arcticdb/chdb-core/mplib (gotcha 475): not a hard architectural
+     wall, but a first-of-its-kind, unrehearsable, likely-multi-round bet against an upstream
+     port that is itself still in progress and unshipped. Revisit once pythonmonkey bumps
+     `mozcentral.version` past a riscv64-JIT-landing commit (post Firefox 139) *and* either a
+     Linux distro ships a riscv64 Firefox/SpiderMonkey build (independent real-hardware proof) or
+     this fleet gains a way to rehearse the Mozilla build locally before spending CI runner-hours
+     on it.
+
+681. **`MANIFEST.in` can vendor a precompiled binary into every wheel with no platform check
+    at all — not even a mismatched tag to catch it (the prody case; see `build-prody.yml`).**
+    Gotchas 35/81/145 are about a *platform-tagged* wheel whose tag is honest or dishonest
+    about what it holds. This is a different, cheaper-to-miss shape: a package that has
+    nothing to do with per-platform wheel tags at all, where `MANIFEST.in` carries a plain
+    glob like `include prody/*/*/*/*.so` that matches whatever `.so` files happen to be
+    checked into the source tree, regardless of which architecture they were compiled for.
+    ProDy 2.6.1 checks in `prody/proteins/hpbmodule/hpb_Python{2.7,3.8-3.12}/hpb.so` —
+    x86_64 ELF binaries (`file` confirms it), one per supported CPython minor version, kept
+    purely as a convenience so `setup.py`'s own `shutil.copy(...)`/`except FileNotFoundError:
+    pass` can skip compiling `hpb.so` from source on Linux. That copy step is arch-aware by
+    accident (it silently no-ops when the file for the *running* Python's version is absent),
+    but `MANIFEST.in`'s glob is not: it has no idea the build is for riscv64, so it dutifully
+    bundles every one of those x86_64 blobs into the sdist and from there into the wheel on
+    any architecture, cibuildwheel included. Nothing in the build fails — `pip wheel` succeeds
+    on riscv64 exactly as it does on x86_64, because nothing at build time ever loads the
+    blob — so this is invisible to every check that only watches for compile/link errors.
+    - **The tell is a "precompiled fallback" comment plus a *directory tree* of per-version
+      blobs, not a single file.** One blob per interpreter minor version (rather than one
+      blob total) is the signature of "we could not be bothered to recompile this across
+      Python versions either," which is also a signal the project never rebuilds it per
+      architecture.
+    - **Check with `file`, not by reading the code.** `unzip -l` the real published wheel,
+      then `file` every `.so` it contains: a mix of "real" per-interpreter-tagged extensions
+      (`rtbtools.cpython-312-x86_64-linux-gnu.so`) alongside bare-named ones with no
+      interpreter/arch tag at all (`hpb.so`) is the pattern — the untagged name is itself a
+      hint that nothing in the toolchain treats it as a normal per-ABI extension module.
+    - **Exploit the package's own graceful-missing path instead of patching it.** ProDy's
+      `calcSASA()`/`calcHydrophobicOverlapingAreas()` already wrap the optional import in
+      `try/except ImportError: raise ImportError('Please provide hpb.so file.')` — the exact
+      behavior you want when the blob cannot run on this architecture. `rm -f
+      prody/proteins/hpbmodule/hpb_Python*/hpb.so` in `CIBW_BEFORE_BUILD`, before
+      `MANIFEST.in`'s glob ever runs, makes the copy step's own `FileNotFoundError` fire
+      instead of silently shipping a foreign-arch binary with a native-looking name next to
+      real riscv64 `.so` files, which is worse than a build failure because nothing flags it
+      until a user actually calls the one function that needs it.
+
+684. **A package that embeds a KVM-based hypervisor needs more than a compiling Rust/C
+    target — it needs the host CPU's virtualization extension, and that gate sits below
+    anything CI can patch around (the boxlite case).** boxlite (PyPI, Apache-2.0,
+    github.com/boxlite-ai/boxlite) is a maturin/pyo3 binding over its own Rust core, which in
+    turn drives `libkrun`/`libkrunfw` — a `/dev/kvm`-based microVM library, not an ordinary
+    compiled extension. PyPI 0.11.0 ships no sdist and bdist wheels only for
+    `manylinux_2_28_{x86_64,aarch64}` and macOS arm64 (cp310-cp314t); no riscv64. Two
+    independent walls, not one:
+    - **The wrapper's own build tooling has no riscv64 branch at all.** `scripts/util.sh`'s
+      `map_arch_to_target`/`normalize_arch` — sourced by every build script, including the
+      `cibuildwheel` `before-all` that builds the guest musl binaries — `case`-match only
+      `arm64|aarch64` and `x86_64|amd64` and hard-`return 1` on anything else
+      ("ERROR: Unsupported architecture"). This is boxlite's own tree, patchable in principle,
+      but it is gating on an architecture its one real native dependency does not fully
+      support yet either (next point) — patching this alone would not produce a working wheel.
+    - **The vendored hypervisor engine's riscv64 support is real but unfinished and
+      CI-unverified, which gotcha 679's lesson generalizes past embedded *language* engines to
+      embedded *virtualization* engines.** boxlite's `.gitmodules` pins
+      `src/deps/libkrun-sys/vendor/libkrun` to `boxlite-ai/libkrun` by commit (confirmed via
+      `git ls-tree` on the gitlink, matching that fork's current `main`). That commit genuinely
+      contains non-stub riscv64 work: `src/arch/src/riscv64/{mod,layout}.rs` (memory layout,
+      FDT), `src/vmm/src/builder.rs`'s `#[cfg(all(target_arch = "riscv64", target_os =
+      "linux"))]` branch (`create_vcpus_riscv64`, a real AIA interrupt controller via
+      `KvmAia::new(vm.fd(), ...)`), and `src/devices/src/legacy/{aia.rs,kvmaia.rs,riscv64/}`
+      (AIA device + riscv64 serial). None of this is a stub returning `unimplemented!()`. But
+      `libkrun`'s own `.github/workflows/{cross-compilation,unit_tests,integration_tests}.yml`
+      build/test x86_64, aarch64, and FreeBSD-cross only — zero riscv64 jobs anywhere in that
+      fork's CI, so this code has never been built or run by its own authors, let alone by us.
+    - **Even a clean compile would not make the wheel's own tests pass**, because `libkrun`
+      is not an ordinary library — the thing it builds has to open `/dev/kvm` and boot a
+      guest kernel to do anything, which needs RISC-V's Hypervisor extension (`H`) plus AIA
+      in the *host CPU/firmware*, not just in the Linux kernel's KVM driver. That is still
+      rare, narrow silicon, unlikely to be what a generic `ubuntu-24.04-riscv` self-hosted
+      runner boots on — a hardware gate one level below anything a `patches/<pkg>/<version>/`
+      fix or a `CIBW_BEFORE_BUILD` step can route around, closer in kind to gotcha 284's
+      CUDA-only extension than to an ordinary missing-target-triple problem.
+    - **Verdict: `blocked-on-dependency`.** Re-triage once `libkrun` upstream (not this repo)
+      lands a riscv64 CI job of its own — that is the signal its riscv64 support graduated
+      from "a directory exists" to "it actually boots," the same distinction gotcha 679 draws
+      — and confirm at that point whether the runner this repo builds on even has the `H`+AIA
+      extensions to run it, which a passing compile alone will never prove.
+
+685. **A PyPI listing with no `home_page`/`project_urls` on any release, and a README that
+    says "not published to a package registry yet" despite dozens of real releases, reads
+    exactly like gotcha 157/372's closed-source-no-source-ever shape — but it can still be a
+    large, genuinely public monorepo whose PyPI metadata was simply never filled in (the
+    alienplatform case).** alienplatform's PyPI JSON (all 26 releases) has `home_page: null`,
+    `project_urls: null`, `author: null` on every single one — the three places gotcha
+    157/372's triage normally finds a vendor's marketing page or confirms there is truly
+    nothing — and the bundled long-description's own "Local development" section ("Build an
+    editable local-provider package from the repository root") is dated stale copy that still
+    says the package "is not published to a package registry yet," which reads as more
+    evidence of a closed, pre-release internal tool. A GitHub code/repo search for the PyPI
+    name alone did not surface anything either. What actually settled it was a plain web
+    search for the author string (`"Alien Software, Inc."` / its contact domain) plus the
+    package name together, which surfaced a Hacker News launch post naming the real
+    repository. `git ls-remote` on it worked with no authentication (a public repo), and its
+    `crates/alien-bindings-python` directory — Cargo.toml, pyproject.toml, src/ — matched the
+    wheel's own compiled payload exactly, with the workspace `Cargo.toml`'s `version` field
+    reading the same value as the PyPI release being triaged. **Don't let three independent
+    "no source host" fields plus a stale closed-source-sounding README substitute for an
+    actual web search before writing `not-feasible`/`parked`** — gotcha 157/372 are about
+    packages where that search (GitHub code search, the vendor's own site, `pip download
+    --no-binary` for a real sdist) comes up empty; here it didn't, because the publisher
+    simply never wired up PyPI's metadata fields, not because there was nothing to find.
+
+688. **A `PLATFORM_SUPPORT.md`-documented native engine with no riscv64 asset anywhere in its
+    own third-party binary distributor's release matrix looks like a hard architecture lock —
+    but check whether the language binding's *published-wheel* build job actually bundles that
+    specific binary at all before parking the whole port on it (the xberg case).** xberg (a
+    Rust/maturin "document intelligence" monorepo: PDF/OCR/layout/embeddings/NER/tree-sitter,
+    17 crates, abi3-py310 wheels) ships `crates/xberg-pdfium-render` (a fork of
+    `pdfium-render`) behind the `pdf-pdfium` Cargo feature, which its own `Cargo.toml` enables
+    unconditionally for the entire non-Windows/non-macOS-Intel target — the same target
+    riscv64 falls under. `PLATFORM_SUPPORT.md` and `.github/actions/download-pdfium/download.sh`
+    fetch the actual runtime library from `bblanchon/pdfium-binaries` GitHub releases
+    (`pdfium-${platform}-${arch}.tgz`), and that project's own `build-all.yml` target-CPU
+    matrix (Chromium's GN build) has entries for x64/x86/arm/arm64/mipsel/mips64el/ppc64/wasm —
+    nothing riscv64, anywhere, because Chromium's own PDFium build has never targeted it. That
+    reads exactly like gotcha 284/449's "vendored binary with no riscv64 anywhere upstream"
+    shape, and would normally be an immediate park.
+
+    It isn't one here, because `pdf-pdfium` never needs the real library to *compile*:
+    `xberg-pdfium-render/build.rs` only links against `libpdfium` when
+    `PDFIUM_STATIC_LIB_PATH`/`PDFIUM_DYNAMIC_LIB_PATH` is set at build time; otherwise it
+    emits a `cargo:warning` and falls back to `dynamic_bindings`, which `libloading::Library`
+    `dlopen()`s the platform library name *at first Pdfium use*, not at import time — a
+    documented, intentional degrade path (xberg-io/xberg#702), not a build failure. The
+    `download-pdfium` composite action is wired into exactly two places in the whole repo:
+    `ci-rust.yaml`'s `pdfium-engine` Rust-level test job and `benchmarks.yaml`'s
+    `bench-pdfium` job — read `.github/workflows/publish.yaml`'s `python-wheels` job
+    (the one that actually builds and ships the PyPI artifact) line by line and it calls
+    `xberg-io/actions/build-python-wheels@v1` with no PDFium step at all; the only native
+    library that job downloads and vendors into the wheel is ONNX Runtime
+    (`microsoft/onnxruntime` releases, `ORT_STRATEGY=system` + explicit
+    `vendor-native-closure.sh`). So the published `xberg` wheel on **every** platform it
+    already ships for — x86_64, aarch64, macOS, Windows — compiles `pdf-pdfium` in but never
+    bundles a real `libpdfium`, and that one secondary PDF-extraction backend already silently
+    no-ops (or raises a clear load error, per #702) for every existing user unless they supply
+    their own binary out of band. A riscv64 wheel built the same way is not a regression
+    against any platform that exists today — the actual blocking/non-blocking native payload
+    to resolve is ONNX Runtime (Microsoft ships no riscv64 prebuilt either, but this repo
+    already publishes `onnxruntime` for riscv64 cp312–cp314t — `docs/packages/onnxruntime.yaml`
+    — so `ci_scripts/check_riscv64_deps.py --python 312 313 314 314t -- onnxruntime maturin`
+    resolves clean and the dynamic-link-against-our-own-wheel pattern of gotcha 17 applies),
+    plus Tesseract/Leptonica and libheif/libde265/libaom, all three built from plain upstream
+    CMake/autotools source tarballs in `CIBW_BEFORE_ALL_LINUX`/a Cargo build script — ordinary
+    portable C/C++, no prebuilt-binary dependency at all.
+
+    **Don't let a `PLATFORM_SUPPORT.md` gap or a missing third-party-binary-distributor asset
+    end the triage before checking which CI job the gap actually lives in.** A Rust/C++ crate
+    can legitimately compile a feature whose only runtime dependency is an optional,
+    lazily-`dlopen()`ed library that the project's own published artifact never bundles on any
+    architecture — in which case riscv64 ships exactly as complete (or incomplete) a wheel as
+    every platform already published. This is a genuine reason the port *isn't* blocked by
+    that one engine; it is not, by itself, a reason the port is small — xberg's real scope
+    (17 crates, ~80 Cargo features, ONNX Runtime + Tesseract/Leptonica + libheif/libde265/libaom
+    all needing to be built or linked for riscv64 in one CI job) still makes it a large,
+    disproportionate first port, recorded `parked` on size/complexity grounds rather than any
+    single hard architectural wall.
+
+697. **Gotcha 411's "CPU is the CMake default" check isn't enough by itself — a `find_package
+    (CUDAToolkit QUIET)` that silently no-ops when the toolkit is absent can still be forced on
+    in the one build upstream actually publishes, by a `cibuildwheel` `before-all` (or
+    equivalent CI step) that installs the CUDA devel toolkit from scratch before CMake ever
+    runs (the gs-madrona case).** gs-madrona (a Genesis-Embodied-AI fork of the Madrona batch
+    simulation/rendering engine) reads, at the CMake level, exactly like gotcha 411's
+    bitsandbytes: `cmake/dependencies.cmake` only does `find_package(CUDAToolkit REQUIRED)`
+    when an opt-in `MADRONA_REQUIRE_CUDA` flag is set; left at its default, `CUDAToolkit_FOUND`
+    is simply false and every `if (CUDAToolkit_FOUND)`/`if (TARGET madrona_cuda)` guard across
+    `src/common`, `src/mw`, `src/render` and `src/bridge` quietly skips the CUDA-only code, so a
+    bare `cmake .` on a GPU-less host looks CPU-capable by construction. But gotcha 411's own
+    test — "is CPU the build upstream's own CI actually ships?" — comes back no: the real
+    `.github/workflows/python-wheels.yml` runs `cibuildwheel` on a plain GPU-less
+    `ubuntu-24.04` runner, and `pyproject.toml`'s `[tool.cibuildwheel.linux] before-all` adds
+    NVIDIA's own CUDA RHEL8 `dnf` repo and installs `cuda-nvrtc-devel-12-8`/
+    `cuda-cudart-devel-12-8`/`cuda-nvcc-12-8` *before* `cmake` is ever invoked inside the
+    manylinux container — so `CUDAToolkit_FOUND` is unconditionally true in every wheel
+    upstream actually publishes, with no device-selecting env var anywhere in that one-job
+    matrix (contrast gotcha 459's vLLM, where `VLLM_TARGET_DEVICE` really does pick a published
+    CPU variant). `pyproject.toml`'s unconditional runtime `dependencies` on
+    `nvidia-cuda-nvrtc-cu12`/`nvidia-nvjitlink-cu12` (no marker, no extra) is the tell that
+    confirms it without even reading the CI file: a package whose *every* published wheel hard-
+    requires a CUDA JIT runtime package has no CPU-only release to point a riscv64 build at,
+    regardless of what the CMake default alone would produce in isolation.
+
+    **The fix to gotcha 411's heuristic: read the actual `CIBW_BEFORE_ALL`/`before-all` (or
+    whatever upstream's CI uses to provision its build image) before concluding a soft/QUIET
+    `find_package` proves a CPU path is real and published.** A CMake-level default and the
+    CI-level reality it runs under are two different questions — bitsandbytes' own default
+    build job genuinely never installs a CUDA toolkit, which is what makes CPU the true
+    default there; gs-madrona's does, every time, which makes CUDA the true (and only)
+    default here. Unlike gotcha 679 (an enabling fix exists upstream, only a pin is stale),
+    there is no pin to bump: NVIDIA has never published a CUDA Toolkit for riscv64 at all (no
+    riscv64 entry under any `developer.download.nvidia.com/compute/cuda/repos/*` distro, and
+    the PyPI `nvidia-cuda-nvrtc-cu12`/`nvidia-nvjitlink-cu12` wheels ship only
+    x86_64/aarch64/win_amd64), so `ci_scripts/check_riscv64_deps.py` reports those runtime
+    dependencies unconditionally `UNRESOLVABLE` for every interpreter. **Verdict: `parked`**
+    (same disposition as the existing `onnxruntime-gpu`/`cuda-tile`/`sglang` entries) — revisit
+    only if NVIDIA ships a riscv64 CUDA Toolkit, or if upstream ever publishes its own CPU-only
+    build matrix the way `pyqrack`/`pyqrack-cpu` split theirs.
+
+704. **Gotchas 556/600/601 generalize one layer further: a legitimate, active GitHub org with
+    its own unrelated public repos can still run a product's entire build — wrapper layer and
+    native engine alike — inside a private monorepo with no public checkout at any layer, so
+    there is no repo to even clone; the wheel's own bundled SBOM is the only artifact that
+    proves it (the istari-digital-core case).** istari-digital-core's own PyPI metadata reads
+    like an ordinary open Rust/maturin binding: a `Programming Language :: Rust` classifier, an
+    OSI-approved MIT license, and a summary ("Python bindings for the Istari Digital platform")
+    whose description says it exists only as a dependency of `istari-digital-client` ("most
+    users should not need to interact with this package directly") and ships "compiled Rust
+    binaries." `project_urls` carries only a marketing homepage (`istaridigital.com`) and a docs
+    site (`docs.istaridigital.com`) — no repository link anywhere, in either `project_urls` or
+    the long description (gotcha 584's check: looked past the blank field, same result). PyPI
+    7.4.0 ships a real, cibuildwheel-shaped per-interpreter matrix (manylinux_2_17
+    x86_64/armv7l/ppc64le + manylinux_2_28 aarch64, macOS universal2, Windows, cp310–cp314, one
+    wheel per interpreter, no abi3) — no riscv64 anywhere — and `pypi.org/pypi/.../json` shows
+    **zero sdists across all 26 releases**, 5.0.0 through 7.4.0 (gotcha 431's check, confirming
+    there is no fallback source build either).
+    - **Searching GitHub for every plausible source-repo name, under every spelling of the org,
+      turns up nothing — and that absence is corroborating, not decisive, on its own.**
+      `istari-client`, `istari-core`, `istari-python`, `istari-digital-client` and
+      `istari-digital-core` all return zero matches via GitHub's repository-search API, tried
+      as bare names and with `Istari-digital`/`IstariDigital`/`istaridigital`. The real org
+      (`Istari-digital`) does exist and is active, but its only two public repos are unrelated
+      — a Helm `charts` repo and `istari-gandalf` ("Gandalf system files") — and every other
+      GitHub hit for the product name is a third-party *consumer* of the SDK (a cookbook, SDK
+      examples, demo repos), never the source itself. On its own this reads exactly like "I
+      haven't found the right repo name yet," not "there is no repo" — a legitimate org with
+      unrelated public repos is the same shape a project mid-migration or a monorepo-split repo
+      would show.
+    - **The decisive evidence is the wheel's own bundled CycloneDX SBOM, exactly as gotcha 600
+      taught — read it before trusting an exhaustive-looking but ultimately negative GitHub
+      search.** Downloading `istari_digital_core-7.4.0-cp312-cp312-manylinux_2_17_x86_64.
+      manylinux2014_x86_64.whl` shows it was built by maturin (`dist-info/WHEEL`:
+      `Generator: maturin (1.15.0)`) and bundles
+      `dist-info/sboms/istari-digital-core.cyclonedx.json` (built by `cargo-cyclonedx`, a
+      build-time artifact, not hand-written). Its root component's `bom-ref` is
+      `path+file:///home/runner/work/istari-client/istari-client/istari-python#istari-digital-core@7.4.0`
+      — GitHub Actions' own `$GITHUB_WORKSPACE` convention (`/home/runner/work/<owner>/<repo>/...`)
+      naming a private repo, `istari-client`, that the GitHub search above never found and that
+      matches none of the package's own public metadata. The SBOM's `components` list the real
+      native engine as `istari-core@7.4.0`, with
+      `purl: pkg:cargo/istari-core@7.4.0?download_url=file://../istari-core` — a bare local
+      Cargo path dependency: no `source =`, no `hashes`, no `licenses` field at all — unlike
+      every genuinely open crates.io dependency alongside it in the same SBOM (`autocfg`,
+      `aws-lc-rs`, `base64ct`, …), each of which carries a real registry source, a hash, and a
+      licenses expression. That contrast inside one SBOM is the proof: `istari-core` is a
+      sibling path crate inside the same private `istari-client` monorepo the wrapper itself
+      was built from, resolved from no registry at all, not merely an unlicensed public crate.
+    - **Where this goes past 556/600/601: those cases each had at least one public,
+      independently-checkable repo reaching toward the closed layer.** daily-python (600) at
+      least ships its own binding-layer repo, with a `Cargo.toml` comment naming the private
+      workspace it can't reach into. google-antigravity (556) ships a full, real, Apache-2.0
+      Python SDK repo under a matching org, with only the Go binary itself built privately.
+      unicon (601) at least has a public sibling (`unicon.plugins`) that depends on it like an
+      ordinary PyPI package. Here there is no public repo at *any* layer — not the wrapper, not
+      the client, not the engine — despite a real, active org that does maintain unrelated
+      public repos of its own; nothing in this checkout-that-never-existed can be cloned or
+      read, and only the SBOM already sitting inside the already-published wheel proves that,
+      rather than an exhaustive-looking GitHub search that could otherwise be mistaken for "not
+      found yet."
+    - **Verdict: `parked`** (closed-source native engine with no public source at any version,
+      corroborated by zero sdists across the full release history). No worktree/branch/PR
+      created — resolved fully read-only from PyPI's JSON API, a downloaded wheel, and GitHub's
+      repository-search API. Revisit only if Istari Digital ever publishes `istari-core`/
+      `istari-client` source, or ships a riscv64 wheel themselves.
+
+703. **A vendored per-platform binary can gate one *optional* feature only — generalizing
+    gotchas 27/35/116/157/183 to the install-and-mostly-works middle case (the nanobot-ai
+    case).** Gotchas 27, 35 and 116 each resolve a `py3-none-<platform>` wheel set to one of
+    two outcomes: cosmetic tag/nothing compiled ⇒ `not-feasible` (27), or a load-bearing
+    vendored runtime with no riscv64 story ⇒ installable-but-every-call-fails
+    `vendored-binary` (35/157), unless the *Linux* wheel is itself the universal `-any` one
+    (116). nanobot-ai (PyPI; upstream HKUDS/nanobot) is a fifth shape the first three don't
+    quite cover: its five published wheels (`macosx_13_0_{arm64,x86_64}`,
+    `manylinux_2_17_{aarch64,x86_64}`, `win_amd64`) are genuinely differentiated — each
+    bundles a different ~128MB native terminal-UI executable, compiled by
+    `bun build --compile` from a TypeScript tree committed at `tui/` — so gotcha 81's
+    size/content-diff test correctly says "real content" (pointing toward `vendored-binary`),
+    and Bun's own cross-compile target list (`darwin-arm64`, `darwin-x64`, `linux-arm64`,
+    `linux-x64`, `win32-x64`, read straight out of upstream's own
+    `.github/workflows/tui-release.yml` matrix) has no riscv64 entry, so gotcha 35's
+    "find the fetch, then the vendor's own platform table" step correctly says "no upstream
+    artifact to assemble".
+    - **The missing check: read what happens when the binary is absent, not just whether it
+      is absent.** `nanobot/cli/tui_launcher.py::resolve_tui_command()` raises a typed,
+      caught `TuiUnavailableError` naming the exact workaround (`nanobot agent --classic`);
+      `nanobot/cli/agent.py` catches it only around the *one* code path that defaults to the
+      native TUI (a bare interactive `nanobot agent`) and exits 1 with that same message —
+      every other entry point (`--message` one-shot, the SDK, the gateway/HTTP API, the
+      browser WebUI, every chat-channel integration, and `--classic` itself) never touches
+      the TUI binary at all. That is the opposite of gotcha 157's claude-agent-sdk test
+      ("every call fails, always") — here almost nothing fails, and the one thing that does
+      names its own fix.
+    - **Check what the *sdist* builds, not just what the wheels contain.** nanobot-ai's
+      sdist has no `tui/` TypeScript source, no `node_modules`, and no reference to the
+      native binary at all — the Bun-compiled executable is injected into the wheel by a
+      release-only packaging script (`tui/scripts/package-release.py`) that runs *after*
+      `uv build` produces a plain `py3-none-any` wheel, itself never uploaded to PyPI. So
+      `pip install nanobot-ai` on riscv64 today already falls back to the sdist and builds
+      that same zero-native-content wheel in seconds with no compiler — gotcha 27's exact
+      watchdog outcome, reached by a different route (a release-time injection step instead
+      of a `sys.platform == "darwin"` gate in `setup.py`).
+    - **Verdict test, in order: (1)** does the vendored-platform wheel differ for real
+      (gotcha 81's size/content diff) — if no, stop at gotcha 27; if yes, **(2)** does the
+      *runtime* degrade to a named, working alternative when the binary is absent, or does
+      every call fail (gotcha 157) — if every call fails, it's `vendored-binary`/blocked
+      regardless of (1); if it degrades gracefully, **(3)** does the *sdist* (not any
+      published wheel) already build a complete, functional package with no compiler — if
+      yes, there is nothing to port: the gap is in one optional feature, not in the package,
+      and a riscv64 wheel of the base package would carry the same zero-arch-specific bytes
+      pip's sdist fallback already produces. `parked`/no real gap, not `vendored-binary`.
+
+706. **Gotcha 600/670/704's private-monorepo wall doesn't require a path dependency or a
+    missing checkout — a plain `git` Cargo dependency, gated only on `cfg(target_os =
+    "linux")`, blocks the exact Linux target we build on even though the wrapper's own repo
+    is fully public (the chalk-remote-call-python case).** chalk-remote-call-python is an
+    open setuptools-rust/pyo3 project (tonic gRPC server) with a self-contained sdist
+    (`chalk-remote-call-rs/`, `Cargo.lock` committed, proto sources pre-generated) and no
+    vendored binary blob — none of gotcha 157/246/600/670/704's "no source anywhere" tells
+    fire, and `ci_scripts/check_riscv64_deps.py` confirms its one hard Python runtime dep
+    (`pyarrow>=14.0.0`) resolves clean on riscv64 for cp312/cp313/cp314/cp314t. PyPI ships
+    manylinux_2_28 + musllinux_1_2 wheels for x86_64/aarch64 (plus macOS/Windows), zero
+    riscv64 — a real-looking gap. The wall is one `Cargo.toml` stanza:
+    `chalk-remote-call-server`'s `[target.'cfg(target_os = "linux")'.dependencies]` pulls
+    `chalk-queue`, `chalk_metrics` and `chalk_statsd` as `git` dependencies (not `path`, not
+    crates.io) pinned by commit rev to `github.com/chalk-ai/chalk-private.git` — a private
+    repo belonging to Chalk AI, not this project's org, and not one this repo's CI has (or
+    could legitimately request) credentials for.
+    - **Confirm the git source from `Cargo.lock`, not just `Cargo.toml`'s URL.** The lock
+      file's resolved entries read `source = "git+https://github.com/chalk-ai/chalk-private.
+      git?rev=61b67cc862036cfee5346807de1f24415a5fbfba#…"` — an unambiguous, independently
+      verifiable statement that `cargo build`/`cargo fetch` must clone that exact private
+      repo at that exact commit, with no registry fallback.
+    - **Confirm the modules are unconditional, not a Cargo feature anyone could turn off.**
+      `lib.rs` declares `#[cfg(target_os = "linux")] mod self_consumer;` and `mod metrics;`
+      directly (no `[features]` gate in `Cargo.toml` controls them) — upstream's own comment
+      explains the *reason* for the OS gate (rdkafka's `sasl` feature needs cyrus-sasl, no
+      Windows support; chalk-protos needs `protoc`), but the gate's *condition* is the one
+      that matters for us: `target_os = "linux"`, true for every Linux wheel including ours.
+    - **The gate doesn't pick out riscv64 — it picks out the same OS upstream already ships
+      Linux wheels for, which is exactly why this isn't a build-portability question.**
+      Chalk AI's own CI can fetch its own private repo to build the x86_64/aarch64/
+      musllinux Linux wheels already on PyPI; a third-party build from a public checkout
+      cannot, on any CPU architecture — riscv64 is not specially blocked, *all* from-source
+      Linux builds outside Chalk AI's own CI are. Gotcha 40/126's "which party's problem is
+      this" framing applies: report the credential wall, not an architecture investigation.
+    - **There is no non-divergent fix.** Patching `self_consumer`/`metrics` out (the only way
+      to drop the private deps, since no feature flag already does it) would ship a
+      `chalk-remote-call-python` wheel missing functionality every other platform's wheel
+      has — the same not-an-equivalent-artifact problem as gotcha 50 (psycopg2) and gotcha
+      670 (ovito), just reached through a git dependency instead of a sibling package name
+      or a submodule boundary.
+    - **The shared `chalk` prefix is coincidence, not relation — check before assuming a
+      sibling.** This repo already carries `chalkpy-rs` and `chalk-viztracer`; both are
+      separate PyPI projects with separate upstream repos, built from entirely different
+      source trees, and neither's status transfers to `chalk-remote-call-python`.
+    - **Verdict: `parked`.** Revisit only if Chalk AI publishes the `chalk-queue`/
+      `chalk_metrics`/`chalk_statsd` source (or a Linux build mode that doesn't need it), or
+      ships a riscv64 wheel themselves.

@@ -24,6 +24,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
+- **660** — A setuptools SWIG extension built from an old tag can ship the `.so` without
+  its SWIG-generated `.py` proxy — `build_py` runs before `build_ext` writes it.
 
 ---
 
@@ -504,3 +506,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       needs no `gpl_sources` job. Assert `not any(n.startswith("<pkg>.libs/"))` in the
       workflow rather than trusting it — that assertion is what turns "no GPL is shipped"
       from a claim into a check, and it fires on the build that first drags in a libgomp.
+
+660. **A setuptools SWIG extension built from an old tag can ship the `.so` without its
+    SWIG-generated `.py` proxy, because `build_py` copies the package before `build_ext`
+    has run SWIG (the Box2D case; see `build-box2d.yml`).** `Extension(..., ['Foo.i', ...])`
+    with `swig_opts='-outdir library/Foo'` writes `Foo.py` into the source package during
+    `build_ext`, but `bdist_wheel` runs `build_py` first, so the wheel gets `_Foo.so` and an
+    `__init__.py` doing `from .Foo import *` — it builds clean, auditwheel is happy, and only
+    `import Foo` fails. Old projects relied on `python setup.py build` (Travis/conda) or on a
+    stale `Foo.py` lying in the tree. Check with one `pip wheel` on any host and
+    `unzip -l <whl> | grep '\.py$'`; the fix is the common `build_py` subclass that calls
+    `self.run_command('build_ext')` first, often already on upstream's default branch (pybox2d
+    12507e8) and carried as a `Backport`.
+    - **PyPI wheels uploaded years after the tag were not built from the tag.** Box2D 2.3.10's
+      tag is 2020; its cp310–cp313 wheels were uploaded in 2024-11 from master plus local edits
+      (their `Box2D.py` has a post-tag `.i` fix and their `tests/` drop `assertEquals`, gotcha
+      631). Compare `upload_time` on PyPI's JSON against the tag date, and diff the PyPI wheel's
+      `.py` files against the tag before assuming "upstream builds this tag as-is".
+
+673. **A scikit-build-core project whose `pyproject.toml` has `if.failed = true` ->
+    `wheel.cmake = false` will build a pure-Python wheel and report success when the cmake
+    step fails, instead of failing CI (the type_enforced case; see
+    `build-type-enforced.yml`).** This is scikit-build-core's own graceful-degradation
+    feature, not a bug: `[[tool.scikit-build.overrides]]` with `if.failed = true` means "if
+    anything above this point in the override chain failed, drop `wheel.cmake` and ship a
+    pure-Python wheel anyway" — so a genuinely broken riscv64 cmake/compiler toolchain, or a
+    transient container flake, produces a *working, installing* wheel that silently lacks
+    the compiled accelerator the published PyPI wheels always carry. Nothing in cibuildwheel's
+    own output flags this; the wheel tag and test pass either way, because the pure-Python
+    fallback path exists precisely to keep `import <pkg>` working. The project almost always
+    ships its own opt-out env var for exactly this reason — type_enforced's own
+    `build_wheels.yml` sets `CIBW_ENVIRONMENT: TYPE_ENFORCED_REQUIRE_CPP="1"` (checked via
+    `if.not.env.TYPE_ENFORCED_REQUIRE_CPP = true` gating the same override) so that *upstream's
+    own* CI hard-fails rather than silently publishing a degraded wheel; set the same variable
+    in the riscv64 workflow rather than inventing a new verification step. Grep the checkout's
+    `pyproject.toml` for `if.failed` under `[[tool.scikit-build.overrides]]` whenever a
+    scikit-build-core project's CMake build looks suspiciously forgiving, and prefer upstream's
+    own require-the-extension knob over a bespoke `.so`-presence assertion when one already
+    exists.

@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/abstractqqq/polars_ds_extension/blob/v0.12.1/.github/workflows/CI.yml
+name: Build polars-ds wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars-ds.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polars-ds.yml'
+      - 'docs/packages/polars-ds.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polars-ds.yml'
+      - 'docs/packages/polars-ds.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Limit parallel rustc invocations to avoid resource exhaustion on the
+  # riscv64 runner (build-daft.yml/build-polars-runtime.yml need the same).
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polars-ds
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build polars-ds ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      POLARS_DS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout polars_ds_extension v${{ env.POLARS_DS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: abstractqqq/polars_ds_extension
+          ref: v${{ env.POLARS_DS_VERSION }}
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # Same OOM guard build-daft.yml/build-lancedb.yml need for a comparably
+      # sized Rust dependency tree (polars itself, plus faer/argmin).
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          # pyo3 carries `abi3-py39` unconditionally in Cargo.toml, so upstream
+          # ships one cp39-abi3 wheel; `rust-toolchain.toml` pins a nightly
+          # channel (faer's "nightly" feature), which maturin-action picks up
+          # on its own, same as upstream's job does.
+          args: --release --out dist -i python3.9 --manifest-path Cargo.toml
+          manylinux: '2_39'
+        env:
+          # Matches build-polars-runtime.yml's override of py-polars' own
+          # fat-LTO release profile: polars_ds's [profile.release] sets the
+          # same (lto="fat", codegen-units=1), which is too heavy for these
+          # runners stacked on top of the polars/faer/argmin dependency tree.
+          CARGO_PROFILE_RELEASE_LTO: 'off'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          for whl in dist/*.whl; do
+            python3 - "$whl" <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.endswith(".so") and "_polars_ds" in n for n in names), names
+          assert any(n.endswith(".dist-info/licenses/LICENSE.txt") for n in names), names
+          print(sys.argv[1], "->", [n for n in names if n.endswith(".so")])
+          EOF
+          done
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      # Upstream's own test step needs numpy/great-tables/altair extras and
+      # pytest fixtures across the whole suite; this instead runs one of
+      # README's own documented examples (query_roc_auc/query_log_loss) to
+      # prove the compiled plugin registers and evaluates against polars.
+      - name: Evaluate a documented expression against the published polars wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/venv"
+          uv venv --python 3.12 "$venv"
+          uv pip install --python "$venv/bin/python" polars==2.0.0 dist/polars_ds-*.whl
+          "$venv/bin/python" - <<'EOF'
+          import polars as pl
+          import polars_ds as pds
+
+          df = pl.DataFrame({
+              "segment": ["a", "a", "b", "b"],
+              "actual": [0, 1, 0, 1],
+              "predicted": [0.1, 0.9, 0.4, 0.6],
+          })
+          out = df.lazy().group_by("segment").agg(
+              pds.query_roc_auc("actual", "predicted").alias("roc_auc"),
+              pds.query_log_loss("actual", "predicted").alias("log_loss"),
+          ).sort("segment").collect()
+          print(out)
+          assert out["roc_auc"].to_list() == [1.0, 1.0]
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: polars-ds-${{ env.POLARS_DS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish polars-ds ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: polars-ds-${{ matrix.version }}-cp39-abi3-manylinux_riscv64

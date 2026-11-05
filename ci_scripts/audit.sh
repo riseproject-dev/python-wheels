@@ -17,5 +17,10 @@ python3 -m venv packages-$1-venv
 . packages-$1-venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install pip-audit
-python -m pip_audit -r packages.txt --format json --output audit-report.json || true
+requirements=$(mktemp)
+for package_yaml in ../docs/packages/*.yaml; do
+    grep -q '^deprecated:' "$package_yaml" || basename "$package_yaml" .yaml
+done > "$requirements"
+python -m pip_audit -r "$requirements" --format json --output audit-report.json || true
+rm -f "$requirements"
 
