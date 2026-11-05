@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 20 Sep 2026 22:48:16 +0000
+Subject: [PATCH] tests: wait for background specs syncs instead of assuming a
+ 1ms interval
+
+`StatsigOptions` rejects a `specs_sync_interval_ms` below `MIN_SYNC_INTERVAL`
+(1000) and drops it back to the default, logging "Invalid
+'specs_sync_interval_ms', value must be greater than 1000, received Some(1)".
+Both fixtures in this file still ask for 1, so the six polling tests never get
+the near-instant background sync they were written against and fail on every
+platform -- reproduced here against the published
+manylinux_2_17_x86_64 wheel, where 6 of the 7 tests in this file fail.
+
+Use the smallest accepted interval -- the same 1000 upstream already switched
+`test_observability_client.py` to -- and wait for the condition each test is
+really about rather than for a fixed duration. The waits return as soon as the
+sync lands, so fast hardware pays nothing.
+
+Upstream-Status: To upstream [not yet submitted; the release is cut from a non-public tree, so this needs a maintainer discussion rather than a drive-by PR]
+---
+ statsig-pyo3/tests/test_data_store.py | 46 +++++++++++++++++----------
+ 1 file changed, 30 insertions(+), 16 deletions(-)
+
+diff --git a/statsig-pyo3/tests/test_data_store.py b/statsig-pyo3/tests/test_data_store.py
+index 9df3ac7..708c81b 100644
+--- a/statsig-pyo3/tests/test_data_store.py
++++ b/statsig-pyo3/tests/test_data_store.py
+@@ -17,6 +17,12 @@ from utils import get_test_data_resource, get_test_data_resource_bytes
+ 
+ known_lcut = 1767981029384
+ 
++# StatsigOptions rejects a specs_sync_interval_ms below this and falls back to the
++# default, so the polling tests below have to wait for a real sync to land.
++MIN_SYNC_INTERVAL_MS = 1000
++SYNC_WAIT_ATTEMPTS = 200
++SYNC_WAIT_INTERVAL_S = 0.05
++
+ dcs_content = get_test_data_resource("eval_proj_dcs.json")
+ json_data = json.loads(dcs_content)
+ eval_proj_protobuf = get_test_data_resource_bytes("eval_proj_dcs.pb.br")
+@@ -169,7 +175,7 @@ def statsig_setup(httpserver: HTTPServer):
+         specs_url=httpserver.url_for("/v2/download_config_specs"),
+         log_event_url=httpserver.url_for("/v1/log_event"),
+         data_store=data_store,
+-        specs_sync_interval_ms=1,
++        specs_sync_interval_ms=MIN_SYNC_INTERVAL_MS,
+     )
+ 
+     statsig = Statsig("secret-key", options)
+@@ -193,7 +199,7 @@ def statsig_bytes_setup(httpserver: HTTPServer):
+         specs_url=httpserver.url_for("/v2/download_config_specs"),
+         log_event_url=httpserver.url_for("/v1/log_event"),
+         data_store=data_store,
+-        specs_sync_interval_ms=1,
++        specs_sync_interval_ms=MIN_SYNC_INTERVAL_MS,
+     )
+ 
+     statsig = Statsig("secret-key", options)
+@@ -223,10 +229,10 @@ def test_data_store_usage_get(statsig_setup):
+     assert gate.value == True
+     assert gate.details.lcut == known_lcut
+ 
+-    for _ in range(100):
++    for _ in range(SYNC_WAIT_ATTEMPTS):
+         if data_store.get_called_count >= 2:
+             break
+-        sleep(0.05)
++        sleep(SYNC_WAIT_INTERVAL_S)
+ 
+     assert data_store.get_called_count > 1
+ 
+@@ -240,9 +246,13 @@ def test_data_store_usage_set(statsig_setup):
+ 
+     assert data_store.init_called
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+-    sleep(1)
+ 
+-    gate_after = statsig.get_feature_gate(user, "test_public")
++    for _ in range(SYNC_WAIT_ATTEMPTS):
++        gate_after = statsig.get_feature_gate(user, "test_public")
++        if gate_after.details.lcut == known_lcut + 10:
++            break
++        sleep(SYNC_WAIT_INTERVAL_S)
++
+     statsig.flush_events().wait()
+ 
+     assert gate_after.value == True
+@@ -265,10 +275,10 @@ def test_data_store_usage_get_bytes(statsig_bytes_setup):
+     assert gate.value == True
+     assert gate.details.lcut == known_lcut
+ 
+-    for _ in range(5):
++    for _ in range(SYNC_WAIT_ATTEMPTS):
+         if data_store.set_bytes_called_count > 0:
+             break
+-        sleep(0.05)
++        sleep(SYNC_WAIT_INTERVAL_S)
+ 
+     assert data_store.get_bytes_called_count >= 1
+     assert data_store.get_called_count == 0
+@@ -283,10 +293,10 @@ def test_data_store_usage_get_bytes_request_has_since_time_after_initial_poll(st
+     gate = statsig.get_feature_gate(user, "test_public")
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+ 
+-    for _ in range(100):
++    for _ in range(SYNC_WAIT_ATTEMPTS):
+         if data_store.get_bytes_called_count >= 2:
+             break
+-        sleep(0.05)
++        sleep(SYNC_WAIT_INTERVAL_S)
+ 
+     assert data_store.get_bytes_called_count >= 2
+ 
+@@ -308,10 +318,10 @@ def test_data_store_usage_get_bytes_request_checksum_match_returns_no_update(sta
+     gate = statsig.get_feature_gate(user, "test_public")
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+ 
+-    for _ in range(100):
++    for _ in range(SYNC_WAIT_ATTEMPTS):
+         if data_store.get_bytes_called_count >= 2:
+             break
+-        sleep(0.05)
++        sleep(SYNC_WAIT_INTERVAL_S)
+ 
+     assert data_store.get_bytes_called_count >= 2
+     assert data_store.returned_no_update
+@@ -325,10 +335,10 @@ def test_data_store_usage_get_bytes_request_checksum_match_returns_no_update(sta
+     assert request_with_checksum.since_time == data_store.stored_time
+ 
+     # no second write should occur when server responds with {"has_updates": false}
+-    for _ in range(100):
++    for _ in range(SYNC_WAIT_ATTEMPTS):
+         if data_store.get_bytes_called_count > 2:
+             break
+-        sleep(0.05)
++        sleep(SYNC_WAIT_INTERVAL_S)
+ 
+ 
+ 
+@@ -341,9 +351,13 @@ def test_data_store_usage_set_bytes(statsig_bytes_setup):
+ 
+     assert data_store.init_called
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+-    sleep(1)
+ 
+-    gate_after = statsig.get_feature_gate(user, "test_public")
++    for _ in range(SYNC_WAIT_ATTEMPTS):
++        gate_after = statsig.get_feature_gate(user, "test_public")
++        if gate_after.details.lcut == known_lcut + 10:
++            break
++        sleep(SYNC_WAIT_INTERVAL_S)
++
+     statsig.flush_events().wait()
+ 
+     assert gate_after.value == True

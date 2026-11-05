@@ -1,0 +1,96 @@
+From 76383fbf9a42114eb7170532f9608faff8de369e Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 20 Sep 2026 00:22:58 +0000
+Subject: [PATCH] mitmproxy-linux: allow a prebuilt eBPF object
+
+`aya_build::build_ebpf` cross-compiles mitmproxy-linux-ebpf to
+bpfel-unknown-none through `bpf-linker`, which links against the LLVM that
+ships with the Rust toolchain. Rust builds that LLVM as a shared library for
+x86_64 and aarch64 only: on riscv64 hosts `librustc_driver-*.so` has LLVM
+linked in statically with its symbols hidden and the toolchain carries no
+`libLLVM*.so`, so bpf-linker aborts in aya-rustc-llvm-proxy with "unable to
+find LLVM shared lib". Building bpf-linker against a system LLVM instead is no
+way out either: the newest LLVM packaged for riscv64 is 21.1.8 (Rocky 10.2
+AppStream, the manylinux_2_39_riscv64 base), while this workspace's own MSRV of
+1.95 is the Rust release that moved to LLVM 22, and linking LLVM 23 bitcode
+with LLVM 21 fails with "ERROR llvm: Invalid record".
+
+Take the eBPF object from `ebpf-prebuilt/` at the workspace root when one is
+staged there, so the BPF half can be cross-compiled on a host with a usable
+bpf-linker while the redirector itself is built natively. The object is plain
+BPF bytecode whose only architecture input is `--cfg bpf_target_arch`, which
+the ahead-of-time build sets to the target architecture. Without a staged
+object both build scripts behave exactly as before.
+
+Upstream-Status: Inappropriate [riscv64 build-environment constraint; upstream's own CI builds on hosts whose Rust toolchain ships a shared libLLVM]
+---
+ mitmproxy-linux-ebpf/build.rs | 15 ++++++++++-----
+ mitmproxy-linux/build.rs      | 27 +++++++++++++++++++++++++++
+ 2 files changed, 37 insertions(+), 5 deletions(-)
+
+diff --git a/mitmproxy-linux-ebpf/build.rs b/mitmproxy-linux-ebpf/build.rs
+index 10ad0c2..204a2a3 100644
+--- a/mitmproxy-linux-ebpf/build.rs
++++ b/mitmproxy-linux-ebpf/build.rs
+@@ -12,9 +12,14 @@ use which::which;
+ ///
+ /// [bindeps]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html?highlight=feature#artifact-dependencies
+ fn main() {
+-    let bpf_linker = which("bpf-linker").expect(
+-        "Failed to find `bpf-linker` executable on PATH. \
+-        Run `cargo install --locked bpf-linker` to install.",
+-    );
+-    println!("cargo:rerun-if-changed={}", bpf_linker.to_str().unwrap());
++    // A prebuilt eBPF object staged in `ebpf-prebuilt/` at the workspace root
++    // makes `../mitmproxy-linux/build.rs` skip the cross-compile, so a missing
++    // `bpf-linker` is not an error in that case.
++    match which("bpf-linker") {
++        Ok(bpf_linker) => println!("cargo:rerun-if-changed={}", bpf_linker.to_str().unwrap()),
++        Err(err) => println!(
++            "cargo:warning=`bpf-linker` not found on PATH ({err}); \
++            expecting a prebuilt eBPF object"
++        ),
++    }
+ }
+diff --git a/mitmproxy-linux/build.rs b/mitmproxy-linux/build.rs
+index 693f4f0..e286729 100644
+--- a/mitmproxy-linux/build.rs
++++ b/mitmproxy-linux/build.rs
+@@ -1,3 +1,6 @@
++#[cfg(target_os = "linux")]
++use std::{env, fs, path::PathBuf};
++
+ #[cfg(target_os = "linux")]
+ use anyhow::{Context as _, anyhow};
+ 
+@@ -10,6 +13,30 @@ fn main() {}
+ /// Based on https://github.com/aya-rs/aya-template/blob/main/%7B%7Bproject-name%7D%7D/build.rs
+ #[cfg(target_os = "linux")]
+ fn main() -> anyhow::Result<()> {
++    // Use an eBPF object cross-compiled ahead of time, if one is staged in
++    // `ebpf-prebuilt/` at the workspace root. `aya_build::build_ebpf` below
++    // needs `bpf-linker`, which links against the LLVM that ships with the Rust
++    // toolchain and therefore cannot run on a host whose toolchain has no
++    // shared LLVM library.
++    let manifest_dir = PathBuf::from(
++        env::var_os("CARGO_MANIFEST_DIR").ok_or_else(|| anyhow!("CARGO_MANIFEST_DIR not set"))?,
++    );
++    let prebuilt = manifest_dir
++        .parent()
++        .ok_or_else(|| anyhow!("no parent for {}", manifest_dir.display()))?
++        .join("ebpf-prebuilt")
++        .join("mitmproxy-linux");
++    println!("cargo:rerun-if-changed={}", prebuilt.display());
++    if prebuilt.is_file() {
++        let out_dir =
++            PathBuf::from(env::var_os("OUT_DIR").ok_or_else(|| anyhow!("OUT_DIR not set"))?);
++        let dst = out_dir.join("mitmproxy-linux");
++        let _: u64 = fs::copy(&prebuilt, &dst).with_context(|| {
++            format!("failed to copy {} to {}", prebuilt.display(), dst.display())
++        })?;
++        return Ok(());
++    }
++
+     let cargo_metadata::Metadata { packages, .. } = cargo_metadata::MetadataCommand::new()
+         .no_deps()
+         .exec()
