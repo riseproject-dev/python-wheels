@@ -55,31 +55,28 @@ valid_statuses = {
 }
 
 
-def get_commits_between(start_ref, end_ref):
-    """Get commit hashes between two branches or commits."""
-    cmd = ["git", "rev-list", f"{start_ref}..{end_ref}"]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return result.stdout.splitlines()
+def get_changed_patches(start_ref, end_ref):
+    """Get the patch files added or modified between two refs.
 
-
-def get_commit_files(commit):
-    """Get a list of patch files added or modified in a commit."""
-    cmd = ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", commit]
+    Compares the two trees, so only those two commits need to be present: a
+    shallow checkout is enough, no history is walked.
+    """
+    cmd = ["git", "diff", "--name-status", "--diff-filter=AM", start_ref, end_ref]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     files = []
     for line in result.stdout.splitlines():
         status, filename = line.split("\t", 1)
-        if status in ("A", "M") and filename.endswith(".patch"):
+        if filename.endswith(".patch"):
             files.append(filename)
     return files
 
 
-def extract_patch_from_commit(commit, patch_file):
-    """Extract a patch file from a given commit."""
-    cmd = ["git", "show", f"{commit}:{patch_file}"]
+def extract_patch(ref, patch_file):
+    """Extract a patch file as it is in a given commit."""
+    cmd = ["git", "show", f"{ref}:{patch_file}"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"WARNING: Could not extract {patch_file} from commit {commit}")
+        print(f"WARNING: Could not extract {patch_file} from {ref}")
         return None
     return result.stdout
 
@@ -117,19 +114,16 @@ def main():
         sys.exit(1)
 
     start_ref, end_ref = sys.argv[1], sys.argv[2]
-    commits = get_commits_between(start_ref, end_ref)
 
     error_found = False
 
-    for commit in commits:
-        patch_files = get_commit_files(commit)
-        for patch in patch_files:
-            patch_content = extract_patch_from_commit(commit, patch)
-            if patch_content:
-                if not check_upstream_status(patch_content, patch):
-                    error_found = True
-                else:
-                    print(f"✅{patch}")
+    for patch in get_changed_patches(start_ref, end_ref):
+        patch_content = extract_patch(end_ref, patch)
+        if patch_content:
+            if not check_upstream_status(patch_content, patch):
+                error_found = True
+            else:
+                print(f"✅{patch}")
 
     if error_found:
         print("Valid formats:")

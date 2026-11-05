@@ -52,6 +52,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **519** — A mass test failure is upstream's, not the port's, when the vendor's own
   released x86_64 wheel fails the same suite — prove it with one `pip install`, then ship a
   functional smoke test instead of a half-suite deselect list.
+- **699** — Gotcha 504's class extends to a boolean: a trivially feasible instance coming back
+  `is_proven_infeasible` on riscv64 only, with no exact-equality assertion in sight, is still
+  an architecture float divergence inside a vendored exact solver, not a wrong build.
 - **535** — A release tag can ship tests its own source does not satisfy — diff the failing
   test against upstream's post-release `master` and cherry-pick the fix as a `Backport`
   patch, before blaming the architecture.
@@ -173,9 +176,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       parametrisation — 100 of 100 is a gate, a scattered mix is not. That one command
       separates "upstream doesn't support this on riscv64" from "our wheel is broken",
       and it costs nothing next to re-reading tracebacks.
-    - **Deselect per matrix entry, not globally.** Turn `python: [cp312, ...]` into
-      `include:` with a per-entry filter and interpolate it into the test command
-      (`-k "${{ matrix.pytest_k }}"`), so the interpreter that *can* exercise the
+    - **Deselect per matrix entry, not globally.** Derive a per-entry filter from
+      `matrix.python` (`-k "${{ matrix.python != 'cp314' && 'not feature' || '' }}"`; in
+      an unconverted workflow, turn `python: [cp312, ...]` into `include:` entries with a
+      `pytest_k` key) and interpolate it into the test command, so the interpreter that *can* exercise the
       feature keeps testing it — dropping it everywhere would have thrown away 105
       real tests on cp314. `-k ""` is a valid no-op filter, so the unrestricted entry
       needs no second command shape.
@@ -527,6 +531,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       flags land after `CMAKE_CXX_FLAGS` and the last `-O` wins. And **put anything that
       needs no wheel in its own job** — a libgomp probe answers in ten minutes instead of
       queueing behind a multi-hour build.
+
+662. **When gotcha 115's own diagnostic rebuild is what makes the SIGSEGV go away, that *is*
+    the finding — ship it as `SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo`, not as a deeper dig
+    (the robust-laplacian case).** All four interpreter legs crashed identically at
+    `CIBW_TEST_COMMAND` with no Python-level traceback under scikit-build-core's default
+    Release config (`-O3 -DNDEBUG`). The gotcha 115 gdb-backtrace rebuild
+    (`SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo SKBUILD_INSTALL_STRIP=false`, gdb installed via
+    `CIBW_BEFORE_TEST_LINUX`) ran clean — no crash, so no backtrace either, which is itself
+    the signal that the fault is sensitive to the optimisation level (`-O2` vs `-O3`), the
+    classic shape of UB the optimiser is free to miscompile at one level and not the other.
+    - **Don't chase a backtrace that a clean run cannot produce.** Gotcha 168's "never leave
+      the branch in that state" is about the gdb/strip scaffolding, which exists only to read
+      symbols — once the rebuild itself is the fix, strip it back out (`SKBUILD_INSTALL_STRIP`
+      left at its default `true`, `CIBW_BEFORE_TEST_LINUX` and the gdb test wrapper removed,
+      matrix restored) and keep only `SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo` in
+      `CIBW_ENVIRONMENT` as the actual behaviour change, same mechanism as gotcha 46's
+      constrained-arch `-O0`/`-O1` downgrades.
+    - **This is weaker evidence than gotcha 166/167's fully-isolated toolchain bugs** — there
+      is no standalone reproducer, no named faulting function, and no proof the same tree is
+      clean on another architecture at the same optimisation level — so comment the rebuild's
+      reason in the workflow and cite this gotcha rather than asserting a specific bug; a
+      future porter hitting the identical "all legs crash, no traceback" shape on an
+      Eigen/geometry-central-style header-heavy numeric C++ dependency tree should try the
+      same rebuild before spending hours on gotcha 167's fuller isolation ladder.
 
 169. **`astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
     statically what a distro ships as shared — which fails tests that assert on module
@@ -1214,6 +1242,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       `CMEEL_RUN_TESTS=false` says otherwise, and a failing test aborts the *build* inside
       `prepare_metadata_for_build_wheel` — no wheel, a PEP 517 traceback, and nothing that
       looks like a test report. Copy that env var across with the rest of the recipe.
+
+699. **Gotcha 504's class extends past buckets and counts to a boolean: a trivially feasible
+    one-item instance coming back `is_proven_infeasible` on riscv64 only, with no exact-equality
+    assertion anywhere in sight, is still an architecture floating-point divergence, not a wrong
+    build (the packingsolver case).** `test_feasible` packs one 6x6 item into a 10x10 bin and
+    asserts `not output.is_proven_infeasible` — only `rectangle`/`rectangleguillotine`'s
+    `BinPacking`/`Feasibility` combinations failed it on riscv64, not `box`/`boxstacks`/
+    `irregular` nor the `Knapsack`/`VariableSizedBinPacking` objectives. `rectangle::optimize()`
+    relaxes the 2D instance to a 1D one keyed on exact bin/item *area* (an integer — 100 and 36
+    here, so nothing rounds at that step) and hands it to the full `onedimensional::optimize()`
+    (dichotomic search over a vendored, `FetchContent`-built HiGHS for the exact per-bin-count
+    solve), under the rule "the relaxation is infeasible ⇒ so is the real instance." A one-line
+    floating-point tolerance misfire inside that inner exact solve — crossing HiGHS's own
+    primal-feasibility epsilon differently under riscv64's `rv64gc` FMA baseline than under a
+    baseline x86_64 build with no FMA to contract into (same mechanism as gotcha 504, one layer
+    removed) — reports the relaxation infeasible and the geometry solver believes it.
+    - **A day-long `FetchContent` build (nine vendored repos plus HiGHS) makes the gotcha
+      504/304 move of reproducing on x86 with one extra compiler flag impractical here**: there
+      is no isolated translation unit to rebuild the way octomap's inline header math was.
+      Diagnose from the source path instead — trace which problem types/objectives actually
+      reach the inner exact solve for a small instance (`number_of_item_types() < 100`) versus
+      a cheap closed-form bound, and let the *shape* of the pass/fail split (two related
+      problem types out of five, two objectives out of four, both only through the one code
+      path that calls the vendored solver) stand in for the byte-for-byte repro.
+    - **Fix scope: deselect, don't patch.** Nothing here is wrong with this repo's build — no
+      upstream bug report exists to attach a patch to, and forcing a global `-ffp-contract=off`
+      would (as gotcha 504 warns) make the riscv64 wheel's own codegen diverge from what
+      upstream never tests on any architecture. `CIBW_TEST_COMMAND`'s `-k`, not `--deselect`
+      (gotcha 14/283's path-mismatch trap applies to any non-default test invocation, not just
+      a staged `{package}` copy).
+    - **A `-k` expression over `BinPacking`/`VariableSizedBinPacking`/`BinPackingWithLeftovers`
+      needs the substring collision handled, not assumed away.** All three objective names
+      contain `BinPacking`; so does `rectangleguillotine` contain `rectangle`. Write the
+      expression to require the substring *and* exclude the longer names that also carry it
+      (`BinPacking and not Variable and not Leftovers`), rather than one bare keyword that
+      silently pulls in parametrizations that still pass.
 
 507. **A SIGSEGV out of a hand-written `ctypes` smoke test is almost always the test's own
     declaration, not the wheel — reproduce the same line against the local x86 build before
@@ -1973,3 +2037,149 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       covers the case where the project's tests read stderr. Any OpenUSD-based port
       (usd-core, usd-exchange, a future OpenUSD consumer) built on these runners prints the
       warning unless it carries this patch.
+
+671. **A test that compares a round-tripped float→unsigned-int cast to catch lossy
+     conversions can pass on x86_64 and genuinely fail on riscv64, because the cast's
+     overflow behavior is C99 undefined behavior that RISC-V's `fcvt.wu.s`/`fcvt.wu.d`
+     resolve differently (the pycdfpp case).** pycdfpp's `_exactly_as`/`_keeps_every_value`
+     helper (`pycdfpp/__init__.py`) decides whether a value can losslessly become a given
+     CDF numeric type by converting it and converting back (`converted.astype(values.dtype)`)
+     and comparing to the original, raising if anything changed. Its own test suite feeds it
+     `uint32` `4294967295` (`UINT32_MAX`) against `CDF_FLOAT`: `float32(4294967295)` rounds to
+     the nearest representable value, `4294967296.0` (ordinary IEEE-754 round-to-nearest-even,
+     identical on every architecture — this is *not* the bug). The actual divergence is the
+     next step, converting that `4294967296.0` back to `uint32`, which overflows the target
+     type and is undefined behavior in C99. Installing the real upstream `pycdfpp==0.19.0`
+     wheel with the matching numpy version and running the identical cast on x86_64 gives `0`
+     (numpy's codegen truncates/wraps on overflow there), which correctly differs from the
+     original `4294967295` and makes the helper raise as the test expects. RISC-V's F/D
+     extension specifies `fcvt.wu.s`/`fcvt.wu.d` as *saturating* on overflow — clamping to the
+     type's max representable value, `4294967295` for `uint32` — so the round-tripped value on
+     riscv64 comes back identical to the original, the helper wrongly concludes nothing was
+     lost, and the test's expected `ValueError` never fires. Confirmed this is a real
+     architecture difference, not a flaky/pre-existing upstream test bug, before concluding
+     anything: the test passes cleanly against the genuine x86_64 wheel with the exact riscv64
+     CI's numpy version, so it is not something that was already broken upstream. Do not
+     "fix" this by patching the test to skip the assertion — that hides a narrow but real
+     riscv64-specific correctness gap in the project's own round-trip-compare exactness check,
+     which belongs in an upstream issue/fix (e.g. an explicit bounds check instead of a
+     round-trip compare), not a deselect in this repo's CI workflow. The same shape — any
+     project whose own correctness/exactness logic relies on a float→unsigned-integer
+     round-trip comparison around a type's max value — can recur well beyond CDF/pycdfpp.
+
+693. **`Problem.solve(diagnostics=True)` throwing `std::bad_cast` (via nanobind's default
+     `RuntimeError` translation) on *every* call that passes it, while the identical
+     `diagnostics=False` solve of the same problem succeeds, is a riscv64 toolchain defect in
+     `std::print`/`std::format` — not a bug reachable by patching the project's own code (the
+     sleipnirgroup-jormungandr case).** `Problem::solve()`'s `options.diagnostics` flag gates
+     nothing except calls into `print_iteration_diagnostics()`/`print_setup_diagnostics()`/
+     `print_solver_diagnostics()` (`include/sleipnir/util/print_diagnostics.hpp`), which route
+     through `slp::print()`/`slp::println()` (`include/sleipnir/util/print.hpp`), themselves
+     thin wrappers around `std::print()`/`std::println()`; no other solver logic depends on the
+     flag (checked across `ipm.hpp`/`sqp.hpp`/`newton.hpp`/`problem.hpp`). On
+     `manylinux_2_39_riscv64` (GCC 14.3.1), every one of the 34 Python tests that pass
+     `diagnostics=True` (confirmed 1:1 against `grep -rn diagnostics=True python/test`) fails
+     with `RuntimeError: std::bad_cast` the instant the print path runs; every test that omits
+     the flag, or passes `diagnostics=False`, passes. This surfaced only *after* fixing the
+     unrelated plain-pip version-skew failure (gotcha 422's pattern, `PIP_ONLY_BINARY`) that had
+     been masking it — the test step never got far enough to hit it before.
+     - **Isolating the exact mechanism did not succeed with the tools available in a cloud
+       session (no `docker` daemon, so the real `manylinux_2_39_riscv64` image couldn't be
+       pulled to test against the actual GCC 14.3.1).** A `riscv64-linux-gnu-g++-14` (Ubuntu's
+       14.2.0 cross package) + `qemu-riscv64-static` reproduction of the identical
+       `print_diagnostics.hpp` calls — as a static executable, and again as a `dlopen()`'d
+       `-fvisibility=hidden -fvisibility-inlines-hidden` shared object (mirroring how
+       `nanobind_add_module`'s `STABLE_ABI` links the extension), with and without
+       `-flto -pthread` — printed correctly every time, no exception. `libstdc++`'s only
+       runtime `std::bad_cast` throw sites (`grep -rn bad_cast /usr/include/c++/14/`) are
+       `use_facet<Facet>` (gated behind the format spec's `L` flag, which none of these format
+       strings use — checked every `{...}` spec in the file) and `basic_ios`'s facet-cache
+       check; neither is reachable from a plain `std::print`/`std::format` call with no
+       locale/`ios` object involved, going by the GCC 14.2.0 headers. The 14.2.0→14.3.1 patch
+       gap, or something specific to the real `dlopen()`+`STABLE_ABI`+riscv64-runner
+       combination, is the most likely remaining difference, but neither was reproducible here.
+     - **Workaround, not a fix: patch the Python *tests* to pass `diagnostics=False`, leaving
+       everything else (including `spy=True` in a spy test) untouched.** `spy` is an
+       independent `bool` parameter from `options.diagnostics` (`problem.hpp`'s
+       `solve(options, spy)`), and the `Spy<Scalar>` helper (`include/sleipnir/util/spy.hpp`)
+       writes through `std::ofstream`, never `std::format`/`std::print`, so `spy=True` alone
+       doesn't hit this path and the spy test still exercises its real feature. Every other
+       assertion in the patched tests (`ExitStatus`, decision-variable values) is unaffected,
+       since `diagnostics` gates no solver math — only the diagnostic printing is skipped. Tag
+       the patch `Upstream-Status: Inappropriate`: this isn't a defect to send upstream, it's
+       our riscv64 toolchain's.
+     - **If re-investigating:** get access to the real `quay.io/pypa/manylinux_2_39_riscv64`
+       GCC 14.3.1 (`docker run --platform linux/riscv64` where a daemon is available, or a
+       riscv64 runner directly) rather than a cross-compiled approximation, and check whether
+       the failure needs the real Python/nanobind `dlopen()` + `STABLE_ABI` runtime — not just
+       a hand-rolled `dlopen()` host — to reproduce.
+
+708. **Widening a test's inner subprocess budget to fix gotcha 38's discovery race can
+     silently collide with a *different*, hardcoded outer kill-timeout the harness itself
+     never exposes — the two numbers look independent until one is raised far enough to
+     meet the other (cyclonedds-python's `test_ddsls.py` watch-mode harness).**
+     `run_ddsls_watchmode()`/`run_ddsls_async_watch()` launch `ddsls --watch --runtime N`
+     as a subprocess and hand it to `run_ddsls(args, timeout=10)` — whose `timeout` kwarg
+     has its own hardcoded default of 10s and is never passed through by the watch-mode
+     callers, so every watch-mode test's `process.communicate()` kill-timeout is a fixed
+     10s regardless of what `--runtime N` the caller asked for. While `N` stayed at the
+     original 5, this left 5s of accidental headroom for subprocess startup (interpreter
+     boot + `cyclonedds` import, before the tool's own `--runtime` clock even starts) and
+     shutdown (DDS domain-participant teardown, stdout flush, process exit) on top of the
+     watch window itself. Gotcha 38's own fix for this suite (raising `test_ddsls_qos_change`
+     and `test_ddsls_qos_change_in_verbose` from `runtime=5` to `runtime=10` to fix a
+     discovery/qos-propagation race) pushed the inner budget up to exactly the outer
+     kill-timeout's value, deleting that headroom entirely — the next CI run then failed
+     both tests with `subprocess.TimeoutExpired` at 10s, one with a partial stdout capture
+     (the subprocess was genuinely still working, not deadlocked) and the `--lf` rerun with
+     none at all (an even busier host left zero room for even the first print).
+     - **A `TimeoutExpired` whose captured stdout is non-empty but incomplete is evidence of
+       a margin problem, not a hang** — same read as gotcha 568's awscrt case, applied to a
+       different harness shape (an outer wrapper's own default swallowing the inner value
+       instead of a single hardcoded wall clock).
+     - **The fix is to stop treating the inner and outer timeouts as independent**: thread a
+       `timeout` through to `run_ddsls()` from `run_ddsls_async_watch()` that is always
+       `runtime` plus a fixed, comfortable headroom (20s), so any future bump to a test's
+       `runtime=` argument can never again close the gap to the harness's own default.
+       Patching only the three tests' `runtime=` values (as the first pass did) treats the
+       symptom; patching the harness function closes the whole class of collision for every
+       current and future caller in the file.
+     - **Resolving "gotcha 38" in a comment or commit message doesn't mean the fix for that
+       citation is complete** — a correct fix for the race gotcha 38 describes can still
+       expose a second, unrelated bug (this harness's hardcoded kill-timeout) that only
+       manifests once the first fix pushes a number far enough. Re-run CI against the actual
+       head commit after a timing fix lands, rather than assuming "cited the right gotcha"
+       is the same as "green."
+
+711. **A test that caps `RLIMIT_AS` at "current VmSize + small headroom" to force a
+     `MemoryError` out of a large allocation passes under the GIL build and silently
+     passes allocation under free-threaded CPython (cp314t) instead — this is a property
+     of cp314t's own allocator, confirmed off riscv64 and off the package's own code
+     entirely (wolfxl's `test_streaming_oom_error.py::test_allocation_failure_raises_memory_error_not_panic`).**
+     The test measures its own `VmSize` right after opening a reader, sets
+     `RLIMIT_AS` to that plus 64 MiB, then allocates well past the cap (192 MiB of
+     distinct strings) expecting `MemoryError`. `RLIMIT_AS` is a *virtual address
+     space* limit the kernel enforces only on calls that grow a process's mappings
+     (`mmap`/`brk`/`mremap`); it does nothing to memory inside a mapping a process
+     already holds. Reproduced with a ~20-line pure-stdlib script (no wolfxl, no
+     Rust, no riscv64 — run on x86_64) that does exactly the same
+     measure-VmSize/setrlimit/allocate sequence: under CPython 3.11 (GIL), a 192 MiB
+     allocation with a 64 MiB headroom correctly raises `MemoryError`; under CPython
+     3.14 free-threaded, the identical sequence allocates all of it with no error —
+     and the free-threaded interpreter's own baseline `VmSize` at measurement time
+     was already **>1 GiB**, against ~14 MiB for the GIL build, before either process
+     touched the module under test. Free-threaded CPython's object allocator
+     (mimalloc-backed, replacing pymalloc's role for anything not tiny) reserves its
+     per-thread arenas in large chunks up front; later large allocations are carved
+     out of address space already mapped before the test ever calls `setrlimit`, so
+     they never issue the new `mmap` that `RLIMIT_AS` would have gated. This is not
+     a riscv64 bug and not a defect in the package under test's Rust/PyO3 allocation
+     path — it is cp314t's allocator defeating this specific test technique on any
+     architecture. Do not spend more time chasing it as a build or porting bug; where
+     a port's upstream suite contains this exact RLIMIT_AS-headroom-then-allocate
+     pattern, deselect it for `cp314t` only (matrix `include:` entry adding a
+     `test_deselect` key gotcha 149 shows the shape of, interpolated into the pytest
+     invocation) with a comment citing this gotcha, and leave it running on
+     cp312/cp313/cp314. `Upstream-Status: To discuss upstream` — the test's technique
+     is simply incompatible with a `Py_GIL_DISABLED` build, which the package may not
+     have had a cp314t leg to discover yet.
