@@ -88,8 +88,14 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # CIBW_ENVIRONMENT replaces pandas's [tool.cibuildwheel] environment
           # table wholesale, so its own LDFLAGS has to be restated here.
+          # pandas 3.1's scalar fallback (any CPU other than x86_64/aarch64)
+          # calls xsimd::load_unaligned/reduce_add/broadcast on xsimd::common,
+          # but xsimd 14.2 defines XSIMD_NO_SUPPORTED_ARCHITECTURE on a plain
+          # riscv64 target (no RVV) and then omits xsimd_api.hpp; the emulated
+          # arch makes xsimd keep the API.
           CIBW_ENVIRONMENT: >-
             LDFLAGS=-Wl,--strip-all
+            CXXFLAGS=-DXSIMD_WITH_EMULATED=1
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,hypothesis
           # cibuildwheel copies the source into a fresh container per build, and
@@ -98,11 +104,14 @@ jobs:
           # git describe reads when the meson build resolves the version (gotcha
           # 315). CIBW_BEFORE_BUILD replaces pandas's [tool.cibuildwheel]
           # before-build wholesale, so re-run it here, then commit and re-tag in
-          # the same container before the build reads the version.
+          # the same container before the build reads the version. pandas 3.1
+          # dropped the script, so skip it when absent.
           CIBW_BEFORE_BUILD: >-
+            if [ -f {package}/scripts/cibw_before_build.sh ]; then
             PACKAGE_DIR={package} bash {package}/scripts/cibw_before_build.sh &&
             git -C {package} -c user.name=ci -c user.email=ci@localhost commit -am "cibw before-build" &&
-            git -C {package} tag -f v${{ env.PANDAS_VERSION }}
+            git -C {package} tag -f v${{ env.PANDAS_VERSION }};
+            fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

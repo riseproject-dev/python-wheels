@@ -83,6 +83,10 @@ jobs:
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
+      # The versions are built side by side, and with all of them compiling at once
+      # jobs stall for hours or have rustc killed (SIGABRT) while the same version
+      # builds in about 90 minutes alone; a few at a time stays well inside the limit.
+      max-parallel: 4
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build dcc-mcp-server ${{ matrix.version }} py3-none-manylinux_riscv64
@@ -109,6 +113,14 @@ jobs:
       # Upstream builds this wheel in manylinux2014 (Maya 2022's glibc); the
       # oldest riscv64 manylinux image is 2_39, so the tag check of
       # scripts/release/server_wheel_tags.py does not apply here.
+      #
+      # Upstream's release profile is `lto = true` + `codegen-units = 1`, a single
+      # threaded fat-LTO link that takes the riscv64 runners past the 6 hour job
+      # limit when the versions build side by side (6 of 15 jobs were cancelled at
+      # the cap). Thin LTO did not fix it: the final dcc-mcp-server crate then sat
+      # in its whole-program optimisation for the rest of the 6 hours, while the
+      # same crates compile in minutes. LTO off over 16 codegen units compiles in
+      # parallel and only changes how the binary is optimised, not what it does.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
@@ -117,7 +129,7 @@ jobs:
           args: --release --out wheels
           manylinux: '2_39'
           working-directory: pkg/dcc-mcp-server-bin
-          docker-options: -e DCC_MCP_ADMIN_UI_PREBUILT=1
+          docker-options: -e DCC_MCP_ADMIN_UI_PREBUILT=1 -e CARGO_PROFILE_RELEASE_LTO=off -e CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
           before-script-linux: git config --global --add safe.directory "*"
 
       - name: Check the wheel carries the binary and no extension module

@@ -1,0 +1,53 @@
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against jin-s13/xtcocoapi]
+
+get_version() execs version.py and then reads its names back via locals().
+Two separate bugs combine here. (1) It only takes the short_version branch
+when 'sdist' or 'bdist_wheel' is literally in sys.argv, and otherwise reads
+__version__ from the else branch; a modern pip calls
+prepare_metadata_for_build_wheel with 'dist_info' in sys.argv, not
+'bdist_wheel', hitting that else branch. (2) More fundamentally, the exec+
+locals() pattern itself breaks under PEP 667 (Python 3.13+): locals() inside
+a function is now always a fresh snapshot built from the function's static
+fast-locals, so names that are only ever created by the exec'd code (never
+assigned anywhere in get_version's own source, on either branch) are not
+visible through a later locals() call at all, independent of sys.argv. That
+is why cp313/cp314/cp314t fail at the metadata-prep step while cp312 (an
+older Python without PEP 667) does not; it is not riscv64-specific and
+reproduces with any 3.13+ interpreter on any arch, with any sufficiently new
+pip. Fixing only (1), as this patch originally did, still failed here with
+KeyError: 'short_version' instead of KeyError: '__version__' - same root
+cause, different branch. Execing into an explicit namespace dict sidesteps
+locals() entirely and fixes both.
+
+diff --git a/setup.py b/setup.py
+index 1111111..2222222 100644
+--- a/setup.py
++++ b/setup.py
+@@ -4,14 +4,23 @@
+ version_file = 'xtcocotools/version.py'
+ 
+ def get_version():
++    # Exec into an explicit namespace dict rather than relying on locals():
++    # under PEP 667 (Python 3.13+), locals() inside a function is always a
++    # fresh snapshot, so names only ever created by this exec (never assigned
++    # in get_version's own source) don't survive a later locals() call, on
++    # either branch below. Reproduces on any 3.13+ interpreter, independent
++    # of architecture.
++    version_locals = {}
+     with open(version_file, 'r') as f:
+-        exec(compile(f.read(), version_file, 'exec'))
++        exec(compile(f.read(), version_file, 'exec'), version_locals)
+     import sys
+     # return short version for sdist
+-    if 'sdist' in sys.argv or 'bdist_wheel' in sys.argv:
+-        return locals()['short_version']
++    # pip's build backend also runs prepare_metadata_for_build_wheel with
++    # 'dist_info'/'egg_info' in sys.argv, not 'bdist_wheel'; treat the same.
++    if {'sdist', 'bdist_wheel', 'dist_info', 'egg_info'} & set(sys.argv):
++        return version_locals['short_version']
+     else:
+-        return locals()['__version__']
++        return version_locals['__version__']
+ 
+ def parse_requirements(fname='requirements.txt', with_version=True):
+     """Parse the package dependencies listed in a requirements file but strips

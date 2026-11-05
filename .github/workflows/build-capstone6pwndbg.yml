@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# capstone6pwndbg republishes capstone-engine/capstone's own bindings/python
+# (as a git submodule) under a different PyPI name via python-rename.patch,
+# so we build from pwndbg/capstone6pwndbg's own repo+patch, the way its own
+# release workflow does:
+#   https://github.com/pwndbg/capstone6pwndbg/blob/v8.0.0/.github/workflows/publish.yml
+name: Build capstone6pwndbg wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/capstone6pwndbg.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-capstone6pwndbg.yml'
+      - 'docs/packages/capstone6pwndbg.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-capstone6pwndbg.yml'
+      - 'docs/packages/capstone6pwndbg.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: capstone6pwndbg
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build capstone6pwndbg ${{ matrix.version }} ${{ matrix.PYTHON.TAG }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+        # setup.py forces has_ext_modules + py_limited_api=cp38 unless built
+        # under Py_GIL_DISABLED (no limited API there yet), matching upstream's
+        # own two wheel shapes per platform: one cp38-abi3 wheel (built here
+        # with RISE's own cp312 floor) plus one free-threaded cp314-cp314t
+        # wheel.
+        PYTHON:
+          - { BUILD: cp312, TAG: cp38-abi3 }
+          - { BUILD: cp314t, TAG: cp314-cp314t }
+
+    env:
+      CAPSTONE6PWNDBG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout capstone6pwndbg v${{ env.CAPSTONE6PWNDBG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pwndbg/capstone6pwndbg
+          ref: v${{ env.CAPSTONE6PWNDBG_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply python-rename.patch to the capstone submodule
+        run: cd capstone && git apply ../python-rename.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: capstone/bindings/python
+          output-dir: wheelhouse/
+          only: ${{ matrix.PYTHON.BUILD }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # setup.py shells out to `cmake` directly; it's not a declared build dep.
+          CIBW_BEFORE_BUILD: pip install cmake
+          # Upstream's own bindings/python/tests does 'from capstone import *',
+          # the pre-rename module name, and test_compatibility_layer.py imports
+          # pre-v6 compat shims python-rename.patch deletes outright - neither
+          # runs unmodified against the renamed capstone6pwndbg module, so this
+          # smoke-tests the installed module directly, reusing upstream's own
+          # known-good x86/riscv64 test vectors (tests/test_lite.py,
+          # tests/test_riscv_reg_access.py).
+          CIBW_TEST_COMMAND: >-
+            python3 -c "import capstone6pwndbg as cs, capstone6pwndbg.riscv as csr;
+            m = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64);
+            i = list(m.disasm(b'\x55\x48\x8b\x05\xb8\x13\x00\x00', 0x1000));
+            assert len(i) == 2 and i[0].mnemonic == 'push', i;
+            m = cs.Cs(cs.CS_ARCH_RISCV, cs.CS_MODE_RISCV64);
+            m.detail = True;
+            i = list(m.disasm(b'\x13\x85\xa5\x00', 0));
+            assert len(i) == 1 and i[0].mnemonic == 'addi', i;
+            r, w = i[0].regs_access();
+            assert csr.RISCV_REG_X11 in r and csr.RISCV_REG_X10 in w, (r, w);
+            print('capstone6pwndbg smoke test ok')"
+
+      - name: Check the wheel carries libcapstone
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("capstone6pwndbg/lib/libcapstone.so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: capstone6pwndbg-${{ env.CAPSTONE6PWNDBG_VERSION }}-${{ matrix.PYTHON.TAG }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish capstone6pwndbg ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: capstone6pwndbg-${{ matrix.version }}-*riscv64
