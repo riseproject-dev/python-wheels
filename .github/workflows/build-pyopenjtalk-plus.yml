@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/tsukumijima/pyopenjtalk-plus/blob/v0.4.1-post10/.github/workflows/build-wheels.yml
+name: Build pyopenjtalk-plus wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyopenjtalk-plus.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyopenjtalk-plus.yml'
+      - 'docs/packages/pyopenjtalk-plus.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyopenjtalk-plus.yml'
+      - 'docs/packages/pyopenjtalk-plus.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyopenjtalk-plus
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyopenjtalk-plus ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      PYOPENJTALK_PLUS_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream tags post-releases with a dash (v0.4.1-post10); the PyPI
+      # version this repo tracks normalizes that to a dot (0.4.1.post10).
+      - name: Determine upstream tag
+        id: tag
+        run: echo "tag=v${PYOPENJTALK_PLUS_VERSION/.post/-post}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pyopenjtalk-plus ${{ steps.tag.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tsukumijima/pyopenjtalk-plus
+          ref: ${{ steps.tag.outputs.tag }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@e090b81e30c4d855ea63bf4b6e59204c09a101ae  # v4.2.1
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # marine extra dropped: marine-plus pulls hydra-core, pinned to a
+          # sdist-only antlr4-python3-runtime==4.9.*; marine tests already
+          # skip via pytest.importorskip("marine") when it is absent, except
+          # the two deselected below, which call run_marine=True unguarded.
+          CIBW_TEST_EXTRAS: onnxruntime,tsqyomi
+          CIBW_TEST_REQUIRES: pytest
+          # Upstream's own build-wheels.yml runs no tests on the wheel; this
+          # mirrors its ci.yml "Test g2p" step instead, plus the test suite
+          # with the subset that needs dictionary CSV sources the wheel does
+          # not bundle (not riscv64-specific - fails the same way against any
+          # installed wheel, x86_64 included) deselected by name.
+          CIBW_TEST_COMMAND: >-
+            python -X utf8 -m pyopenjtalk "あらゆる現実を、すべて自分のほうへねじ曲げたのだ。" &&
+            pytest {project}/tests -k "not (test_bundle_dictionary_keeps_both_readings or
+            test_dictionary_accent_field_matches_pronunciation or
+            test_rare_syllable_entries_are_moved_out_of_other_dictionaries or
+            test_unidic_katakana_common_nouns_beat_unknown_candidates or
+            test_mainichi_cost_keeps_body_and_compound_readings or
+            test_moved_heteronyms_keep_all_pronunciations or
+            test_deterministic_reading_postprocessing_preserves_protected_user_dictionary or
+            test_deterministic_reading_postprocessing_runs_before_marine)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyopenjtalk-plus-${{ env.PYOPENJTALK_PLUS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyopenjtalk-plus ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyopenjtalk-plus-${{ matrix.version }}-*-manylinux_riscv64
