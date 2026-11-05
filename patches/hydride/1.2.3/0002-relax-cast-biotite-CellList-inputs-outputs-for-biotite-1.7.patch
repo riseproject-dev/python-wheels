@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 14 Oct 2026 12:00:00 +0000
+Subject: [PATCH] relax: cast biotite CellList inputs/outputs for biotite 1.7
+
+Upstream-Status: Issue [https://github.com/biotite-dev/hydride/issues/29]
+
+biotite 1.7 reimplemented structure.CellList in Rust, which changed two
+things MinimumFinder.__init__ relies on:
+
+- CellList.get_atoms() now returns int64 indices, so assigning the
+  result to the `cdef int32[:,:] adj_indices` memoryview raises
+  "ValueError: Buffer dtype mismatch, expected 'int32' but got 'long'"
+  for every relax_hydrogen() call (hydride issues #29 and #30).
+- CellList(..., periodic=True, box=...) only accepts a float32 box; the
+  float64 np.identity(3)-style boxes callers pass raise
+  "TypeError: 'ndarray' object cannot be cast as 'ndarray'".
+
+Cast the box to float32 and the returned indices to int32 at the call
+site. With biotite 1.7.1 (the only biotite on pypi.riseproject.dev) the
+unpatched wheel fails 141 of the 1327 tests on any architecture
+(reproduced on x86_64); with this patch they all pass. biotite 1.6.0
+and older already return int32 and accept a float32 box, so the casts
+are no-ops there.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/hydride/relax.pyx | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/hydride/relax.pyx b/src/hydride/relax.pyx
+index 3c937bd..6c94593 100644
+--- a/src/hydride/relax.pyx
++++ b/src/hydride/relax.pyx
+@@ -218,7 +218,8 @@ class MinimumFinder:
+             )
+         else:
+             cell_list = struc.CellList(
+-                atoms, cell_size=force_cutoff, periodic=True, box=self._box
++                atoms, cell_size=force_cutoff, periodic=True,
++                box=np.asarray(self._box, dtype=np.float32)
+             )
+         relevant_mask = (np.asarray(groups) != -1)
+         cdef int32[:] relevant_indices = np.where(relevant_mask)[0] \
+@@ -226,7 +227,7 @@ class MinimumFinder:
+         cdef int32[:,:] adj_indices = cell_list.get_atoms(
+             atoms.coord[np.asarray(relevant_indices)],
+             radius=force_cutoff
+-        )
++        ).astype(np.int32, copy=False)
+ 
+ 
+         cdef int32[:,:] bond_indices = atoms.bonds.get_all_bonds()[0]
+-- 
+2.43.0
+

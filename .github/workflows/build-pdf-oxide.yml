@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `generate-python-stubs` and `build-python-wheels` jobs of
+# https://github.com/yfedoseev/pdf_oxide/blob/v0.3.77/.github/workflows/release.yml
+# and the `test` job of
+# https://github.com/yfedoseev/pdf_oxide/blob/v0.3.77/.github/workflows/python.yml
+name: Build pdf-oxide wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pdf-oxide.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pdf-oxide.yml'
+      - 'docs/packages/pdf-oxide.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pdf-oxide.yml'
+      - 'docs/packages/pdf-oxide.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pdf-oxide
+      version: ${{ inputs.version }}
+
+  generate_stubs:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Generate pdf-oxide ${{ matrix.version }} type stubs
+    runs-on: ubuntu-latest
+
+    env:
+      PDF_OXIDE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pdf_oxide ${{ env.PDF_OXIDE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: yfedoseev/pdf_oxide
+          ref: v${{ env.PDF_OXIDE_VERSION }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Generate type stubs
+        run: uvx rylai -o python/pdf_oxide/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pdf-oxide-${{ env.PDF_OXIDE_VERSION }}-type-stubs
+          path: python/pdf_oxide/*.pyi
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, generate_stubs]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pdf-oxide ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      PDF_OXIDE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pdf_oxide ${{ env.PDF_OXIDE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: yfedoseev/pdf_oxide
+          ref: v${{ env.PDF_OXIDE_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pdf-oxide-${{ env.PDF_OXIDE_VERSION }}-type-stubs
+          path: python/pdf_oxide/
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: --release --features python,ocr,barcodes --out dist
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert "pdf_oxide/pdf_oxide.abi3.so" in sos, sos
+          assert "pdf_oxide/pdf_oxide.pyi" in names, names
+          assert any(n.endswith(".dist-info/licenses/LICENSE-MIT") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/LICENSE-APACHE") for n in names), names
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Run tests/test_python.py
+        run: |
+          set -euo pipefail
+          for py in 3.12 3.13 3.14; do
+            venv="$RUNNER_TEMP/venv-$py"
+            uv venv --python "$py" "$venv"
+            uv pip install --python "$venv/bin/python" dist/*.whl pytest
+            "$venv/bin/python" -m pytest -v tests/test_python.py
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pdf-oxide-${{ env.PDF_OXIDE_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pdf-oxide ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pdf-oxide-${{ matrix.version }}-*-manylinux_riscv64

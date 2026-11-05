@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 02 Nov 2026 00:00:00 +0000
+Subject: [PATCH] python-tests: stop rebuilding via maturin develop in the imgsize fixture
+
+The session-scoped `imgsize` fixture in python-tests/conftest.py runs
+`maturin develop --manifest-path ROOT/Cargo.toml` before importing the
+module. That is the right thing for a local dev loop, but under
+cibuildwheel it means the test step silently recompiles the extension
+from the checkout and tests *that* build, rather than the wheel
+cibuildwheel just produced and installed into the isolated test venv -
+defeating the point of testing the built artifact.
+
+Drop the rebuild step and import the already-installed module instead.
+The virtualenv assertion is untouched, and every other test in
+python-tests/ (test_apis.py, test_sample_files.py) is unmodified and now
+genuinely exercises the installed riscv64 wheel.
+
+Upstream-Status: Inappropriate [CI harness only: skips the maturin-develop rebuild in the test fixture so the suite exercises the already-built wheel instead of recompiling from source]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/python-tests/conftest.py b/python-tests/conftest.py
+--- a/python-tests/conftest.py
++++ b/python-tests/conftest.py
+@@ -1,7 +1,6 @@
+ import sys
+ from importlib import import_module
+ from pathlib import Path
+-from subprocess import check_call
+
+ import pytest
+
+@@ -11,5 +10,4 @@ ROOT = Path(__file__).parent.parent
+ @pytest.fixture(scope="session")
+ def imgsize():
+     assert sys.prefix != sys.base_prefix, "must be in virtualenv"
+-    check_call(["maturin", "develop", "--manifest-path", ROOT / "Cargo.toml"])
+     return import_module("imgsize")
