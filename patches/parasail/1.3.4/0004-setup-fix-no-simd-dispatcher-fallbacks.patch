@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH 4/6] setup: route parasail's no-SIMD dispatcher fallbacks to
+ matching scalar variants
+
+Upstream-Status: To upstream [not yet submitted; the real fix is in jeffdaily/parasail's util/dispatcher.py, which builds the fallback name from the alg alone, plus the regenerated src/*_dispatch.c]
+
+jeffdaily/parasail's generated src/*_dispatch.c pick a SIMD
+implementation at run time and, when none is available, fall back to a
+scalar one. That fallback is generated as parasail_<alg> (or
+parasail_<alg>_scan) for every dispatcher, ignoring its _stats, _table,
+_rowcol and _trace qualifiers: e.g. parasail_sw_stats_striped_16 falls
+back to plain parasail_sw, which returns a result with no stats, so
+result.matches raises "'Result' object has no stats" (test_tables).
+The trace variants likewise lose their traceback.
+
+x86 always has at least SSE2 at run time and aarch64/ppc have NEON or
+AltiVec, so the fallback is never taken there; riscv64 has no parasail
+SIMD backend, so every one of these dispatchers takes it.
+
+Every matching scalar variant exists (parasail_sw_stats,
+parasail_sw_stats_table_scan, parasail_sw_trace_scan, ... for sw, nw
+and all sg_* flavours), so rewrite each fallback assignment to the one
+whose name matches the dispatcher's qualifiers, after the master
+archive is unzipped and before configure/make run. Only the fallback
+lines (right-hand side without a width suffix) are touched, so SIMD
+targets are unaffected.
+
+Checked on riscv64 (qemu-user): all 1092 *_{scan,striped,diag}_{8,16,32,64}
+functions exposed by the Python bindings now return a result carrying
+the stats/table/rowcol/trace data their name promises, with identical
+scores within each alignment algorithm.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index 32594de..a2c6b40 100644
+--- a/setup.py
++++ b/setup.py
+@@ -347,6 +347,21 @@ def build_parasail(libname):
+     with open(cpuid_c, 'w') as f:
+         f.write(cpuid_src)
+ 
++    # With no SIMD ISA available (riscv64), the generated src/*_dispatch.c
++    # fall back to plain parasail_<alg>[_scan] even for the _stats, _table,
++    # _rowcol and _trace dispatchers, so e.g. sw_stats_striped_16 returns a
++    # result without stats. Point each at its matching scalar variant.
++    fallback_re = re.compile(
++        r'(parasail_(\w+?)_(scan|striped|diag)_\d+_pointer) = parasail_[a-z_]+;')
++    def scalar_fallback(m):
++        base = m.group(2) + ('_scan' if m.group(3) == 'scan' else '')
++        return '{} = parasail_{};'.format(m.group(1), base)
++    for dispatch_c in glob.glob(os.path.join(parasail_root, 'src', '*_dispatch.c')):
++        with open(dispatch_c) as f:
++            dispatch_src = f.read()
++        with open(dispatch_c, 'w') as f:
++            f.write(fallback_re.sub(scalar_fallback, dispatch_src))
++
+     root = find_file('configure', parasail_root)
+     if root is None:
+         print("Unable to find parasail configure script")

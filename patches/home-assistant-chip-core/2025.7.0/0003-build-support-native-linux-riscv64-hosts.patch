@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 17 Oct 2026 00:00:00 +0000
+Subject: [PATCH] build: support native linux riscv64 hosts
+
+Upstream-Status: To upstream [not yet submitted to project-chip/connectedhomeip]
+
+Two places in the GN build only know about the Linux CPUs upstream
+already builds on (x64, x86, arm, arm64), so a native riscv64 host
+can't generate the build at all:
+
+- build/config/BUILDCONFIG.gn picks the default Linux toolchain as
+  //build/toolchain/linux:linux_${target_cpu}_${compiler}, which on a
+  riscv64 host is linux_riscv64_gcc, but build/toolchain/linux/BUILD.gn
+  never defines it. Every target then fails to resolve with "needs
+  //build/toolchain/linux:linux_riscv64_gcc()", starting with the
+  `gn gen` Pigweed's bootstrap runs to install the Python packages.
+  Add it next to the existing ones. It mirrors linux_x64_gcc rather
+  than the cross-prefixed arm/arm64 ones, since this is a native build
+  with the host gcc/g++/ar; build/config/compiler/BUILD.gn has no
+  riscv64-specific flags to add (its "riscv" branch is the embedded
+  FreeRTOS one), so the compiler's own rv64gc/lp64d defaults apply.
+- chip_enable_python_modules defaults to false unless host_cpu is x64,
+  arm64 or arm, which leaves //src/controller/python:chip-repl out of
+  the graph (and rejects chip_python_package_prefix as an unused arg
+  under gn_gen.sh's --fail-on-unused-args). Add riscv64 to that list,
+  the same way arm was added for Raspbian.
+
+src/controller/python/BUILD.gn already falls back to cpu_tag =
+current_cpu, so the wheel comes out as *_riscv64 with no change there.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ BUILD.gn                       | 3 ++-
+ build/toolchain/linux/BUILD.gn | 8 ++++++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 465eccc..88be251 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -43,7 +43,8 @@ if (current_toolchain != "${dir_pw_toolchain}/default:default") {
+   declare_args() {
+     chip_enable_python_modules =
+         (current_os == "mac" || current_os == "linux") &&
+-        (host_cpu == "x64" || host_cpu == "arm64" || host_cpu == "arm")
++        (host_cpu == "x64" || host_cpu == "arm64" || host_cpu == "arm" ||
++         host_cpu == "riscv64")
+
+     # Build the Linux all clusters app example with default group
+     chip_build_all_clusters_app = false
+diff --git a/build/toolchain/linux/BUILD.gn b/build/toolchain/linux/BUILD.gn
+index abc61ab..5f912cf 100644
+--- a/build/toolchain/linux/BUILD.gn
++++ b/build/toolchain/linux/BUILD.gn
+@@ -91,3 +91,11 @@ gcc_toolchain("linux_arm64_clang") {
+     is_clang = true
+   }
+ }
++
++gcc_toolchain("linux_riscv64_gcc") {
++  toolchain_args = {
++    current_os = "linux"
++    current_cpu = "riscv64"
++    is_clang = false
++  }
++}
+--
+2.50.1

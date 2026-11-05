@@ -1,0 +1,44 @@
+From 4b9ea056867922688404a92227d2a2bd4407bae1 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 13 Oct 2026 00:00:00 +0000
+Subject: [PATCH 1/2] elf_hook: detect 64-bit ELF by __LP64__, not just
+ __x86_64
+
+Upstream-Status: To upstream [not yet submitted upstream from this session]
+
+elf_hook.c picks the Elf64_* struct family only when __x86_64 is
+defined, and falls back to Elf32_* for every other target - including
+every other 64-bit architecture (aarch64, riscv64, ...). On a 64-bit
+ELF shared object this misreads the section/symbol table layout
+entirely (wrong struct sizes and field offsets), so elf_hook()'s
+symbol lookup and PLT/GOT patch silently fail on anything but
+x86_64. This matches the fact that greenify has never published a
+wheel for any architecture other than x86_64 (confirmed via PyPI's
+full release history), even though nothing else in the ELF-hook
+implementation (the actual GOT/PLT relocation patch in elf_hook())
+is architecture-specific - it only touches the GOT/PLT entry via the
+generic ELF relocation mechanism, not an instruction encoding.
+
+__LP64__ is defined by GCC/Clang on every LP64 target (x86_64,
+aarch64, riscv64, ...), so this keeps x86_64's existing behaviour
+and extends the 64-bit path to riscv64 without touching anything
+else.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/elf_hook.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/elf_hook.c b/src/elf_hook.c
+index 8c4dac1..2d30a93 100644
+--- a/src/elf_hook.c
++++ b/src/elf_hook.c
+@@ -12,7 +12,7 @@
+ #include <unistd.h>
+ #include <errno.h>
+ //rename standart types for convenience
+-#ifdef __x86_64
++#if defined(__x86_64) || defined(__LP64__)
+     #define Elf_Ehdr Elf64_Ehdr
+     #define Elf_Shdr Elf64_Shdr
+     #define Elf_Sym Elf64_Sym
