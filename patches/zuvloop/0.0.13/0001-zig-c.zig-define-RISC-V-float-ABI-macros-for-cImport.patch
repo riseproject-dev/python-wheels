@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 16 Oct 2026 00:00:00 +0200
+Subject: [PATCH] zig/c.zig: define RISC-V float ABI macros for @cImport
+
+Zig 0.16's translate-c runs on Aro, whose predefined macros for RISC-V
+stop at `__riscv` and `__riscv_xlen`: it never emits `__riscv_flen` or
+`__riscv_float_abi_double`, which clang and GCC define for an lp64d
+target. glibc's riscv `bits/setjmp.h`, pulled in by Python.h through
+pthread.h, requires one of the `__riscv_float_abi_*` macros:
+
+    /usr/include/bits/setjmp.h:35:3: error: unsupported FLEN
+
+so the @cImport of python_shim.h fails and no manylinux_riscv64 wheel
+can be built (reproduced identically on cp314 and cp314t; musl's
+headers do not test these macros, so a musllinux_riscv64 leg of this
+matrix would be unaffected, same as the zttp case this mirrors - see
+CLAUDE.md gotcha 634).
+
+Zig master already emits these macros from Aro (ziglang/zig commit
+b46a7f3a25a6, "sync aro & translate-c"); this is unnecessary once
+zuvloop moves to a Zig release that contains it (zuvloop currently
+pins ziglang==0.16.0).
+
+Upstream-Status: To upstream [not yet submitted; workaround for Zig 0.16, fixed by ziglang/zig b46a7f3a25a6 on master]
+---
+ zig/c.zig | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/zig/c.zig b/zig/c.zig
+index 1c610ab..d7df92b 100644
+--- a/zig/c.zig
++++ b/zig/c.zig
+@@ -1,5 +1,15 @@
++const builtin = @import("builtin");
++
+ pub const c = @cImport({
+     @cDefine("PY_SSIZE_T_CLEAN", {});
++    // Zig 0.16's translate-c (Aro) predefines no RISC-V floating-point macros,
++    // so glibc's riscv bits/setjmp.h (reached via pthread.h from python_shim.h)
++    // hits `#error unsupported FLEN`. Define what clang does for an lp64d
++    // target; Zig master already emits these itself.
++    if (builtin.target.cpu.arch.isRISCV() and builtin.target.cpu.has(.riscv, .d)) {
++        @cDefine("__riscv_flen", "64");
++        @cDefine("__riscv_float_abi_double", "1");
++    }
+     @cInclude("python_shim.h");
+     @cInclude("context_shim.h");
+ });
+--
+2.43.0

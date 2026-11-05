@@ -1,0 +1,95 @@
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+libgomp's dynamic and guided work-share schedules fault on the riscv64
+machines these wheels are built and tested on (gotcha 166; the same
+defect is worked around for lightgbm and healpy). phono3py's tests
+segfaulted inside imag_self_energy_with_g() (a schedule(guided) loop),
+in test_kappa_LBTE_rust_vs_c_sigma on cp313 and
+test_kappa_LBTE_rust_vs_c_multi_sigma on cp312, while cp314/cp314t
+passed the whole suite; the same tests run clean under AddressSanitizer
+on x86_64 with 64 OpenMP threads. Move all seven schedule(guided) loops
+under c/ to schedule(static), which only costs load balancing. Revert
+once the runner toolchain is fixed.
+diff --git a/c/imag_self_energy_with_g.c b/c/imag_self_energy_with_g.c
+index ff40bea..edf6123 100644
+--- a/c/imag_self_energy_with_g.c
++++ b/c/imag_self_energy_with_g.c
+@@ -109,7 +109,7 @@ void ise_get_imag_self_energy_with_g(
+     }
+ 
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) private(num_g_pos, g_pos)
++#pragma omp parallel for schedule(static) private(num_g_pos, g_pos)
+ #endif
+     for (i = 0; i < num_triplets; i++) {
+         /**
+diff --git a/c/interaction.c b/c/interaction.c
+index b215463..4010a55 100644
+--- a/c/interaction.c
++++ b/c/interaction.c
+@@ -91,7 +91,7 @@ void itr_get_interaction(
+     num_band_prod = num_band0 * num_band * num_band;
+ 
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) \
++#pragma omp parallel for schedule(static) \
+     private(num_g_pos, g_pos) if (openmp_per_triplets)
+ #endif
+     for (i = 0; i < num_triplets; i++) {
+diff --git a/c/phono3py.c b/c/phono3py.c
+index 8ea3d1b..fab6ada 100644
+--- a/c/phono3py.c
++++ b/c/phono3py.c
+@@ -503,7 +503,7 @@ void ph3py_symmetrize_collision_matrix(double *collision_matrix,
+                           j * num_column * num_column);
+             /* show_colmat_info(py_collision_matrix, i, j, adrs_shift); */
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) private(l, val)
++#pragma omp parallel for schedule(static) private(l, val)
+ #endif
+             for (k = 0; k < num_column; k++) {
+                 for (l = k + 1; l < num_column; l++) {
+@@ -537,7 +537,7 @@ void ph3py_expand_collision_matrix(
+     num_bgb = num_band * num_grid_points * num_band;
+ 
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) private(j, ir_gp)
++#pragma omp parallel for schedule(static) private(j, ir_gp)
+ #endif
+     for (i = 0; i < num_ir_gp; i++) {
+         ir_gp = ir_grid_points[i];
+diff --git a/c/pp_collision.c b/c/pp_collision.c
+index ae28490..e8e23af 100644
+--- a/c/pp_collision.c
++++ b/c/pp_collision.c
+@@ -101,7 +101,7 @@ void ppc_get_pp_collision(
+     tpl_set_relative_grid_address(tp_relative_grid_address,
+                                   relative_grid_address, 2);
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) \
++#pragma omp parallel for schedule(static) \
+     private(g, g_zero) if (openmp_per_triplets)
+ #endif
+     for (i = 0; i < num_triplets; i++) {
+@@ -175,7 +175,7 @@ void ppc_get_pp_collision_with_sigma(
+     cutoff = sigma * sigma_cutoff;
+ 
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) \
++#pragma omp parallel for schedule(static) \
+     private(g, g_zero) if (openmp_per_triplets)
+ #endif
+     for (i = 0; i < num_triplets; i++) {
+diff --git a/c/triplet.c b/c/triplet.c
+index 0876fe9..a3cca8e 100644
+--- a/c/triplet.c
++++ b/c/triplet.c
+@@ -78,7 +78,7 @@ void tpl_get_integration_weight(
+     num_band_prod = num_band0 * num_band1 * num_band2;
+ 
+ #ifdef _OPENMP
+-#pragma omp parallel for schedule(guided) if (openmp_per_triplets)
++#pragma omp parallel for schedule(static) if (openmp_per_triplets)
+ #endif
+     for (i = 0; i < num_triplets; i++) {
+         tpi_get_integration_weight(
