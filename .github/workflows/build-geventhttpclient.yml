@@ -78,10 +78,13 @@ jobs:
           persist-credentials: false
 
       # llhttp is compiled into the extension under its own MIT notice, which
-      # upstream's wheels do not ship.
+      # upstream's wheels do not ship before 2.6.0, so only older versions are patched.
       - name: Patch geventhttpclient source
         run: |
-          git apply python-wheels/patches/geventhttpclient/${{ env.GEVENTHTTPCLIENT_VERSION }}/00*.patch
+          patches="$PWD/python-wheels/patches/geventhttpclient/${GEVENTHTTPCLIENT_VERSION}"
+          if [ -d "$patches" ]; then
+            git apply -v "$patches"/*.patch
+          fi
 
       # musllinux is skipped: our registry carries gevent and brotli for
       # manylinux riscv64 only, so a musl wheel could be neither installed nor tested.
@@ -95,11 +98,14 @@ jobs:
           CIBW_TEST_SKIP: ${{ matrix.test_skip }}
           # pyproject.toml registers the `network` marker.
           CIBW_TEST_SOURCES: tests pyproject.toml
+          # Up to 2.5.1 the test tools are the `dev` extra; from 2.6.0 they are the `dev`
+          # dependency group (PEP 735) and the extra is gone (pip only warns about it).
           CIBW_TEST_EXTRAS: dev
+          CIBW_TEST_GROUPS: dev
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m;
             l = {str(p).split('.dist-info/licenses/')[1] for p in m.files('geventhttpclient') if '.dist-info/licenses/' in str(p)};
-            assert l == {'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, l" &&
+            assert l in ({'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, {'LICENSE-MIT', 'llhttp/LICENSE'}), l" &&
             python -m pytest tests
 
       # The only proof the untested cp314t wheel really carries the extension.
