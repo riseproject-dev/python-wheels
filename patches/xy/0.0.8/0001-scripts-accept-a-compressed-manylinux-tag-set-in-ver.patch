@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 25 Oct 2026 17:57:24 +0000
+Subject: [PATCH] scripts: accept a compressed manylinux tag set in
+ verify_wheel's filename check
+
+Upstream-Status: Inappropriate [riscv64 auditwheel policy floor sits below our build image, a shape upstream's own cross-compiled legs never produce]
+
+auditwheel's riscv64 policy floor is manylinux_2_34, one below the
+manylinux_2_39 build image our workflow pins, so `auditwheel repair`
+tags the wheel for both and the filename's platform segment becomes a
+dot-joined compressed tag set:
+`manylinux_2_34_riscv64.manylinux_2_39_riscv64`. WHEEL still lists each
+one as its own `Tag:` line, which is what pip reads to decide
+installability, but _require_filename_tag compared the whole compressed
+string against that list as one token and never matched, failing every
+riscv64 build:
+
+  wheel verification failed for
+  wheelhouse/xy-0.0.8-py3-none-manylinux_2_34_riscv64.manylinux_2_39_riscv64.whl:
+  wheel filename tag
+  'py3-none-manylinux_2_34_riscv64.manylinux_2_39_riscv64' is not
+  listed in WHEEL tags
+  ['py3-none-manylinux_2_34_riscv64', 'py3-none-manylinux_2_39_riscv64']
+
+Upstream's own release legs are all single-tag (zig cross-compiles
+pinned to one glibc floor per target, no compressed sets), so this
+never surfaces there. Split the filename's platform segment on '.' and
+require each resulting tag to be listed, which keeps the single-tag
+case working exactly as before.
+---
+ scripts/verify_wheel.py | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/verify_wheel.py b/scripts/verify_wheel.py
+index 609bc45..f6ee611 100644
+--- a/scripts/verify_wheel.py
++++ b/scripts/verify_wheel.py
+@@ -154,8 +154,17 @@ def _filename_tag(path: Path) -> str:
+ 
+ 
+ def _require_filename_tag(path: Path, tags: list[str]) -> None:
++    # auditwheel's riscv64 policy floor (manylinux_2_34) sits below the build
++    # image (manylinux_2_39), so `auditwheel repair` tags the wheel for both:
++    # the filename's platform segment is a dot-joined *compressed tag set*
++    # (`manylinux_2_34_riscv64.manylinux_2_39_riscv64`), while WHEEL lists each
++    # one as its own `Tag:` line. Check every compressed segment individually
++    # instead of the whole filename tag as one string, which never matches.
+     filename_tag = _filename_tag(path)
+-    if filename_tag not in tags:
++    python, abi, platform = filename_tag.split("-", 2)
++    filename_tags = [f"{python}-{abi}-{plat}" for plat in platform.split(".")]
++    missing = [tag for tag in filename_tags if tag not in tags]
++    if missing:
+         raise AssertionError(
+             f"wheel filename tag {filename_tag!r} is not listed in WHEEL tags {tags}"
+         )
+-- 
+2.43.0
+
