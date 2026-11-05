@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -291,7 +291,7 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **478** — Gotcha 343's "revisit once `<dep>` has a riscv64 build" is wrong for an *archived*
   dependent: a read-only upstream can never widen its pin, so the port is blocked on a
   historical version of the dep (TF 2.15, not this repo's 2.21.0), the pin window's own
-  interpreter coverage can miss the default matrix entirely, CUDA is not the blocker in a TF
+  interpreter coverage can miss the port's matrix entirely, CUDA is not the blocker in a TF
   custom-ops package, and a negated-x86 arch allowlist mis-classifies riscv64 into `-mavx`
   (the tensorflow-addons case).
 - **480** — A non-NVIDIA accelerator vendor (Huawei Ascend/CANN) can keep its whole toolkit
@@ -545,6 +545,58 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   the real published wheel can be built from the outer repo, not the public one — a
   `find_package()`/`FetchContent` audit of the public tree misses plugins whose source (and
   a `proprietary/` directory reference) only exists in the private half (the ovito case).
+- **674** — A latest release missing an arch every recent prior release shipped can be
+  upstream's own publish-pipeline flake, not a new structural gap — read the commit log
+  right after the release tag before porting (the ayafileio case).
+- **675** — A `py3-none-<platform>` wheel's native payload can be fetched at build time from a
+  *second*, non-PyPI GitHub repo's own release assets, not compiled by the package being
+  ported at all — and that sibling's release matrix, not anything in the package's own tree,
+  is what riscv64 is missing. The eBPF half of the sibling can be fine (an architecture-neutral
+  `-target bpf` object resolved against the running kernel's BTF at load time); the blocker is
+  the ordinary native `.so` the sibling builds beside it, for only the two arches its own CI
+  matrix names (the pydivert/ebpfdivert case).
+- **676** — A wheel-tag flip from `py3-none-any` to `py3-none-<platform>` across major versions
+  of the same-named PyPI project signals a full-language rewrite, even when the project's own
+  PyPI summary never updates to say so (the nb-clean case).
+- **677** — Gotcha 676's rewrite signal generalizes past Rust/maturin: the compiled core can be
+  a *separate*, non-PyPI sibling project whose own build script has a hardcoded target list
+  with no riscv64 entry (the scrapli/libscrapli case).
+- **679** — An embedded engine can have a real riscv64 backend in its upstream source tree and
+  still not be buildable from the exact commit a binding vendors: check the enabling fix's
+  landing date against the pin's date, not just whether the backend directory exists (the
+  pythonmonkey/SpiderMonkey case).
+- **681** — `MANIFEST.in` can vendor a precompiled binary into every wheel with no platform
+  check at all, not even a mismatched tag — a plain glob that copies whatever `.so` files are
+  checked into the source tree regardless of which architecture compiled them (the prody case).
+- **684** — A package that embeds a KVM-based hypervisor needs more than a compiling Rust/C
+  target for its riscv64 build: the vendored engine's riscv64 code can be real (not a stub)
+  but still CI-unverified by its own authors, and even a clean compile needs the host CPU's
+  RISC-V Hypervisor extension plus AIA to actually boot a guest — a hardware gate below
+  anything a patch or `CIBW_BEFORE_BUILD` step can route around (the boxlite/libkrun case).
+- **685** — A PyPI listing with no `home_page`/`project_urls` on any release, plus a README
+  that still says "not published to a package registry yet" despite dozens of real releases,
+  reads exactly like gotcha 157/372's closed-source-no-source-ever shape — but a plain web
+  search for the publisher's name/contact domain can still surface a large, genuinely public
+  monorepo whose PyPI metadata simply was never filled in (the alienplatform case).
+- **688** — A `PLATFORM_SUPPORT.md`-documented native engine with no riscv64 asset anywhere in
+  its own third-party binary distributor's release matrix looks like a hard architecture lock,
+  but check whether the language binding's *published-wheel* build job actually bundles that
+  specific binary at all before parking on it — an optional engine can dlopen lazily and
+  degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
+- **697** — Gotcha 411's "CPU is the CMake default" check isn't enough — a soft/QUIET
+  `find_package(CUDAToolkit)` can still be forced on in the one build upstream actually
+  publishes by a `cibuildwheel` `before-all` that installs the CUDA devel toolkit from scratch
+  before CMake runs; read that CI step, not just the CMake default, and check whether every
+  published wheel's own runtime `dependencies` hard-require a CUDA JIT package with no marker
+  (the gs-madrona case).
+- **703** — A vendored per-platform binary can gate one *optional* feature only (not the whole
+  package): check what happens when it's absent (a named, working fallback vs. every call
+  failing) and what the sdist itself already builds before parking it as a hard
+  `vendored-binary` block (the nanobot-ai case).
+- **706** — A plain `git` Cargo dependency pinned by rev into a third-party org's private repo,
+  gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux build exactly
+  as hard as gotcha 600/670/704's missing checkout would, even with a fully public wrapper
+  repo and a clean Python dependency closure (the chalk-remote-call-python case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -603,6 +655,24 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   have no git-tag counterpart at all, several PyPI versions sharing one tag — strip the
   trailing `.<N>` segment to recover the tag, and replay upstream's own version-stamping
   release script rather than inventing a scheme (the ufal.udpipe case).
+- **683** — `CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file straight into `{project}`
+  dirties a `setuptools-git-versioning` checkout even though nothing is `git apply`'d or
+  committed — its dirty check is `git status --short`, which (unlike `git describe --dirty`)
+  flags untracked files too; `.git/info/exclude` the staged filenames before copying them in
+  (the pymp3 case).
+- **687** — When upstream ties the Python version to the literal count of commits on
+  master, not a human-maintained version string, find the release commit by bisecting
+  `git rev-list --count` on a blobless clone — neither gotcha 103's timestamp proximity
+  nor gotcha 213's version-bump diff fits, and the formula gives an exact answer
+  (the packingsolver case).
+- **700** — In a multi-package monorepo, a release-please-style bot can stamp the real
+  published version into a *different* language binding's own manifest (a Bazel wheel
+  macro's `version = "..." # x-release-please-version` argument, or a sibling
+  `package.json`), leaving a Rust workspace member's own `Cargo.toml` on an unrelated,
+  already-bumped value at the exact tag — trust the packaging target's literal version,
+  not `dynamic = ["version"]` sourced from the dependency crate (the formatjs/formatjs
+  icu_messageformat case). Distinct from gotcha 668: that one has no tag at all for the
+  extra digit; here the tag is real and still disagrees with its own dependency's manifest.
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -693,6 +763,15 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   `CMakeCache.txt` and `find_package(Python ...)` fails reporting the *previous*
   interpreter's version, not the one just hinted — fix with
   `CIBW_BEFORE_BUILD: rm -rf {package}/build`, no source patch needed (the pypcode case).
+- **672** — A `before-build` hook that `uv pip install --require-hashes`s from a PEP 751
+  `pylock.toml` fails outright on riscv64 if that lock file's `environments` list never
+  includes a `riscv64` marker, before the real build ever starts — add a riscv64
+  `[[tool.cibuildwheel.overrides]]` that drops the hook, the same shape as a PyPy override
+  dropping it for a different reason (the turbohtml PGO case).
+- **707** — A workflow-level `env:` var (e.g. a pinned `OCCT_VERSION`) isn't visible inside
+  `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX`, which run inside the container, not on
+  the runner — forward it explicitly with `CIBW_ENVIRONMENT_PASS_LINUX`, or the container's
+  shell dies with "unbound variable" under `set -u` (the netgen-mesher OCCT case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -844,6 +923,12 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   undefined; set `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static`,
   not `-lm`, plus `-C link-arg=-lgcc` for C deps' `__ffsdi2`; a hand-set
   `manylinux_2_17_riscv64` tag is uninstallable by uv, use 2_31 (the browser-use-core case).
+- **686** — Bumping a stale pyo3/numpy-rust pin inside a monorepo Cargo workspace hits the
+  sibling binding's `links = "python"` conflict first (give the crate its own empty
+  `[workspace]` to detach it) and a silent ndarray-major-version split second — the bumped
+  crate's own direct `ndarray` dep, and any crate it calls into directly, must land on the
+  same major numpy-rust's internal one uses, checked via `cargo tree -i ndarray@<ver>`, not
+  by reading either Cargo.toml alone (the DeepFilterLib/pyDF case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -973,6 +1058,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **124** — A wheel whose compiled payload is a Go binary builds fine and then dies at
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
+- **690** — A `CIBW_BEFORE_ALL_LINUX` that mirrors an upstream recipe's `cp -a
+  /usr/include/<pkg>-*/*` can glob-copy headers from a system `-devel` package the upstream's
+  own (different) image bakes in by default, but manylinux_riscv64 does not.
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
@@ -1183,6 +1271,23 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   side effect of the install step `build-vtk.yml` already runs; tar it up and
   `upload-artifact` it separately rather than rebuilding anything or touching the published
   wheel (the vtk / cadquery-ocp case).
+- **691** — A non-relocatable native-deps build (one dependency's exported CMake config
+  records another's install path as an absolute string, e.g. netCDF recording HDF5's path)
+  must be built at the *same literal absolute path* the later job extracts it into when the
+  deps build is split into its own job — a tarball makes the bytes portable, not the baked-in
+  paths (the meshioplusplus / netCDF case).
+- **692** — A vcpkg port's own per-architecture feature denylist (e.g. a `JIT`-support flag
+  turned off for a short list of archs its bundled code generator doesn't cover) can simply
+  predate riscv64 and not mention it at all, reading as "supported" when it silently isn't —
+  `ls`/`grep` the bundled JIT's own source tree for an arch-named backend file (gotcha 231)
+  before trusting the list, then patch the list rather than the generated `#error`
+  (the cppcheck/pcre case).
+- **702** — A build-time cross-toolchain downloader's own host-arch match list (e.g.
+  `build.rs` only knowing `x86_64`/`aarch64` hosts for an SDK it fetches) can simply be stale
+  against that toolchain project's *own* current release matrix — check the toolchain's own
+  CI/releases directly, not the consuming package's hardcoded list, and bypass via an
+  existing path/URL override env var instead of patching (the componentize-py / WASI-SDK
+  case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -1205,6 +1310,7 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
 - **660** — A setuptools SWIG extension built from an old tag can ship the `.so` without its
+- **673** — A scikit-build-core `if.failed = true` override can silently ship a pure-Python
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
@@ -1227,6 +1333,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
 - **240** — A registry-hosted wheel that builds and installs cleanly can still be missing an
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
+- **678** — `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` are not real `uv` env vars (unlike
+- **701** — `check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
+- **709** — A `CIBW_TEST_REQUIRES` extra's compiled half can be the one thing missing a
 - **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
 - **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
   answer plain `404`, not `302` — the check logic is unaffected, but scripts written
@@ -1305,6 +1414,16 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
 - **663** — setuptools-scm >= 10.1 rejects an absolute `write_to`/`version_file` (`Version file
   path must be relative`) — pin `setuptools_scm<10` for old `setup.py`s (the pyarrow 16.1.0 case).
+- **682** — `build-system.requires` can carry packages that only enable an optional runtime
+  feature the wheel being built does not even ship — on riscv64 that is still a doomed
+  from-source build, not a no-op (the eclipse-sumo case).
+- **689** — A monorepo's sibling Go-binary packages can each pin the same custom build tool
+  independently — fixing one project's `pyproject.toml` for riscv64 does not fix its siblings',
+  since `build-system.requires` resolves into a separate isolated build env per project (the
+  onyx-devtools-audit case).
+- **698** — A distro-apt `swig` can be too old for the target CPython's `PyHeapTypeObject`
+  layout, failing a `-builtin`-mode extension's compile identically on cp314 and cp314t with
+  no free-threading angle at all — pin a newer PyPI `swig` wheel (the ufal.udpipe case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
@@ -1360,6 +1479,11 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   source package ahead of the installed wheel, so `pytest {project}/tests` silently tests
   the pure-Python fallback; stage `tests` + `pyproject.toml` with `test-sources` as in gotcha
   25 (the munkres case).
+- **680** — `--doctest-modules --pyargs <pkg>` collects a `cffi_modules` project's own
+  `*_build.py` helper alongside the real doctests, and it crashes with `FileNotFoundError` on
+  the installed wheel (the header it reads at import time is build-time-only, not shipped) —
+  target the module file directly, resolved off the installed path, instead (the imagequant
+  case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
@@ -1504,6 +1628,12 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   vendor's own released x86_64 wheel fails the same suite: prove it with one
   `pip install --only-binary :all: <pkg>==<ver>`, bisect across sibling distributions, then
   ship a functional smoke test instead of a half-suite deselect list (the fasttext-numpy2 case).
+- **699** — Gotcha 504's discrete-wrong-result class extends to a boolean: a trivially feasible
+  instance coming back `is_proven_infeasible` on riscv64 only, with no exact-equality assertion
+  anywhere, is still an architecture float divergence one layer inside a vendored exact solver
+  (`FetchContent`-built HiGHS), not a wrong build; a day-long vendored build makes the
+  one-flag x86 repro impractical, so the pass/fail split across problem types/objectives
+  stands in for it instead (the packingsolver case).
 - **535** — A release tag can ship tests its own source does not satisfy: diff the failing
   test against upstream's post-release `master`, and `git cherry-pick -x` the fix that
   landed after the tag was cut into an `Upstream-Status: Backport` patch (the
@@ -1619,6 +1749,36 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   process's stderr and fails every exact-stderr test. Patch `arch/assumptions.cpp` once
   (`#if !defined(ARCH_CPU_RISCV)`) instead of skipping tests by name, and count failures per
   module from the log before deciding.
+- **693** — `Problem.solve(diagnostics=True)` throwing `std::bad_cast` on every call that
+  passes it, while `diagnostics=False` succeeds, is a riscv64 GCC 14.3.1 `std::print`/
+  `std::format` toolchain defect, not reachable by patching the project's own diagnostics
+  code; isolated `dlopen()`/hidden-visibility/LTO reproductions under GCC 14.2.0 +
+  `qemu-riscv64-static` did not reproduce it. Patch the tests to pass `diagnostics=False`
+  (leaving independent `spy=True` calls untouched) as a workaround (the
+  sleipnirgroup-jormungandr case).
+- **708** — Widening a watch-mode test's inner `--runtime` budget to fix gotcha 38's
+  discovery race can collide with a *different*, hardcoded outer `communicate(timeout=10)`
+  default the harness never exposes (cyclonedds-python's `test_ddsls.py`); once `runtime`
+  reaches the outer default, all headroom for subprocess startup/shutdown disappears and
+  `TimeoutExpired` returns. Fix the harness function to pass `timeout=runtime+20`, not just
+  the individual tests' `runtime=` values.
+- **711** — A test that caps `RLIMIT_AS` at "VmSize + small headroom" to force a
+  `MemoryError` out of a large allocation silently allocates anyway under free-threaded
+  CPython (cp314t) — `RLIMIT_AS` only gates new `mmap`/`brk` growth, and cp314t's
+  mimalloc-backed allocator reserves large per-thread arenas up front, so later large
+  allocations are carved from address space already mapped before the test's own
+  `setrlimit` call. Confirmed off riscv64 and off the package's own code with a ~20-line
+  pure-stdlib repro (GIL: `MemoryError`; free-threaded: allocates all 192 MiB, no error,
+  baseline `VmSize` >1 GiB before touching the module under test). Deselect the specific
+  test for `cp314t` only (matrix `include:`, gotcha 149's shape), citing this gotcha —
+  don't chase it as a port bug.
+- **712** — `ld.lld` linking GCC-compiled C++ with `--gc-sections` can fail on riscv64 with
+  `relocation refers to a symbol in a discarded section: .LEHBnn`/`.LFBnnnn`/`.LEHEnn` on
+  exception-table-heavy translation units (iree-base-compiler, building LLVM/MLIR from
+  source with `IREE_ENABLE_LLD=ON`) — a riscv64-specific GCC `.eh_frame`-ordering/linker-
+  relaxation interaction (binutils bug 28709), not a GCC/lld compiler mismatch (upstream's
+  own CI pairs GCC+lld successfully on aarch64). Fix: `-mno-relax` via `CFLAGS`/`CXXFLAGS`,
+  not disabling `--gc-sections` or lld.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
@@ -1676,6 +1836,9 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   (`nanobind_add_module` links them statically when `$AUDITWHEEL_PLAT` is musllinux), so no
   musl-only `gpl_sources` job; and `SKBUILD_WHEEL_LICENSE_FILES` takes submodule licence paths
   as-is (the pydemumble case).
+- **694** — A cgo build that gets its C toolchain from `apt` on the bare self-hosted riscv64
+  runner needs no `gpl_sources` job — the rule's "gcc from the manylinux image" trigger does
+  not fire for a distro package with its own public source archive (the enola-cli case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
@@ -1771,3 +1934,17 @@ The porting gotchas (563 of them) live in [`references/gotchas/`](gotchas/), spl
   port defect: re-run that leg with `rerun-failed-jobs`, which itself answers `403 "This
   workflow is already running"` until every sibling matrix leg has finished (the chonkie-core
   case).
+- **695** — `git worktree add --no-checkout` + `sparse-checkout`, chained with relative `cd`s,
+  can silently mutate the *primary* checkout instead of the intended new worktree when a
+  disk-pressure `cd` failure is non-fatal — drive every step with `git -C <absolute-path>`
+  instead.
+- **696** — A hardlinked local `git clone` of the shared primary checkout (the safer
+  alternative to nesting a worktree under it) inherits neither the primary's real GitHub
+  `origin` nor its local commit-identity/`core.hooksPath` override — fix all three before
+  the first commit, or a bad identity and an unstripped AI-attribution trailer can both land
+  silently.
+- **705** — `ci_scripts/safe_push_main.sh` takes no arguments and resolves its own worktree
+  via `git rev-parse --show-toplevel` on the invoking shell's own cwd — run it from inside the
+  bookkeeping worktree, never from the primary checkout's directory with the worktree merely
+  named as an unused argument, or it rebases/pushes the primary checkout itself and can leave
+  real conflict markers committed into tracked files repo-wide.
