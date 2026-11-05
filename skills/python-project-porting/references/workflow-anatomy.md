@@ -109,10 +109,12 @@ changes below.
 **The interpreter matrix comes from upstream, per version.** There
 is no RISE-wide list of Python versions any more. Each version entry of the package YAML
 carries `python-versions`, the interpreters upstream built that release for, and
-`_setup.yml` outputs `matrix`, an `include:` list of `{version, python, python-version}`
-entries built from it by `ci_scripts/pending_versions.py --python-matrix` (no network access
-needed). `python` is a cibuildwheel tag such as `cp314t`; `python-version` is its interpreter
-form such as `3.14t`. It is
+`_setup.yml` outputs `matrix`, an `include:` list built by
+`ci_scripts/pending_versions.py --python-matrix` (no network access needed). Each entry has
+`version`, a cibuildwheel build-interpreter `python` tag such as `cp314t`, its
+`python-version` form such as `3.14t`, and `wheel-tag`. An abi3 entry such as `3.8-abi3`
+records the wheel's ABI floor separately, chooses the oldest usable non-free-threaded build
+interpreter, and also emits `abi3-floor`. It is
 computed for every workflow; the ones still hard-coding `python:` simply ignore it.
 `python-versions` is required for every version entry, and the packages YAML validation
 fails if it is missing.
@@ -121,8 +123,9 @@ fails if it is missing.
 the nightly job adds it to every version it declares; for a version you add by hand, run
 `uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>`. It maps:
 
-- `cpXY-cpXY` / `cpXY-cpXYt` wheels to `'3.X'` / `'3.Xt'`; a `cpXY-abi3` wheel to one
-  `'3.X'` build (gotcha 11), so abi3 packages collapse on their own.
+- `cpXY-cpXY` / `cpXY-cpXYt` wheels to `'3.X'` / `'3.Xt'`; a `cpXY-abi3` wheel to
+  `'3.X-abi3'` (gotcha 11), so the ABI floor is not confused with the interpreter used to
+  build it on riscv64 and abi3 packages still collapse to one leg.
 - No version-specific wheels (sdist-only, pure): `requires_python` decides, without
   free-threaded builds. Not on PyPI at all: nothing is written; add it by hand.
 
