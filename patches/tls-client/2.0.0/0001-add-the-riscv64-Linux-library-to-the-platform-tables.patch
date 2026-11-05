@@ -1,0 +1,132 @@
+From fc912d0bacd3b1c338cce8703e772f65deb58546 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 12:33:49 +0000
+Subject: [PATCH 1/2] add the riscv64 Linux library to the platform tables
+
+Upstream-Status: To upstream [not submitted yet; cffi.py's own UnsupportedPlatformError asks for an issue when bogdanfinn/tls-client releases a build for the platform, which it does]
+
+bogdanfinn/tls-client publishes a linux-riscv64 shared library from its
+xgo build (tls-client-xgo-<version>-linux-riscv64.so) next to the
+linux-386 one that scripts/fetch_library.py already takes from that
+build. None of the three tables that turn a release asset into a
+working wheel know about it, so on riscv64 the library cannot be
+fetched, hatch_build.py refuses to tag the wheel, and
+cffi.library_filename() raises UnsupportedPlatformError.
+
+Add one row to each:
+- scripts/fetch_library.py ASSETS and dependencies/SHA256SUMS: the xgo
+  asset for v1.16.0. The digest is that of the downloaded release
+  asset; the binary is generic rv64gc (no vendor-extension opcodes).
+- hatch_build.py PLATFORM_TAGS: manylinux_2_31_riscv64. The library's
+  newest versioned glibc symbol is GLIBC_2.27, but uv's own manylinux
+  compatibility check doesn't recognize a riscv64 tag below 2_31 as
+  installable at all (gotcha 642); 2_31 is the lowest that satisfies
+  both.
+- cffi.py LINUX_LIBRARIES and SUPPORTED_PLATFORMS: riscv64 maps to the
+  new library for a 64-bit interpreter. There is no 32-bit riscv64
+  library.
+
+test_cffi.py moves riscv64 from the unsupported cases to the supported
+ones, and keeps riscv64 musl as an unsupported case, matching the other
+architectures.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ hatch_build.py                     | 3 ++-
+ scripts/fetch_library.py           | 2 ++
+ tests/unit/test_cffi.py            | 3 ++-
+ tls_client/cffi.py                 | 3 ++-
+ tls_client/dependencies/SHA256SUMS | 1 +
+ 5 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/hatch_build.py b/hatch_build.py
+index 55d4379..0796a6e 100644
+--- a/hatch_build.py
++++ b/hatch_build.py
+@@ -10,7 +10,7 @@ from typing import Any
+ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+ 
+ # Library filename -> wheel platform tag. The floors come from the upstream binaries: the Linux
+-# builds need glibc 2.4 (amd64, i686, armv7) and 2.17 (arm64), and the macOS builds target macOS 13.
++# builds need glibc 2.4 (amd64, i686, armv7), 2.17 (arm64) and 2.31 (riscv64), and the macOS builds target macOS 13.
+ # The armv7 build uses the hard-float ABI, which is what armv7l wheel tags mean. There is no musl
+ # wheel: musl can't dlopen the upstream musl build.
+ PLATFORM_TAGS = {
+@@ -19,6 +19,7 @@ PLATFORM_TAGS = {
+     "tls-client-linux-386.so": "manylinux_2_17_i686",
+     "tls-client-linux-arm64.so": "manylinux_2_17_aarch64",
+     "tls-client-linux-armv7.so": "manylinux_2_17_armv7l",
++    "tls-client-linux-riscv64.so": "manylinux_2_31_riscv64",
+     "tls-client-linux-ubuntu-amd64.so": "manylinux_2_17_x86_64",
+     "tls-client-windows-32.dll": "win32",
+     "tls-client-windows-64.dll": "win_amd64",
+diff --git a/scripts/fetch_library.py b/scripts/fetch_library.py
+index 6a104ca..498b0eb 100644
+--- a/scripts/fetch_library.py
++++ b/scripts/fetch_library.py
+@@ -30,6 +30,8 @@ ASSETS = {
+     "tls-client-linux-386.so": "tls-client-xgo-{version}-linux-386.so",
+     "tls-client-linux-arm64.so": "tls-client-linux-arm64-{version}.so",
+     "tls-client-linux-armv7.so": "tls-client-linux-armv7-{version}.so",
++    # Upstream's own builds have no riscv64 Linux library; this is its xgo build.
++    "tls-client-linux-riscv64.so": "tls-client-xgo-{version}-linux-riscv64.so",
+     "tls-client-linux-ubuntu-amd64.so": "tls-client-linux-ubuntu-amd64-{version}.so",
+     "tls-client-windows-32.dll": "tls-client-windows-32-{version}.dll",
+     "tls-client-windows-64.dll": "tls-client-windows-64-{version}.dll",
+diff --git a/tests/unit/test_cffi.py b/tests/unit/test_cffi.py
+index dae2bd6..996e401 100644
+--- a/tests/unit/test_cffi.py
++++ b/tests/unit/test_cffi.py
+@@ -36,6 +36,7 @@ def host(monkeypatch: pytest.MonkeyPatch):
+         ("darwin", "x86_64", {}, "tls-client-darwin-amd64.dylib"),
+         ("linux", "x86_64", {}, "tls-client-linux-ubuntu-amd64.so"),
+         ("linux", "aarch64", {}, "tls-client-linux-arm64.so"),
++        ("linux", "riscv64", {}, "tls-client-linux-riscv64.so"),
+         # These used to fall through to the x86_64 Alpine library.
+         ("linux", "i686", {"is_64bit": False}, "tls-client-linux-386.so"),
+         ("linux", "i386", {"is_64bit": False}, "tls-client-linux-386.so"),
+@@ -61,7 +62,7 @@ def test_picks_the_library_for_the_interpreter(host, sys_platform, machine, opti
+ @pytest.mark.parametrize(
+     ("sys_platform", "machine", "options"),
+     [
+-        ("linux", "riscv64", {}),
++        ("linux", "riscv64", {"musl": True}),
+         # The armv7 library needs ARMv7, and the 386 one SSE2, which i586 CPUs lack.
+         ("linux", "armv6l", {"is_64bit": False}),
+         ("linux", "i586", {"is_64bit": False}),
+diff --git a/tls_client/cffi.py b/tls_client/cffi.py
+index 5ba1900..df0f011 100644
+--- a/tls_client/cffi.py
++++ b/tls_client/cffi.py
+@@ -10,7 +10,7 @@ from .exceptions import UnsupportedPlatformError
+ # Platforms with a prebuilt upstream library, as named in the wheels.
+ SUPPORTED_PLATFORMS = (
+     "macOS on x86_64 or arm64",
+-    "Linux with glibc on x86_64, aarch64, i686 or armv7l (hard-float)",
++    "Linux with glibc on x86_64, aarch64, riscv64, i686 or armv7l (hard-float)",
+     "Windows on x86 or x86_64",
+ )
+ 
+@@ -25,6 +25,7 @@ LINUX_LIBRARIES = {
+     "arm64": ("linux-arm64.so", "linux-armv7.so"),
+     "armv8l": (None, "linux-armv7.so"),
+     "armv7l": (None, "linux-armv7.so"),
++    "riscv64": ("linux-riscv64.so", None),
+ }
+ 
+ DEPENDENCIES_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "dependencies")
+diff --git a/tls_client/dependencies/SHA256SUMS b/tls_client/dependencies/SHA256SUMS
+index 10ab9a1..47597c4 100644
+--- a/tls_client/dependencies/SHA256SUMS
++++ b/tls_client/dependencies/SHA256SUMS
+@@ -3,6 +3,7 @@
+ 5ea81308e53e236dae73b35bd4a09af1201191c32713ea2968b85bbcfe94b616  tls-client-linux-386.so
+ e398622f99c0ce8fccb50ff6e414f373b5932a0277ece90468a796992f0ae518  tls-client-linux-arm64.so
+ 22baa029d4ee8cf327d10cda0e66c29cf256b3eb48e1fe9d6a76954b66f77711  tls-client-linux-armv7.so
++29530a9137f95f969639a7658fcb87ebd6a05e2073cd41410499d48326b51b33  tls-client-linux-riscv64.so
+ 2ec853496634545e7a7ea028715763948d55bbdd97aca7ecaa9fea8c2ebb08df  tls-client-linux-ubuntu-amd64.so
+ 5203a36f80ea3f9cdfa43bf072a775702d1802acb8e4304e78905210f67dd2af  tls-client-windows-32.dll
+ 53dca636b32d965ee6fe4562f39df959b2063febaa3d740efa925d1873cf11d7  tls-client-windows-64.dll
+-- 
+2.43.0
+
