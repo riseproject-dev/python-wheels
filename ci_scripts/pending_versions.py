@@ -21,7 +21,9 @@ it adds.  An empty or missing base file means every version is new.
 With --python-matrix, print instead a matrix `include:` list of
 {"version", "python", "python-version"} entries, where each version gets the interpreters of its
 `python-versions` (the ones upstream builds for, recorded by
-check_versions.py) that riscv64 can build, minus --python-exclude.
+check_versions.py) that riscv64 can build, minus --python-exclude. An entry
+like `3.8-abi3` records the wheel's ABI floor; its matrix leg uses the oldest
+available, non-free-threaded build interpreter at or above that floor.
 """
 
 import argparse
@@ -73,12 +75,18 @@ def load_versions(package):
                 f"`check_versions.py --python-versions {package}` or add it by hand"
             )
         pythons = entry["python-versions"]
-        if not isinstance(pythons, list) or not all(
-            isinstance(v, str) and re.fullmatch(r"3\.\d+t?", v) for v in pythons
+        if not isinstance(pythons, list) or not pythons or not all(
+            isinstance(v, str) and re.fullmatch(r"3\.\d+(?:t|-abi3)?", v)
+            for v in pythons
         ):
             raise SystemExit(
-                f"{path}: version {version} python-versions must be a list of "
-                f"quoted strings like '3.10' or '3.14t', got {pythons!r}"
+                f"{path}: version {version} python-versions must be a non-empty "
+                "list of quoted strings like '3.10', '3.14t', or '3.8-abi3', "
+                f"got {pythons!r}"
+            )
+        if len(pythons) != len(set(pythons)):
+            raise SystemExit(
+                f"{path}: version {version} python-versions contains duplicates: {pythons!r}"
             )
     return versions
 
@@ -109,6 +117,18 @@ def cp_tag(python_version):
     return "cp" + python_version.replace(".", "")
 
 
+def python_version(tag):
+    """'cp314t' -> '3.14t'."""
+    digits = tag.removeprefix("cp").removesuffix("t")
+    return digits[0] + "." + digits[1:] + ("t" if tag.endswith("t") else "")
+
+
+def version_key(value):
+    """Numeric (major, minor), ignoring a free-threaded or abi3 suffix."""
+    base = value.removesuffix("t").removesuffix("-abi3")
+    return tuple(map(int, base.split(".")))
+
+
 def adjust(tags, exclude=()):
     """Drop the tags matching an exclude glob."""
     return [t for t in tags if not any(fnmatch.fnmatchcase(t, g) for g in exclude)]
@@ -124,39 +144,63 @@ def python_matrix(package, entries, selected, exclude=()):
         version = str(entry["version"])
         if version not in selected:
             continue
-        tags = {cp_tag(v) for v in entry["python-versions"]}
-        tags = adjust([t for t in RISCV64_PYTHONS if t in tags], exclude)
-        if not tags:
-            warnings.append(
-                f"{package} {version} is not in the matrix: none of "
-                f"{entry['python-versions']} can be built for riscv64, or all are excluded"
-            )
-        matrix += [
-            {
+        values = entry["python-versions"]
+        regular = {cp_tag(v) for v in values if not v.endswith("-abi3")}
+        tags = adjust([t for t in RISCV64_PYTHONS if t in regular], exclude)
+        for tag in tags:
+            matrix.append({
                 "version": version,
                 "python": tag,
-                "python-version": tag.removeprefix("cp").removesuffix("t")[0]
-                + "."
-                + tag.removeprefix("cp").removesuffix("t")[1:]
-                + ("t" if tag.endswith("t") else ""),
-            }
-            for tag in tags
-        ]
+                "python-version": python_version(tag),
+                "wheel-tag": tag,
+            })
+
+        for value in (v for v in values if v.endswith("-abi3")):
+            floor = value.removesuffix("-abi3")
+            candidates = adjust([
+                tag for tag in RISCV64_PYTHONS
+                if not tag.endswith("t") and version_key(python_version(tag)) >= version_key(floor)
+            ], exclude)
+            if not candidates:
+                warnings.append(
+                    f"{package} {version} has no usable riscv64 build interpreter "
+                    f"at or above its {value} floor after exclusions"
+                )
+                continue
+            tag = candidates[0]
+            matrix.append({
+                "version": version,
+                "python": tag,
+                "python-version": python_version(tag),
+                "wheel-tag": cp_tag(floor) + "-abi3",
+                "abi3-floor": floor,
+            })
+
+        if not any(item["version"] == version for item in matrix):
+            warnings.append(
+                f"{package} {version} is not in the matrix: none of {values} can be "
+                "built for riscv64, or all are excluded"
+            )
     return matrix, warnings
 
 
 def _self_test():
     entries = [
-        {"version": "1.0", "python-versions": ["3.8", "3.12", "3.13t", "3.14", "3.14t"]},
+        {"version": "1.0", "python-versions": ["3.8-abi3", "3.14t"]},
         {"version": "2.0", "python-versions": ["3.13"]},
     ]
     # Upstream's list in RISCV64_PYTHONS order, minus what riscv64 can't build.
-    assert python_matrix("pkg", entries, ["1.0"], ["cp314t"]) == ([
-        {"version": "1.0", "python": "cp312", "python-version": "3.12"},
-        {"version": "1.0", "python": "cp314", "python-version": "3.14"},
+    assert python_matrix("pkg", entries, ["1.0"], ["cp39", "cp310", "cp311", "cp314t"]) == ([
+        {
+            "version": "1.0", "python": "cp312", "python-version": "3.12",
+            "wheel-tag": "cp38-abi3", "abi3-floor": "3.8",
+        },
     ], [])
     assert python_matrix("pkg", entries, ["2.0"]) == ([
-        {"version": "2.0", "python": "cp313", "python-version": "3.13"}
+        {
+            "version": "2.0", "python": "cp313", "python-version": "3.13",
+            "wheel-tag": "cp313",
+        }
     ], [])
     matrix, warnings = python_matrix("pkg", entries, ["2.0"], ["cp31?"])
     assert matrix == [] and len(warnings) == 1, warnings
