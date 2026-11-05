@@ -38,7 +38,11 @@ source-code: <repo url>
 license: <SPDX id>
 versions:
 - version: <wheel version>
-  python-versions: ['3.12', '3.13', '3.14', '3.14t']   # filled in by check_versions.py
+  files:
+  - python: 3.12:manylinux
+  - python: 3.13:manylinux
+  - python: 3.14:manylinux
+  - python: 3.14t:manylinux   # filled in by check_versions.py
 ```
 
 An entry with neither `tag:` nor `files:` is pending. The `setup` job hands the pending
@@ -108,23 +112,22 @@ changes below.
 
 **The interpreter matrix comes from upstream, per version.** There
 is no RISE-wide list of Python versions any more. Each version entry of the package YAML
-carries `python-versions`, the interpreters upstream built that release for, and
+carries `files[].python` target slots, the interpreters upstream built that release for, and
 `_setup.yml` outputs `matrix`, an `include:` list built by
 `ci_scripts/pending_versions.py --python-matrix` (no network access needed). Each entry has
 `version`, a cibuildwheel build-interpreter `python` tag such as `cp314t`, its
-`python-version` form such as `3.14t`, and `wheel-tag`. An abi3 entry such as `3.8-abi3`
+`python-version` form such as `3.14t`, and `wheel-tag`. An abi3 entry such as `3.8-abi3:manylinux`
 records the wheel's ABI floor separately, chooses the oldest usable non-free-threaded build
-interpreter, and also emits `abi3-floor`. It is
+interpreter, and also emits `abi3-floor` and `platform`. It is
 computed for every workflow; the ones still hard-coding `python:` simply ignore it.
-`python-versions` is required for every version entry, and the packages YAML validation
-fails if it is missing.
+`files` is required and non-empty for every version entry. Every item needs `python`; items without `filename` keep the whole version pending for a complete rebuild.
 
-`python-versions` is written by `ci_scripts/check_versions.py` from upstream's wheels on PyPI:
+`files[].python` targets are written by `ci_scripts/check_versions.py` from upstream's wheels on PyPI:
 the nightly job adds it to every version it declares; for a version you add by hand, run
-`uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>`. It maps:
+`uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-targets <pkg>`. It maps:
 
-- `cpXY-cpXY` / `cpXY-cpXYt` wheels to `'3.X'` / `'3.Xt'`; a `cpXY-abi3` wheel to
-  `'3.X-abi3'` (gotcha 11), so the ABI floor is not confused with the interpreter used to
+- `cpXY-cpXY` / `cpXY-cpXYt` wheels to `'3.X:PLATFORM'` / `'3.Xt:PLATFORM'`; a `cpXY-abi3` wheel to
+  `'3.X-abi3:PLATFORM'` (gotcha 11), so the ABI floor is not confused with the interpreter used to
   build it on riscv64 and abi3 packages still collapse to one leg.
 - No version-specific wheels (sdist-only, pure): `requires_python` decides, without
   free-threaded builds. Not on PyPI at all: nothing is written; add it by hand.
@@ -135,8 +138,9 @@ matrix, versions riscv64 can't build are dropped: the matrix is limited to `RISC
 the `*-manylinux_riscv64` identifiers of the pinned cibuildwheel (cp39…cp315t, no cp313t).
 Update that list when bumping cibuildwheel; it is a technical limit, not a policy.
 
-Override in two ways, each with a comment saying why. Edit a version's `python-versions` to
-build more or fewer interpreters than upstream for that version (e.g. add `'3.14t'`). Use the
+Override in two ways, each with a comment saying why. Edit a version's `files[].python` targets to
+build more or fewer interpreter/platform targets than upstream for that version (e.g. add
+`'3.14t:manylinux'`). Use the
 `python-exclude` input to drop cibuildwheel tags (globs) for every version. It defaults to
 `"cp39 cp310 cp311"`, since numpy ≥ 2.5 (which much of the registry depends on) has no
 wheel below cp312; setting it replaces that default, so `python-exclude: ""` builds
@@ -144,7 +148,7 @@ everything upstream does and `"cp39 cp31[01] cp315*"` also drops 3.15.
 
 **Converting old workflows is gradual.** Most `build-<pkg>.yml` still hard-code `python:
 [...]` next to `version:`. When a workflow is touched to build a new release, switch it:
-make sure the new version's entry has `python-versions`, and replace the `version:` +
+make sure the new version's entry has target slots under `files`, and replace the `version:` +
 `python:` vectors of the build job(s) with
 `include: ${{ fromJSON(needs.setup.outputs.matrix) }}` (see `build-falcon.yml`). The matrix may grow (e.g. cp315/cp315t): exclude what fails for
 riscv64-specific reasons rather than reverting to a hard-coded list. Workflows whose extra

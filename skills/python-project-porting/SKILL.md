@@ -65,13 +65,14 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   it a dispatch 404s (gotchas 45/54). Shipping `workflow_dispatch` alone is why #364 was
   reverted by #391. The `push` trigger is what publishes after the merge.
 - **The version to build lives in `docs/packages/<pkg>.yaml`, never in the workflow.** A
-  `- version:` entry without `tag:`/`files:` is pending; `_setup.yml` turns the pending set
+  A version without `tag`, or with any `files` target lacking `filename`, is pending;
+  `_setup.yml` turns the pending set
   into the `matrix.version` every job iterates over, and the publish fills the entry in. The
   workflow derives the git tag from `matrix.version`, not the other way round.
 - **The interpreters come from upstream, never from a fixed list.** Build from
   `include: ${{ fromJSON(needs.setup.outputs.matrix) }}`:
-  each version gets the interpreters in its `python-versions` in the package YAML, which
-  `check_versions.py` fills from upstream's PyPI wheels. Adjust by editing `python-versions`
+  each version gets the interpreters in its `files[].python` targets in the package
+  YAML, which `check_versions.py` fills from upstream's PyPI wheels. Adjust by editing those targets
   or with `python-exclude` (default `"cp39 cp310 cp311"`), with a "why" comment. Hard-code `python:` only when extra matrix
   axes don't fit (see workflow-anatomy.md).
 - **Default to NO comments in workflows** — they are read as reference. One "why" line only for
@@ -94,8 +95,8 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 2. Add `.github/workflows/build-<pkg>.yml` following the playbook below and
    [references/workflow-anatomy.md](references/workflow-anatomy.md), **and**
    `docs/packages/<pkg>.yaml` with `package-name`, `source-code`, `license` and one
-   pending `- version: <wheel version>` entry (no `tag:`/`files:` — the publish adds them),
-   then fill its `python-versions` with `uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>`.
+   pending `- version: <wheel version>` entry, then fill its target `files` slots with
+   `uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-targets <pkg>`.
    For an upgrade of an existing package, only that version entry is new — plus, if the
    workflow still hard-codes `python: [...]`, its conversion to the `setup` matrix.
 3. Validate locally (gotcha 9), then push to `origin` and open a PR. The
