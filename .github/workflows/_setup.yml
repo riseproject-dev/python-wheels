@@ -56,20 +56,23 @@ jobs:
         env:
           PACKAGE: ${{ inputs.package }}
           VERSION_GLOB: ${{ inputs.version }}
-          HEAD_REF: ${{ github.head_ref }}
-          BASE_REF: ${{ github.base_ref }}
           PYTHON_EXCLUDE: ${{ inputs.python-exclude }}
         run: |
           args=()
           if [ -n "$VERSION_GLOB" ]; then
             args+=(--glob "$VERSION_GLOB")
-          elif [[ "$HEAD_REF" == package/* ]]; then
+          elif [[ "${{ github.head_ref }}" == package/* ]]; then
             # A package/<pkg> PR builds only the versions it adds on top of the
             # base branch. Versions already merged there but not yet released
             # stay pending in the YAML; the commit that links a release must not
             # rebuild them.
-            git fetch --quiet --depth=1 origin "$BASE_REF"
+            git fetch --quiet --depth=1 origin "${{ github.base_ref }}"
             git show "FETCH_HEAD:docs/packages/$PACKAGE.yaml" > "$RUNNER_TEMP/base.yaml" 2>/dev/null \
+              || : > "$RUNNER_TEMP/base.yaml"
+            args+=(--base-file "$RUNNER_TEMP/base.yaml")
+          elif [[ "${{ github.event_name }}" == push && -n "${{ github.event.before }}" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            git fetch --quiet --depth=1 origin "${{ github.event.before }}"
+            git show "${{ github.event.before }}:docs/packages/$PACKAGE.yaml" > "$RUNNER_TEMP/base.yaml" 2>/dev/null \
               || : > "$RUNNER_TEMP/base.yaml"
             args+=(--base-file "$RUNNER_TEMP/base.yaml")
           fi
