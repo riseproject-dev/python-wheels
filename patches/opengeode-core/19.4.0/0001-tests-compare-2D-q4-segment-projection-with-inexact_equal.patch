@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 24 Oct 2026 01:08:06 +0000
+Subject: [PATCH] tests: compare the 2D q4 segment projection with
+ inexact_equal
+
+test-py-projection.py checks the projection of q4 = (5.5, 1.5) onto the
+segment [(1, 5), (-1, -5)] with an exact `!=` against (0.5, 2.5). That
+point is not exactly representable as the result of the computation: it
+goes through a normalised direction (-2, -10) / sqrt(104), a dot product
+and `barycenter + norm_dir * d`, and the result only lands exactly on
+(0.5, 2.5) when every multiply and add is rounded separately.
+
+GCC's default -ffp-contract=fast fuses those multiply-adds into FMA
+instructions on every target that has them. riscv64's rv64gc baseline
+does, so the riscv64 build returns (0.50000000000000011,
+2.5000000000000004), one ULP away, and the test fails. The same happens
+on x86_64 when built with -march=haswell; upstream only ships baseline
+x86_64 and win_amd64 wheels, neither of which contracts, so the
+assertion has never run on an FMA target.
+
+The C++ test already compares the 3D q4 projection with inexact_equal
+(GLOBAL_EPSILON = 1e-6); do the same here for the 2D case. The library
+code is unchanged.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against Geode-solutions/OpenGeode]
+
+diff --git a/bindings/python/tests/geometry/test-py-projection.py b/bindings/python/tests/geometry/test-py-projection.py
+index 12428c4..e364986 100644
+--- a/bindings/python/tests/geometry/test-py-projection.py
++++ b/bindings/python/tests/geometry/test-py-projection.py
+@@ -59,6 +59,6 @@ if __name__ == '__main__':
+     q4 = geom.Point2D([5.5, 1.5])
+     closest_point = geom.point_segment_projection2D(q4, segment2D)
+     result_q4 = geom.Point2D([0.5, 2.5])
+-    if closest_point != result_q4:
++    if not closest_point.inexact_equal(result_q4):
+         raise ValueError(
+             "[Test] Wrong result for point_segment_projection with query point q3")
