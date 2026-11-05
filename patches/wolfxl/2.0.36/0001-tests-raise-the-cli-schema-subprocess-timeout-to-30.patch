@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH] tests: raise the CLI schema subprocess timeout to 300s
+
+test_schema_parity_structural and test_schema_parity_samples both go
+through _cli_schema(), which shells out to `cargo run --release -p
+wolfxl-cli -- schema ... --format json` with a hardcoded
+subprocess.run(timeout=120). On riscv64 that `cargo run` is the first
+invocation that touches the wolfxl-cli binary crate in the whole test
+job: the build job only builds the cdylib extension via `maturin
+build`, which doesn't share a target directory with a bare `cargo
+run` on the runner, so this is a first-time release compile of
+wolfxl-cli and its dependency graph, not just a process launch.
+
+Upstream's own CI (test-python in .github/workflows/ci.yml) doesn't
+pre-build wolfxl-cli either; it stays under 120s there because
+RUSTC_WRAPPER=sccache with SCCACHE_GHA_ENABLED=true gives it a warm,
+cross-run object-code cache. Our riscv64 runner has no sccache, and
+is slower per-core than the x86_64 GitHub-hosted runners this bound
+was tuned against, so the same cold compile overruns 120s and both
+tests fail with subprocess.TimeoutExpired, independent of pytest-xdist
+worker count (confirmed: 3677 other tests pass, only these two
+cargo-invoking tests time out).
+
+120s was sized for "process is already built, just run it" on fast,
+cache-warmed hardware -- it was never a statement about how long a
+release compile of wolfxl-cli should take. Raise it to 300s so a cold
+compile on slower/uncached hardware has room, while a hung or
+genuinely broken `cargo run` still fails loudly well within pytest's
+own job timeout.
+
+Upstream-Status: Inappropriate [riscv64 CI has no sccache cache to warm the cold `cargo run -p wolfxl-cli` compile that 120s assumed away; not a defect in wolfxl itself]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/tests/test_classifier_parity.py b/tests/test_classifier_parity.py
+index ca0d45b..b3c6465 100644
+--- a/tests/test_classifier_parity.py
++++ b/tests/test_classifier_parity.py
+@@ -89,7 +89,11 @@ def _cli_schema(path: Path) -> dict:
+         capture_output=True,
+         text=True,
+         cwd=REPO_ROOT,
+-        timeout=120,
++        # 120s assumes wolfxl-cli is already built; on riscv64 CI (no sccache,
++        # slower per-core than upstream's x86_64 runners) this is the first
++        # `cargo run` to touch the binary crate, so it includes a cold release
++        # compile. Widen the bound rather than the test's intent.
++        timeout=300,
+         env={**dict(os.environ), "CARGO_TERM_COLOR": "never"},
+     )
+     assert result.returncode == 0, (
+--
+2.43.0
