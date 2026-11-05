@@ -118,7 +118,10 @@ carries `files[].python` target slots, the interpreters upstream built that rele
 `version`, a cibuildwheel build-interpreter `python` tag such as `cp314t`, its
 `python-version` form such as `3.14t`, and `wheel-tag`. An abi3 entry such as `3.8-abi3:manylinux`
 records the wheel's ABI floor separately, chooses the oldest usable non-free-threaded build
-interpreter, and also emits `abi3-floor` and `platform`. It is
+interpreter, and also emits `abi3-floor` and `platform`. Every job consuming this matrix must
+use `${{ matrix.platform }}` anywhere the platform affects the build selector, job name, or
+artifact name. Hard-coding `manylinux` silently makes musllinux rows duplicate manylinux work.
+It is
 computed for every workflow; the ones still hard-coding `python:` simply ignore it.
 `files` is required and non-empty for every version entry. Every item needs `python`; items without `filename` keep the whole version pending for a complete rebuild.
 
@@ -150,7 +153,9 @@ everything upstream does and `"cp39 cp31[01] cp315*"` also drops 3.15.
 [...]` next to `version:`. When a workflow is touched to build a new release, switch it:
 make sure the new version's entry has target slots under `files`, and replace the `version:` +
 `python:` vectors of the build job(s) with
-`include: ${{ fromJSON(needs.setup.outputs.matrix) }}` (see `build-falcon.yml`). The matrix may grow (e.g. cp315/cp315t): exclude what fails for
+`include: ${{ fromJSON(needs.setup.outputs.matrix) }}` (see `build-falcon.yml`). Select a
+cibuildwheel target as `${{ matrix.python }}-${{ matrix.platform }}_riscv64` and include the
+same `${{ matrix.platform }}` in job and artifact names. The matrix may grow (e.g. cp315/cp315t): exclude what fails for
 riscv64-specific reasons rather than reverting to a hard-coded list. Workflows whose extra
 axes (`libc`, `build`) don't fit a `{version, python}` include can stay hard-coded.
 

@@ -79,7 +79,9 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   a genuine non-obvious deviation; never narrate standard steps.
 - **Never set `CIBW_BUILD_VERBOSITY`** — drop it if you inherit it from a template.
 - **Start from upstream's own build/test workflow, then delete** everything that isn't Linux
-  glibc/musl, and only then apply the riscv64 changes. See
+  glibc/musl, and only then apply the riscv64 changes. Jobs consuming the setup matrix must
+  use `${{ matrix.platform }}` in build selectors, names, and artifact names instead of
+  hard-coding `manylinux` or `musllinux`. See
   [references/workflow-anatomy.md](references/workflow-anatomy.md).
 - **Pushing workflow files needs `workflow` scope** on the gh token; the post-merge steps need
   `project` scope. Refresh with `gh auth refresh -h github.com -s workflow` (and `-s project`).
