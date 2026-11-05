@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the Linux jobs of
+#   https://github.com/o-murphy/py-ballisticcalc/blob/v2.3.1/.github/workflows/pypi-publish.yml
+# and the cythonized-engine test runs of
+#   https://github.com/o-murphy/py-ballisticcalc/blob/v2.3.1/.github/workflows/pytest-reusable.yml
+name: Build py-ballisticcalc-exts wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/py-ballisticcalc-exts.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-ballisticcalc-exts.yml'
+      - 'docs/packages/py-ballisticcalc-exts.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-ballisticcalc-exts.yml'
+      - 'docs/packages/py-ballisticcalc-exts.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: py-ballisticcalc-exts
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build py-ballisticcalc-exts ${{ matrix.version }} ${{ matrix.tag }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+        tag: [cp311-abi3, cp314t]
+        # setup.py hardcodes py_limited_api="cp311", so build on cp311 itself (gotcha 96)
+        # and reuse+retest that wheel on cp312-cp314; cp314t is a per-interpreter build.
+        include:
+          - tag: cp311-abi3
+            build: '{cp311,cp312,cp313,cp314}'
+          - tag: cp314t
+            build: cp314t
+
+    env:
+      PY_BALLISTICCALC_EXTS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout py-ballisticcalc v${{ env.PY_BALLISTICCALC_EXTS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: o-murphy/py-ballisticcalc
+          ref: v${{ env.PY_BALLISTICCALC_EXTS_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: py_ballisticcalc.exts
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's build[uv] needs a host uv the riscv64 runner does not have (gotcha 13).
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ENVIRONMENT: >-
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PY_BALLISTICCALC_EXTS=${{ env.PY_BALLISTICCALC_EXTS_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: pyproject.toml tests py_ballisticcalc.exts/pyproject.toml py_ballisticcalc.exts/tests
+          CIBW_TEST_REQUIRES: pytest py-ballisticcalc==${{ env.PY_BALLISTICCALC_EXTS_VERSION }}
+          CIBW_TEST_COMMAND: >-
+            for engine in cythonized_euler_engine cythonized_rk4_engine cythonized_verlet_engine; do
+            python -m pytest py_ballisticcalc.exts/tests -v --engine=$engine &&
+            python -m pytest tests -v --engine=$engine || exit 1; done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-ballisticcalc-exts-${{ env.PY_BALLISTICCALC_EXTS_VERSION }}-${{ matrix.tag }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PY_BALLISTICCALC_EXTS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel's musllinux policy does not allowlist the GCC runtime, so the
+      # musllinux wheels vendor libstdc++ and libgcc_s (gotcha 409).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-ballisticcalc-exts-${{ env.PY_BALLISTICCALC_EXTS_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish py-ballisticcalc-exts ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: py-ballisticcalc-exts-${{ matrix.version }}-*riscv64
+      gpl-sources-artifact: py-ballisticcalc-exts-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

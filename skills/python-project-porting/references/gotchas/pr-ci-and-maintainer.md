@@ -25,6 +25,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **508** — A job is not hung because *you* think it has been long: compare its `started_at`
 - **540** — `Failed to FinalizeArtifact … (403) Forbidden` after a green build is an
   artifact-service flake; re-run failed jobs, but only once the whole run has finished.
+- **695** — A `git worktree add --no-checkout` + `sparse-checkout` sequence, chained with
+- **696** — A hardlinked local `git clone` of the shared primary checkout (gotcha 695's own
+  relative `cd`s under disk pressure, can silently mutate the *primary* checkout instead of
+  creating a separate worktree.
 
 ---
 
@@ -256,9 +260,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     rather than the port.
     - **A `docs/packages/<pkg>.yaml` entry that still has no `tag:`/`files:` on `main` is
       not evidence the port is unpublished** — the release metadata arrives through the
-      shared `github-actions/update-doc` docs PR, which only `_publish-wheel.yml` pushes
-      to, and only on a run whose ref was `main`. Read the `push` run's conclusion and
-      the docs PR; the YAML on `main` lags the wheels by however long the maintainer takes.
+      package-specific `package/<pkg>` PR titled `<pkg>: update packages`, which
+      `_publish-wheel.yml` updates only on a run whose ref was `main`. Read the `push`
+      run's conclusion and the package PR; the YAML on `main` lags the wheels by however
+      long the maintainer takes.
     - **The `.queue.yml` entry is the *other* direction of the same trap: its `status`/`notes`
       are a pre-port research snapshot, not live state, so a fully published package can still
       read `status: porting`, `pr: null` with a note asserting "no riscv64 on PyPI or
@@ -499,3 +504,106 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       replays the whole run as attempt 2 against the same merge ref, so the PR's checks
       follow the new attempt with no push (gotcha 80's no-push rule still holds). Say in
       the report that you cancelled and why.
+
+695. **A `git worktree add --no-checkout <dir> -b <branch> origin/main` followed by several
+     `sparse-checkout`/`checkout` calls chained via relative `cd`s is not atomic under disk
+     pressure, and a mid-sequence "No space left on device" on the `cd` itself (silently
+     landing back in the shell's start directory rather than the intended worktree) makes
+     every later command in the chain run against the *primary* checkout instead — switching
+     its branch and collapsing it to a 2% sparse tree, not just failing loudly.** Hit this
+     building a second, queue-editing worktree for a routine triage: `git worktree add
+     --no-checkout .claude/worktrees/<pkg>-queue -b <pkg>-queue origin/main` printed its
+     normal "Preparing worktree" success line, but the very next line in the same shell
+     call — `cd .claude/worktrees/<pkg>-queue` (relative, assuming the prior `cd
+     /home/user/<repo>` from earlier in the chain was still in effect) — failed with "No
+     such file or directory" with no visible error in that call's own output (it was
+     reported, just not treated as fatal since the script had no `set -e`), leaving the
+     shell wherever it actually was. The following `sparse-checkout init --cone`,
+     `sparse-checkout set ci_scripts` and `checkout <branch>` then ran there instead,
+     silently succeeding — against the repo's own primary worktree, which shares the exact
+     same command surface (`git sparse-checkout`, `git checkout <branch>`) and gave no
+     signal that it was the wrong directory. `git worktree list` afterward showed the
+     primary path itself tagged with the new branch, and every *other* concurrently running
+     agent's worktree under the same shared `.claude/worktrees/` reporting `prunable` (their
+     directories had separately vanished from the same disk pressure) — initially
+     indistinguishable from "this host-wide incident wiped everyone's worktrees," until
+     `git status` on the primary path surfaced the real, narrower cause: a local mistake,
+     not a wipe.
+     - **The fix, and the way to avoid it:** drive every step of a new worktree by `git -C
+       <absolute-path> <subcommand>` instead of `cd`-ing into it, so a failed-but-nonfatal
+       directory change can never redirect a later command onto the wrong checkout — this
+       is also strictly safer under disk pressure, since each invocation is independent of
+       whatever the shell's cwd happens to be after an unrelated prior failure.
+     - **Recovery, if it already happened:** the primary checkout's own previous branch and
+       HEAD are still in its `git reflog` (`checkout: moving from <old-branch> to
+       <new-branch>`) even after the sparse-checkout shrank the tree; `git sparse-checkout
+       disable` followed by `git checkout <old-branch>` restores both the full tree and the
+       original branch, with no reflog-expiry or re-clone needed, since nothing was
+       deleted — only checked out narrower and switched.
+     - **This has no bearing on pushed work.** A port branch already pushed to `origin` (and
+       any PR already opened from it) is unaffected by its local worktree disappearing or
+       the primary checkout being mangled — recreate the worktree from the pushed branch
+       only if more local work on it is still needed; otherwise there is nothing to recover.
+
+696. **A hardlinked local `git clone` of the shared primary checkout (gotcha 695's own
+     suggested escape from nesting a worktree under it) inherits neither the primary's real
+     `origin` URL nor its local commit-identity override, and both gaps are silent until
+     push/commit time (the docvortex case).** `git clone --depth 1 /home/user/<repo>
+     .git/pw-scratch/<pkg>` is cheap (objects are hardlinked, a few MB even for a multi-GB
+     `.git`) and, unlike a nested worktree, cannot be touched by another agent's accident
+     against the primary checkout's own working tree. But `git clone` of a local path sets
+     `origin` to that *local path*, not the GitHub remote the primary checkout itself points
+     at — a first `git push origin <branch>` succeeds (it is pushing to the local repo's own
+     ref, not GitHub) and only the *next* push attempt, or a later check for the PR's branch,
+     reveals nothing reached GitHub. Separately, `user.name`/`user.email` are the primary
+     checkout's own **local** `.git/config` override (`Ludovic Henry <git@ludovic.dev>`),
+     which a fresh clone never copies; it falls back to the account's **global** git config
+     instead (`Claude <noreply@anthropic.com>`) — and because `core.hooksPath` is local-only
+     too, the `pre-commit`/`commit-msg` hooks that would normally reject that identity or an
+     AI-attribution trailer are *also* missing, so a first commit in the new clone can carry
+     both problems at once with no error anywhere.
+     - **Before the first commit in any such clone**: `git remote set-url origin
+       <the real https://github.com/... URL>` (read it off the primary checkout, not off
+       memory), `git config user.name "Ludovic Henry"`, `git config user.email
+       "git@ludovic.dev"`, and `git config core.hooksPath ci_scripts/git-hooks` to restore
+       the identity/attribution checks environment-and-auth.md already documents — then
+       confirm with `git log -1 --format='%an <%ae>'` before pushing, same as after running
+       `git-identity.sh`.
+     - **If a bad commit already landed** (wrong identity, or an AI-attribution trailer a
+       tool auto-appended) and nothing else has been pushed on top: fix the three `git
+       config` values above, then `git commit --amend --reset-author -m '<clean message>'`
+       and `git push --force-with-lease=<branch>:<old-sha> origin <branch>` — safe on a
+       solo, not-yet-reviewed branch with one commit, and `--force-with-lease` with an
+       explicit old-sha works even when the clone's narrow fetch refspec never populated a
+       normal `origin/<branch>` tracking ref to lease against.
+
+705. **`ci_scripts/safe_push_main.sh` resolves its own worktree by `git rev-parse
+    --show-toplevel`, not by any argument you pass it — invoke it from inside the bookkeeping
+    worktree (`cd` there, or `git -C <worktree> ...` all the way through), never from the
+    shared primary checkout's own directory while merely naming the worktree as an argument
+    (the nanobot-ai case).** The script's usage is literally `ci_scripts/safe_push_main.sh`
+    with no arguments at all — its very first line is `cd "$(git rev-parse --show-toplevel)"`,
+    which resolves against whatever directory the shell invoking it is *already* in. Running
+    `cd /home/user/python-wheels && bash ci_scripts/safe_push_main.sh /path/to/worktree`
+    silently ignores that trailing path (`sh` scripts don't error on an unused positional arg)
+    and instead rebases/pushes the **primary checkout itself** — `git rebase origin/main` run
+    there, against a primary checkout that may be mid-detached-HEAD from an unrelated earlier
+    worktree operation, can leave real merge-conflict markers (`<<<<<<<`/`>>>>>>>`) committed
+    into tracked files across the whole repo, including shell scripts like
+    `ci_scripts/check_no_ai_attribution.sh` itself — whose own `pre-push` hook then fails with
+    a shell *syntax* error ("redirection unexpected") on literally every subsequent push,
+    because the conflict markers are interpreted as I/O redirection operators.
+    - **Recognize it fast**: `git status --short --branch` on `/home/user/python-wheels`
+      showing `## HEAD (no branch)` (detached) with a long run of `AA` (added/added conflict)
+      entries, or any push anywhere failing with "Syntax error: redirection unexpected" naming
+      an absolute `ci_scripts/*.sh` path, means the *primary* checkout is broken, not your
+      worktree.
+    - **The fix is cheap and loses nothing real**: the primary checkout holds no unique local
+      work by this repo's own hard rule (never commit there directly), so `git rebase --abort`
+      (if `.git/rebase-merge` exists) cleanly restores it to its prior branch/commit with a
+      clean working tree — verify with `git status --short --branch` and a `git diff --check
+      HEAD` for stray conflict markers before trusting it again. Then re-run
+      `ci_scripts/safe_push_main.sh` from *inside* the actual target worktree (`cd
+      .git/pw-scratch/<pkg>-queue && ci_scripts/safe_push_main.sh` or
+      `git -C .git/pw-scratch/<pkg>-queue ...` throughout), never from the primary checkout's
+      own directory with the worktree merely named as an argument.
