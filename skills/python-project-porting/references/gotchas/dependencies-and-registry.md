@@ -299,13 +299,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       GIL-ful entries keep their full suite:
       ```yaml
       matrix:
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
       ...
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_SKIP: ${{ endsWith(matrix.python, 't') && '*' || '' }}
       ```
+      (A `setup`-matrix include list can't take extra per-entry keys, so derive the
+      value from `matrix.python` in an expression. Unconverted workflows can still use a
+      `python:` list plus `include: - python: "cp314t"` / `test_skip: "*"`.)
       An unset matrix key interpolates to the empty string, and cibuildwheel's `test-skip`
       selector treats `""` as "skip nothing" (same `_resolve_cascade` behaviour gotcha 51
       relies on for `before-build`), so the other entries need no second command shape.
@@ -1065,3 +1065,81 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       fail depending on whether the manylinux image happens to carry that dependency's
       native toolchain. Worth a dedicated audit pass over every workflow using
       `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` as a step/job `env:` key.
+
+709. **A `CIBW_TEST_REQUIRES` extra's compiled half can be the one thing missing a cp314t
+    wheel everywhere, while the plain package underneath it is pure Python and installs
+    fine (the pgtask/psycopg[binary] case).** Gotcha 149 is the shape one level up: there
+    the *package under test's own runtime dependency* has no free-threaded wheel on any
+    architecture, so the honest move is to build and skip only the tests. Here the blocking
+    distribution is not a hard runtime dependency at all — pgtask's wheel depends on plain
+    `psycopg>=3.2` (which ships `py3-none-any`, so it is free-threading-agnostic), and only
+    the *test venv's* `CIBW_TEST_REQUIRES` asked for the `[binary]` extra, pulling in
+    `psycopg-binary`. That sibling distribution has never published a `cp314t` wheel for
+    any platform (checked through 3.3.6), so pip backtracks every release trying to satisfy
+    it and dies with `ResolutionImpossible` — *after* the wheel itself had already built,
+    been repaired, and installed cleanly, inside the plain `pip install <test deps>` step,
+    on the free-threaded job only (the same tell gotcha 55/97 give for a test dependency
+    gone wrong, but the failure text here is a dependency-resolution conflict, not a build
+    backend traceback, because `psycopg-binary` is a normal wheel-only PyPI distribution).
+    - **Confirm the gap is in the extra, not the base package, before changing anything**:
+      read the base distribution's own `Requires-Dist`/`info.requires_dist` and the
+      sibling's PyPI JSON file list side by side. `psycopg` core is `py3-none-any` back to
+      3.1; `psycopg-binary` (checked via `{u['filename'].split('-')[2] for u in
+      releases[ver]}`) tops out at `cp315`/`cp314`, never `cp314t`. The project's own test
+      suite only needs to matter here: grep it for anything that pins to the C
+      implementation (`psycopg.pq.__impl__`, a direct `psycopg_c`/`psycopg_binary` import);
+      finding none means the pure-Python fallback is enough to run the real suite, not a
+      reason to skip it.
+    - **Fix by driving `CIBW_TEST_REQUIRES` from the matrix, the way gotcha 97 drives a
+      version pin**, so only the `cp314t` leg drops the extra and every other leg still
+      matches upstream's own test/dev dependency group unchanged:
+      ```yaml
+      include:
+        - tag: cp310-abi3
+          test_requires: pytest anyio 'psycopg[binary]'
+        - tag: cp314t
+          test_requires: pytest anyio psycopg
+      ...
+          CIBW_TEST_REQUIRES: ${{ matrix.test_requires }}
+      ```
+      This keeps the `cp314t` entry buildable *and* fully tested (unlike gotcha 149's
+      skip-the-tests shape, which this package never needed), and it is a one-line,
+      upstream-explainable deviation rather than a matrix-wide downgrade to the slower
+      pure-Python driver on every interpreter.
+    - **Don't reach for gotcha 511's "drop `cp314t`" instead** — that gotcha is for a
+      dependency named in the *wheel's own* `Requires-Dist`, where no pin or test-skip can
+      help because `pip install <your wheel>` itself cannot complete anywhere. A
+      test-only extra has a real escape hatch: stop asking for the extra.
+
+701. **`ci_scripts/check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
+    actually fully hosted on riscv64 — the failure is pip hitting transient proxy/network
+    flakiness in this sandbox, not a real registry gap, and the script's own output tells
+    you which (the async-tiff/rasterio case).** Triaging async-tiff, `check_riscv64_deps.py
+    --python 313 314 314t -- rasterio` printed `UNRESOLVABLE` for every interpreter, which
+    at a glance reads exactly like gotcha 84/149's "dependency missing on riscv64" shape —
+    rasterio is a heavy wheel (bundles GDAL) and would be a plausible registry gap to park
+    a test matrix on. It wasn't one: the script's own error text underneath each
+    `UNRESOLVABLE` line read `note: This is an issue with network connectivity, not pip. /
+    hint: Use --resume-retries to configure resume attempt limit.` — pip's own hint for a
+    dropped/stalled download, not a resolver conflict — and it reproduced identically on
+    three immediate retries. A direct `curl pypi.riseproject.dev/simple/rasterio/` (no pip,
+    no retries, no download) immediately showed real `rasterio-1.5.2-cp31{2,3,4}-...-
+    riscv64.whl` and `cp314-cp314t-...riscv64.whl` files already hosted, and
+    `docs/packages/rasterio.yaml` confirms the same set was already published. The actual
+    gap the script was built to catch (gotcha 84) produces a *different*, resolver-shaped
+    error (`ERROR: Exception:` with no further note, or an explicit "no matching
+    distribution"), not this network hint.
+    - **Before trimming a matrix or skipping tests on an `UNRESOLVABLE` verdict, read the
+      text under it.** `note: This is an issue with network connectivity, not pip` (or any
+      `--resume-retries`/timeout/connection-reset wording) means retry or verify by another
+      path, not "the dependency is missing" — a bare `ERROR: Exception:`/"no matching
+      distribution" with no network note is the real signal gotcha 84/149 act on.
+    - **The cheap second opinion is `curl -sS https://pypi.riseproject.dev/simple/<dep>/ |
+      grep <interpreter-tag>`** (gotcha 30/353's check, one dependency at a time) — no pip,
+      no resolver, no retry budget, and it is what actually settled this case in seconds
+      after three identical script retries didn't.
+    - Heavier/larger wheels (GDAL-bundling rasterio here; anything with a multi-hundred-MB
+      riscv64 wheel is the same risk) are more exposed to this than small pure-Python
+      wheels, simply because there is more download to interrupt — treat a verdict change
+      from "ok" to "UNRESOLVABLE" on exactly the heaviest dependency in a batch, with no
+      corresponding registry change, as a flakiness signal rather than a gap.

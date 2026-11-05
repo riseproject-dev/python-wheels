@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# exp-gateway-native has no public source repository and no public CI: upstream
+# publishes only the PyPI sdist, which carries the whole crate (Cargo.lock included),
+# so the sdist is the upstream tree and is fetched here. Everything else mirrors
+# upstream's packaging: maturin over the root Cargo.toml, pyo3 abi3-py312, one wheel
+# per platform for 3.12+ (no cp314t: upstream ships none).
+name: Build exp-gateway-native wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/exp-gateway-native.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-exp-gateway-native.yml'
+      - 'docs/packages/exp-gateway-native.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-exp-gateway-native.yml'
+      - 'docs/packages/exp-gateway-native.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: exp-gateway-native
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build exp-gateway-native ${{ matrix.version }} cp312-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # axum/tokio/reqwest/rustls/rusqlite(bundled)/symphonia pull a large crate
+    # graph into the cdylib; sase-core-rs's sase_gateway alone needed ~20 min
+    # past a 60-min job (gotcha 365), so budget generously.
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      EXP_GATEWAY_NATIVE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch exp-gateway-native ${{ env.EXP_GATEWAY_NATIVE_VERSION }} sdist
+        run: |
+          set -euo pipefail
+          url="$(curl -sSfL "https://pypi.org/pypi/exp-gateway-native/${EXP_GATEWAY_NATIVE_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          mv "exp_gateway_native-${EXP_GATEWAY_NATIVE_VERSION}" pkg
+          test -f pkg/pyproject.toml
+          test -f pkg/Cargo.lock
+
+      - name: Stage smoke tests
+        run: |
+          mkdir -p pkg/tests
+          cat > pkg/tests/test_exp_gateway_native.py <<'PYTEST'
+          """Smoke tests for the riscv64 exp-gateway-native wheel.
+
+          Upstream ships no Python test suite, so these exercise the compiled
+          PyO3 extension directly: the module-level helpers and the
+          dependency-free RegexDetector/CaptureResponse/fixture encoders that
+          need no running server or control-plane callback.
+          """
+
+          import json
+
+          import exp_gateway_native as egn
+
+
+          def test_extension_module_is_compiled():
+              from exp_gateway_native import exp_gateway_native as ext
+
+              assert ext.__file__.endswith(".so"), ext.__file__
+
+
+          def test_metrics_snapshot_json():
+              snapshot = json.loads(egn.metrics_snapshot_json())
+              assert isinstance(snapshot, dict)
+
+
+          def test_regex_detector_matches_and_redacts():
+              spec = json.dumps({"patterns": [r"\d{3}-\d{2}-\d{4}"], "replacement": "[redacted]"})
+              detector = egn.RegexDetector(spec)
+              assert detector.matches("ssn 123-45-6789 on file")
+              assert not detector.matches("no match here")
+              assert detector.redact("ssn 123-45-6789 on file") == "ssn [redacted] on file"
+              assert detector.redact("no match here") is None
+
+
+          def test_capture_response_round_trip():
+              body = json.dumps({"id": "resp_1", "object": "response", "status": "completed"}).encode()
+              response = egn.CaptureResponse("responses", body, False)
+              assert response.completed is True
+              assert json.loads(response.body_json)["id"] == "resp_1"
+              assert response.events_json is None
+
+
+          def test_execution_bindings_register_and_remove():
+              bindings = egn.ExecutionBindings(capacity=8)
+              bindings.remove("absent-token")
+
+
+          def test_failure_public_error_fixture():
+              encoded = json.loads(egn.failure_public_error_fixture("throttled", "slow down"))
+              assert encoded["code"] == "unavailable_route"
+              assert encoded["message"] == "slow down"
+
+
+          def test_normalize_stream_fixture_rejects_unknown_dialect():
+              try:
+                  egn.normalize_stream_fixture("not-a-real-dialect", "[]")
+              except Exception as exc:
+                  assert "dialect" in str(exc).lower() or "not-a-real-dialect" in str(exc)
+              else:
+                  raise AssertionError("expected normalize_stream_fixture to reject an unknown dialect")
+          PYTEST
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pkg
+          output-dir: wheelhouse/
+          # pyo3 abi3-py312 (Cargo.toml), matching upstream's own single
+          # wheel per platform for every 3.12+ interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # No [tool.cibuildwheel] table upstream, so the Rust toolchain the
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: pkg/tests
+          CIBW_TEST_COMMAND: python -m pytest -v pkg/tests
+
+      - name: Check the wheel ships the compiled extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert len(sos) == 1, names
+          print("extension:", sos[0])
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: exp-gateway-native-${{ env.EXP_GATEWAY_NATIVE_VERSION }}-cp312-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish exp-gateway-native ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: exp-gateway-native-${{ matrix.version }}-*-manylinux_riscv64
