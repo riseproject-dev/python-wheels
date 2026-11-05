@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/DedInc/rleveldb/blob/1.0.0/.github/workflows/release.yml
+name: Build rleveldb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rleveldb.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rleveldb.yml'
+      - 'docs/packages/rleveldb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rleveldb.yml'
+      - 'docs/packages/rleveldb.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rleveldb
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rleveldb ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      RLEVELDB_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream's release tag is the bare version ("1.0.0"), not "v1.0.0"
+      # (the commit it points at is titled "v1.0.0", the tag itself is not).
+      - name: Checkout rleveldb ${{ env.RLEVELDB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: DedInc/rleveldb
+          ref: ${{ env.RLEVELDB_VERSION }}
+          persist-credentials: false
+
+      # Pure Rust: a cdylib over pyo3/memmap2/crc32c/snap, re-implementing the
+      # LevelDB .ldb/.log/.sst file formats and Snappy decompression itself
+      # (the `snap` crate) rather than linking the real C++ LevelDB/Snappy
+      # (unlike this repo's plyvel port). No C dependency, so no
+      # before-script-linux package install is needed.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist
+          manylinux: '2_39'
+
+      - name: Check wheel contents
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+
+          (whl,) = sys.argv[1:]
+          assert whl.endswith("-cp38-abi3-manylinux_2_39_riscv64.whl"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          assert "rleveldb/_rleveldb.abi3.so" in names, names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(whl)
+          EOF
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream ships no tests/ at all (its own release.yml never runs one),
+      # so this is a from-scratch smoke suite rather than a staged upstream
+      # one. It goes beyond a plain import: it hand-assembles a minimal,
+      # single-block LevelDB .log file (CRC is read but never verified by
+      # rleveldb's own log_file.rs, so any 4 bytes there are accepted) and
+      # checks a real WAL batch record comes back through RawLevelDb /
+      # iterate_records_raw with the right key/value/seq/state, exercising
+      # the compiled varint/log-parsing path and the PyO3 bindings together
+      # -- not just that the extension module imports.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          uv pip install --no-index --find-links dist rleveldb
+          python3 <<'EOF'
+          import os
+          import struct
+          import tempfile
+
+          import rleveldb
+
+          assert rleveldb._rleveldb.__file__.endswith(".so"), rleveldb._rleveldb.__file__
+
+          with tempfile.TemporaryDirectory() as empty_dir:
+              with rleveldb.RawLevelDb(empty_dir) as db:
+                  assert db.in_dir_path == empty_dir
+                  assert db.iterate_records_raw() == []
+
+          try:
+              rleveldb.RawLevelDb(os.path.join(empty_dir, "does-not-exist"))
+          except ValueError:
+              pass
+          else:
+              raise AssertionError("expected ValueError for a non-directory path")
+
+          batch = (
+              struct.pack("<Q", 100)   # seq
+              + struct.pack("<I", 1)   # count
+              + bytes([1])             # state: Live
+              + bytes([3]) + b"foo"    # key_length varint + key
+              + bytes([3]) + b"bar"    # value_length varint + value
+          )
+          block = (
+              struct.pack("<I", 0xDEADBEEF)  # crc (unchecked by rleveldb)
+              + struct.pack("<H", len(batch))
+              + bytes([1])                   # LogEntryType::Full
+              + batch
+          )
+
+          with tempfile.TemporaryDirectory() as db_dir:
+              with open(os.path.join(db_dir, "000001.log"), "wb") as f:
+                  f.write(block)
+
+              with rleveldb.RawLevelDb(db_dir) as db:
+                  records = db.iterate_records_raw()
+                  assert len(records) == 1, records
+                  (rec,) = records
+                  assert rec.key == b"foo", rec.key
+                  assert rec.user_key == b"foo", rec.user_key
+                  assert rec.value == b"bar", rec.value
+                  assert rec.seq == 100, rec.seq
+                  assert rec.state == rleveldb.KeyState.Live, rec.state
+                  assert rec.file_type == rleveldb.FileType.Log, rec.file_type
+                  assert not rec.was_compressed
+
+                  reversed_records = db.iterate_records_raw(reverse=True)
+                  assert len(reversed_records) == 1
+
+          print("rleveldb smoke test passed")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rleveldb-${{ env.RLEVELDB_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rleveldb ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: rleveldb-${{ matrix.version }}-*-manylinux_riscv64

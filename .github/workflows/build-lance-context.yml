@@ -95,8 +95,8 @@ jobs:
       # i32x8/f64x4/f64x8 SIMD types compile only for x86_64/aarch64/
       # loongarch64 upstream (CLAUDE.md gotcha 300); both are pulled in from
       # crates.io at a pinned `lance = "7.0.0"` (crates/lance-context-core/
-      # Cargo.toml), so riscv64-fixed copies are vendored here and wired in
-      # via `[patch.crates-io]`.
+      # Cargo.toml; "9.0.0" from 0.6.6, see below), so riscv64-fixed copies are
+      # vendored here and wired in via `[patch.crates-io]`.
       - name: Vendor riscv64-fixed lance-core and lance-linalg
         run: |
           curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-core.tar.gz "https://crates.io/api/v1/crates/lance-core/7.0.0/download"
@@ -110,6 +110,21 @@ jobs:
           tar xzf lance-linalg.tar.gz -C lance-linalg-7.0.0-riscv64 --strip-components=1
           rm lance-linalg.tar.gz
           patch -p1 -d lance-linalg-7.0.0-riscv64 < python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0004-lance-linalg-riscv64-simd-fallback.patch
+
+          # From 0.6.6 on, crates/lance-context-core depends on `lance = "9.0.0"`
+          # while lancedb 0.30.0 still pulls in the 7.0.0 line, so Cargo.lock holds
+          # both and each needs its own riscv64-fixed copy.
+          patches="$PWD/python-wheels/patches/lance-context/${LANCE_CONTEXT_VERSION}"
+          if grep -q 'lance-core-9.0.0-riscv64' "$patches/0003-cargo-patch-lance-crates-for-riscv64.patch"; then
+            for crate in lance-core lance-linalg; do
+              curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o "$crate.tar.gz" "https://crates.io/api/v1/crates/$crate/9.0.0/download"
+              mkdir "$crate-9.0.0-riscv64"
+              tar xzf "$crate.tar.gz" -C "$crate-9.0.0-riscv64" --strip-components=1
+              rm "$crate.tar.gz"
+            done
+            patch -p1 -d lance-core-9.0.0-riscv64 < "$patches/0002-lance-core-riscv64-simd-fallback.patch"
+            patch -p1 -d lance-linalg-9.0.0-riscv64 < "$patches/0004-lance-linalg-riscv64-simd-fallback.patch"
+          fi
 
           git apply python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0003-cargo-patch-lance-crates-for-riscv64.patch
 

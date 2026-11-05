@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/koide3/small_gicp/blob/v1.0.1/.github/workflows/wheels.yml
+name: Build small-gicp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/small-gicp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-small-gicp.yml'
+      - 'docs/packages/small-gicp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-small-gicp.yml'
+      - 'docs/packages/small-gicp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: small-gicp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build small-gicp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      SMALL_GICP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout small_gicp v${{ env.SMALL_GICP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: koide3/small_gicp
+          ref: v${{ env.SMALL_GICP_VERSION }}
+          persist-credentials: false
+
+      # Eigen (fetched by CMakeLists.txt) and pybind11 are compiled into the extension; upstream ships neither notice.
+      - name: Stage the bundled dependencies' licences
+        run: |
+          set -euo pipefail
+          pybind11=$(curl -fsSL --retry 5 https://pypi.org/pypi/pybind11/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/v${pybind11}/LICENSE" -o LICENSE.pybind11
+          curl -fsSL --retry 5 https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2 -o LICENSE.eigen
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+            SKBUILD_WHEEL_LICENSE_FILES="LICENSE;LICENSE.eigen;LICENSE.pybind11"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = [n for n in names if n.endswith(".so") and "/" not in n]
+          assert len(exts) == 1 and exts[0].startswith("small_gicp.cpython-"), exts
+          assert exts[0].endswith("-riscv64-linux-gnu.so"), exts
+          libs = [n.split("/", 1)[1].split("-", 1)[0] for n in names
+                  if n.startswith("small_gicp.libs/") and not n.endswith("/")]
+          assert libs == ["libgomp"], libs
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.eigen", "LICENSE.pybind11"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: small-gicp-${{ env.SMALL_GICP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      SMALL_GICP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: small-gicp-${{ env.SMALL_GICP_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish small-gicp ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: small-gicp-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: small-gicp-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
