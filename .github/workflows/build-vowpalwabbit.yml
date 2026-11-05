@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `cibuildwheel-build-linux` job of
+# https://github.com/VowpalWabbit/vowpal_wabbit/blob/9.11.9/.github/workflows/python_wheels.yml
+# and the `[tool.cibuildwheel]` config of that same tag's pyproject.toml.
+name: Build vowpalwabbit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vowpalwabbit.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vowpalwabbit.yml'
+      - 'docs/packages/vowpalwabbit.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vowpalwabbit.yml'
+      - 'docs/packages/vowpalwabbit.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vowpalwabbit
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vowpalwabbit ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      VOWPALWABBIT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout vowpalwabbit ${{ env.VOWPALWABBIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: VowpalWabbit/vowpal_wabbit
+          ref: ${{ env.VOWPALWABBIT_VERSION }}
+          submodules: false
+          persist-credentials: false
+
+      - name: Init submodules
+        run: git -c safe.directory="$(pwd)" submodule update --init --recursive
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: |
+            dnf install -y cmake ninja-build zlib-devel
+            python -m pip install pybind11
+          # VW_FEAT_LAS_SIMD is x86_64-Linux-only upstream (CMakeLists.txt force-disables it
+          # on any other arch already); this matches their own aarch64 override.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_ARGS="-DVW_ZLIB_SYS_DEP=OFF -DVW_FEAT_LAS_SIMD=OFF -DVW_FEAT_CSV=ON"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: vw-executor
+          CIBW_BEFORE_TEST: |
+            pip install pytest pyclean setuptools scipy scikit-learn || pip install pytest pyclean setuptools scipy scikit-learn || pip install pytest pyclean setuptools scipy scikit-learn
+          CIBW_TEST_SOURCES: test/
+          CIBW_TEST_COMMAND: >-
+            pyclean {project}/python/tests &&
+            pytest {project}/python/tests --ignore={project}/python/tests/e2e_v2
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vowpalwabbit-${{ env.VOWPALWABBIT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vowpalwabbit ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: vowpalwabbit-${{ matrix.version }}-*-manylinux_riscv64
