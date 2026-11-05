@@ -2,12 +2,11 @@
 
 Merging pushes the pending `- version:` entry to `main`, and the workflow's `push` trigger
 builds and publishes it — **do not dispatch anything**. Four steps remain, all scriptable —
-`.git/pw-postmerge.py <pr> <pkg>` does them and is idempotent (`--no-trigger` is now the only
-mode that makes sense):
+`uv run ci_scripts/package-postmerge.py <pr> <pkg>` does them and is idempotent:
 
 1. **Check the publish**: `gh run list --workflow build-<pkg>.yml --branch main --limit 3`
-   must show the `push` run; when it is green, the docs PR (`github-actions/update-doc`) holds
-   the version's `tag:`/`files:`. A dispatch is only for a *re*build:
+   must show the `push` run; when it is green, the package PR (`package/<pkg>`, titled
+   `<pkg>: update packages`) holds the version's `tag:`/`files:`. A dispatch is only for a *re*build:
    `gh workflow run build-<pkg>.yml --ref main -f version=<glob>` re-releases every matching
    version, so never fire one while the `push` run is still going. Only a run whose ref is
    `main` publishes; every other ref dry-runs. Confirm afterwards with
@@ -57,7 +56,7 @@ Mirrors [upstream's `<workflow>.yml`](<link>).
 **Differs from upstream**
 - <what> - <why>
 
-**Matrix**: <only if not cp312/cp313/cp314/cp314t - say which and why>
+**Matrix**: <only if the workflow uses `python-exclude`, edits `python-versions` away from upstream's, or hard-codes `python:` - say which and why>
 
 **Testing**
 - same as upstream

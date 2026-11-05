@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream cuts releases without ever pushing a git tag (gotcha 103): this is
+# the "Bump minor version to 0.10.0" commit, whose tree is byte-identical to
+# the 0.10.0 PyPI sdist (Cargo.toml differs only by the `readme = "README.md"`
+# line maturin's own sdist builder injects). Based on upstream's own wheel
+# builder at that commit:
+#   https://github.com/marcelroed/gigatoken/blob/34a1599f0c0ae7d7cd0d1c530e6522320158b360/.github/workflows/wheels.yml
+name: Build gigatoken wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gigatoken.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gigatoken.yml'
+      - 'docs/packages/gigatoken.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gigatoken.yml'
+      - 'docs/packages/gigatoken.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GIGATOKEN_REF: 34a1599f0c0ae7d7cd0d1c530e6522320158b360
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: gigatoken
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gigatoken ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      GIGATOKEN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout gigatoken v${{ env.GIGATOKEN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: marcelroed/gigatoken
+          ref: ${{ env.GIGATOKEN_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # pyo3 carries an explicit `abi3-py310` feature (Cargo.toml), so
+          # maturin always tags the wheel cp310-abi3 regardless of which
+          # interpreter compiles it - matching the one Linux wheel upstream
+          # publishes per arch (verified locally: a maturin build under
+          # CPython 3.11 still emits cp310-abi3). numpy and awkward-cpp have
+          # no riscv64 wheel below cp312 (PyPI or this registry), so cp312 is
+          # built and cp313/cp314 reuse+retest that wheel (find_compatible_wheel).
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # gigatoken's `#![feature(portable_simd)]` (src/lib.rs) needs nightly.
+          # Pinned to the exact date validated locally (cargo build+link for
+          # riscv64gc-unknown-linux-gnu succeeded end to end under it) rather
+          # than floating the bare "nightly" channel rust-toolchain.toml
+          # requests, which is unbounded build-tool drift (gotcha 59).
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain nightly-2026-10-14
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            RUSTUP_TOOLCHAIN=nightly-2026-10-14
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Force wheels-only in the test phase (gotcha 12) so the runtime
+          # closure (numpy, awkward, awkward-cpp, typer) must resolve as
+          # riscv64 wheels. awkward's latest release (2.14.0) pins
+          # awkward-cpp==57, not yet published for riscv64 on this registry;
+          # 2.13.0 is the newest release pinning the already-published
+          # awkward-cpp==56, so pre-install it before cibuildwheel's own wheel
+          # install resolves gigatoken's ">=2.6.3" constraint against it.
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=:all:
+          CIBW_BEFORE_TEST: >-
+            pip install --only-binary=:all:
+            --extra-index-url https://pypi.riseproject.dev/simple/ 'awkward==2.13.0'
+          # Mirrors upstream's own test-wheels smoke test (wheels.yml).
+          CIBW_TEST_COMMAND: >-
+            python -c "import gigatoken;
+            tokens = list(gigatoken.pretokenizer(b'Hello, world!'));
+            assert b''.join(tokens) == b'Hello, world!', tokens;
+            print('gigatoken OK:', tokens)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gigatoken-${{ env.GIGATOKEN_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gigatoken ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: gigatoken-${{ matrix.version }}-*-manylinux_riscv64

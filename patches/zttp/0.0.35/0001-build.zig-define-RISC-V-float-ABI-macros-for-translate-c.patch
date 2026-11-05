@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 4 Oct 2026 04:45:00 +0200
+Subject: [PATCH] build.zig: define RISC-V float ABI macros for translate-c
+
+Zig 0.16's translate-c runs on Aro, whose predefined macros for RISC-V
+stop at `__riscv` and `__riscv_xlen`: it never emits `__riscv_flen` or
+`__riscv_float_abi_double`, which clang and GCC define for an lp64d
+target. glibc's riscv `bits/setjmp.h`, pulled in by Python.h through
+pthread.h, requires one of the `__riscv_float_abi_*` macros:
+
+    /usr/include/bits/setjmp.h:35:3: error: unsupported FLEN
+
+so the CPython C-API translation fails and no manylinux_riscv64 wheel
+can be built. musl's headers do not test these macros, so
+musllinux_riscv64 builds unaffected. Reproduces on any host with
+`zig translate-c -lc -target riscv64-linux-gnu`.
+
+Zig master already emits these macros from Aro (ziglang/zig commit
+b46a7f3a25a6, "sync aro & translate-c"); this is unnecessary once zttp
+moves to a Zig release that contains it.
+
+Upstream-Status: To upstream [not yet submitted; workaround for Zig 0.16, fixed by ziglang/zig b46a7f3a25a6 on master]
+---
+ build.zig | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/build.zig b/build.zig
+index 8fdf7d7..6ee8b5c 100644
+--- a/build.zig
++++ b/build.zig
+@@ -149,6 +149,14 @@ pub fn build(b: *std.Build) void {
+     // on the build backend to pass it - so on Windows the translation silently
+     // targets the GIL ABI unless we define it here.
+     if (free_threaded and target.result.os.tag == .windows) translate.defineCMacro("Py_GIL_DISABLED", "1");
++    // Zig 0.16's translate-c (Aro) predefines no RISC-V floating-point macros,
++    // so glibc's riscv bits/setjmp.h (reached via pthread.h) hits `#error
++    // unsupported FLEN`. Define what clang does for an lp64d target; Zig master
++    // already emits these itself.
++    if (target.result.cpu.arch.isRISCV() and target.result.cpu.has(.riscv, .d)) {
++        translate.defineCMacro("__riscv_flen", "64");
++        translate.defineCMacro("__riscv_float_abi_double", "1");
++    }
+ 
+     const fixer = b.addExecutable(.{
+         .name = "fix_cimport",
+-- 
+2.43.0
+

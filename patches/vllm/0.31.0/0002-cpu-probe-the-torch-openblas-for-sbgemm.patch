@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Sun, 20 Sep 2026 00:00:00 +0000
+Subject: [PATCH] [CPU] Probe the torch wheel's OpenBLAS for sbgemm_
+
+cpu_extension.cmake decides whether to compile the OpenBLAS bf16 GEMM path
+by globbing the installed torch wheel for libopenblas*.so*, and defines
+VLLM_HAS_OPENBLAS when the glob hits. Presence of the library is not the
+same thing as presence of the symbol: blas_gemm() in
+csrc/cpu/sgl-kernels/blas_gemm.h calls sbgemm_, and OpenBLAS only builds
+sbgemm_ for the architectures it has BFLOAT16 kernels for (x86_64
+Cooper Lake and later, ARM64 Neoverse, POWER10, z14 and later). RISC-V is
+not one of them.
+
+The miss cannot be caught at link time, because the comment right above
+the glob is accurate - _C deliberately does not link OpenBLAS and expects
+libtorch.so to have loaded it RTLD_GLOBAL - so a shared object with an
+unresolved sbgemm_ links happily and the build succeeds. It fails on the
+first "import vllm._C" instead:
+
+  ImportError: .../vllm/_C.abi3.so: undefined symbol: sbgemm_
+
+blas_gemm.h already carries the right fallback for this case: its #else
+branch dispatches through at::native::cpublas::gemm_no_downcast_stub,
+which libtorch_cpu.so exports on every architecture. So ask the library
+whether it actually provides sbgemm_ and take that fallback when it does
+not, rather than assuming every non-x86 torch wheel ships a bf16-capable
+OpenBLAS. When the probe itself cannot run the previous behaviour is kept,
+so no platform that works today changes.
+
+Upstream-Status: To upstream [Architecture-agnostic: the probe is a no-op wherever OpenBLAS does export sbgemm_, and it fixes any platform whose torch wheel ships an OpenBLAS built without BUILD_BFLOAT16, riscv64 being the one this repo builds for]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ cmake/cpu_extension.cmake | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/cmake/cpu_extension.cmake b/cmake/cpu_extension.cmake
+index 92c3daa..a7a229c 100644
+--- a/cmake/cpu_extension.cmake
++++ b/cmake/cpu_extension.cmake
+@@ -430,8 +430,24 @@ if (NOT ENABLE_X86_ISA)
+         "${TORCH_INSTALL_PREFIX}/lib/libopenblas*.so*")
+     # Note: we don't link openblas directly to _C extension, as it's available through libtorch.so 
+     if (_VLLM_TORCH_OPENBLAS_LIBS)
+-        list(GET _VLLM_TORCH_OPENBLAS_LIBS 0 VLLM_OPENBLAS_LIB)
+-        message(STATUS "CPU OpenBLAS library: ${VLLM_OPENBLAS_LIB}")
++        list(GET _VLLM_TORCH_OPENBLAS_LIBS 0 _VLLM_TORCH_OPENBLAS_LIB)
++        # blas_gemm() calls OpenBLAS' bf16 GEMM, which OpenBLAS only builds for
++        # the architectures it has BFLOAT16 kernels for. Elsewhere the library is
++        # present but sbgemm_ is not, and since _C resolves it through
++        # libtorch.so instead of linking OpenBLAS itself, the miss is not
++        # reported until the extension is imported. Probe for the symbol and keep
++        # the PyTorch reference BLAS path when it is absent.
++        execute_process(
++            COMMAND ${CMAKE_NM} --dynamic --defined-only "${_VLLM_TORCH_OPENBLAS_LIB}"
++            OUTPUT_VARIABLE _VLLM_TORCH_OPENBLAS_SYMBOLS
++            ERROR_QUIET)
++        if (_VLLM_TORCH_OPENBLAS_SYMBOLS STREQUAL "" OR
++                _VLLM_TORCH_OPENBLAS_SYMBOLS MATCHES "[ \t]sbgemm_[\r\n]")
++            set(VLLM_OPENBLAS_LIB "${_VLLM_TORCH_OPENBLAS_LIB}")
++            message(STATUS "CPU OpenBLAS library: ${VLLM_OPENBLAS_LIB}")
++        else()
++            message(STATUS "CPU OpenBLAS library ${_VLLM_TORCH_OPENBLAS_LIB} provides no sbgemm_, using the PyTorch reference BLAS path")
++        endif()
+     endif()
+ endif()
+ 
+-- 
+2.51.0

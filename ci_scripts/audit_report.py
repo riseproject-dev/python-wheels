@@ -17,12 +17,17 @@ Usage: audit_report.py <path-to-audit-report.json>
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
 ISSUE_LABELS = ["pip-audit", "security"]
+
+
+def normalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def run_url() -> str:
@@ -167,7 +172,7 @@ def process_report(report_path: Path) -> int:
 
             # GHA warning annotation (yellow bubble on job)
             print(
-                f"::warning file=ci_scripts/packages.txt::"
+                f"::warning file=docs/packages/{normalize_name(pkg)}.yaml::"
                 f"{pkg} {version}: {vuln_id} (fix: {fixes})"
             )
 
