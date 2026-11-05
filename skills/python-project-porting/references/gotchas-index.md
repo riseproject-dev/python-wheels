@@ -291,7 +291,7 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **478** — Gotcha 343's "revisit once `<dep>` has a riscv64 build" is wrong for an *archived*
   dependent: a read-only upstream can never widen its pin, so the port is blocked on a
   historical version of the dep (TF 2.15, not this repo's 2.21.0), the pin window's own
-  interpreter coverage can miss the default matrix entirely, CUDA is not the blocker in a TF
+  interpreter coverage can miss the port's matrix entirely, CUDA is not the blocker in a TF
   custom-ops package, and a negated-x86 arch allowlist mis-classifies riscv64 into `-mavx`
   (the tensorflow-addons case).
 - **480** — A non-NVIDIA accelerator vendor (Huawei Ascend/CANN) can keep its whole toolkit
@@ -589,6 +589,14 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   before CMake runs; read that CI step, not just the CMake default, and check whether every
   published wheel's own runtime `dependencies` hard-require a CUDA JIT package with no marker
   (the gs-madrona case).
+- **703** — A vendored per-platform binary can gate one *optional* feature only (not the whole
+  package): check what happens when it's absent (a named, working fallback vs. every call
+  failing) and what the sdist itself already builds before parking it as a hard
+  `vendored-binary` block (the nanobot-ai case).
+- **706** — A plain `git` Cargo dependency pinned by rev into a third-party org's private repo,
+  gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux build exactly
+  as hard as gotcha 600/670/704's missing checkout would, even with a fully public wrapper
+  repo and a clean Python dependency closure (the chalk-remote-call-python case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -760,6 +768,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   includes a `riscv64` marker, before the real build ever starts — add a riscv64
   `[[tool.cibuildwheel.overrides]]` that drops the hook, the same shape as a PyPy override
   dropping it for a different reason (the turbohtml PGO case).
+- **707** — A workflow-level `env:` var (e.g. a pinned `OCCT_VERSION`) isn't visible inside
+  `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX`, which run inside the container, not on
+  the runner — forward it explicitly with `CIBW_ENVIRONMENT_PASS_LINUX`, or the container's
+  shell dies with "unbound variable" under `set -u` (the netgen-mesher OCCT case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -1270,6 +1282,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `ls`/`grep` the bundled JIT's own source tree for an arch-named backend file (gotcha 231)
   before trusting the list, then patch the list rather than the generated `#error`
   (the cppcheck/pcre case).
+- **702** — A build-time cross-toolchain downloader's own host-arch match list (e.g.
+  `build.rs` only knowing `x86_64`/`aarch64` hosts for an SDK it fetches) can simply be stale
+  against that toolchain project's *own* current release matrix — check the toolchain's own
+  CI/releases directly, not the consuming package's hardcoded list, and bypass via an
+  existing path/URL override env var instead of patching (the componentize-py / WASI-SDK
+  case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -1316,6 +1334,8 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
 - **678** — `UV_ONLY_BINARY`/`UV_NO_BINARY`/`UV_NO_BUILD` are not real `uv` env vars (unlike
+- **701** — `check_riscv64_deps.py` can report `UNRESOLVABLE` for a dependency that is
+- **709** — A `CIBW_TEST_REQUIRES` extra's compiled half can be the one thing missing a
 - **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
 - **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
   answer plain `404`, not `302` — the check logic is unaffected, but scripts written
@@ -1736,6 +1756,29 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `qemu-riscv64-static` did not reproduce it. Patch the tests to pass `diagnostics=False`
   (leaving independent `spy=True` calls untouched) as a workaround (the
   sleipnirgroup-jormungandr case).
+- **708** — Widening a watch-mode test's inner `--runtime` budget to fix gotcha 38's
+  discovery race can collide with a *different*, hardcoded outer `communicate(timeout=10)`
+  default the harness never exposes (cyclonedds-python's `test_ddsls.py`); once `runtime`
+  reaches the outer default, all headroom for subprocess startup/shutdown disappears and
+  `TimeoutExpired` returns. Fix the harness function to pass `timeout=runtime+20`, not just
+  the individual tests' `runtime=` values.
+- **711** — A test that caps `RLIMIT_AS` at "VmSize + small headroom" to force a
+  `MemoryError` out of a large allocation silently allocates anyway under free-threaded
+  CPython (cp314t) — `RLIMIT_AS` only gates new `mmap`/`brk` growth, and cp314t's
+  mimalloc-backed allocator reserves large per-thread arenas up front, so later large
+  allocations are carved from address space already mapped before the test's own
+  `setrlimit` call. Confirmed off riscv64 and off the package's own code with a ~20-line
+  pure-stdlib repro (GIL: `MemoryError`; free-threaded: allocates all 192 MiB, no error,
+  baseline `VmSize` >1 GiB before touching the module under test). Deselect the specific
+  test for `cp314t` only (matrix `include:`, gotcha 149's shape), citing this gotcha —
+  don't chase it as a port bug.
+- **712** — `ld.lld` linking GCC-compiled C++ with `--gc-sections` can fail on riscv64 with
+  `relocation refers to a symbol in a discarded section: .LEHBnn`/`.LFBnnnn`/`.LEHEnn` on
+  exception-table-heavy translation units (iree-base-compiler, building LLVM/MLIR from
+  source with `IREE_ENABLE_LLD=ON`) — a riscv64-specific GCC `.eh_frame`-ordering/linker-
+  relaxation interaction (binutils bug 28709), not a GCC/lld compiler mismatch (upstream's
+  own CI pairs GCC+lld successfully on aarch64). Fix: `-mno-relax` via `CFLAGS`/`CXXFLAGS`,
+  not disabling `--gc-sections` or lld.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
@@ -1900,3 +1943,8 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `origin` nor its local commit-identity/`core.hooksPath` override — fix all three before
   the first commit, or a bad identity and an unstripped AI-attribution trailer can both land
   silently.
+- **705** — `ci_scripts/safe_push_main.sh` takes no arguments and resolves its own worktree
+  via `git rev-parse --show-toplevel` on the invoking shell's own cwd — run it from inside the
+  bookkeeping worktree, never from the primary checkout's directory with the worktree merely
+  named as an unused argument, or it rebases/pushes the primary checkout itself and can leave
+  real conflict markers committed into tracked files repo-wide.

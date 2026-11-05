@@ -368,6 +368,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   but check whether the language binding's *published-wheel* build job actually bundles that
   specific binary at all before parking on it — an optional engine can dlopen lazily and
   degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
+- **704** — Gotchas 556/600/601 generalize one layer further: a legitimate, active GitHub org
+  with its own unrelated public repos can still run a product's *entire* build — wrapper layer
+  and native engine alike — inside a private monorepo with no public checkout at any layer, so
+  there is no repo to even clone; the wheel's own bundled SBOM is the only artifact that proves
+  it (the istari-digital-core case).
+- **706** — Gotcha 600/670/704's private-monorepo shape doesn't need a path dependency or a
+  submodule to bite: a plain `git` Cargo dependency pinned by rev into a third-party org's
+  private repo, gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux
+  build exactly as hard as a missing checkout would, even though the wrapper's own repo is
+  fully public and the Python dependency closure resolves clean (the chalk-remote-call-python
+  case).
 
 ---
 
@@ -3709,8 +3720,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       unblock this. **For an archived dependent, resolve the pin to a concrete version before
       writing "revisit once the dep lands"** — otherwise the note promises an unblocking that
       the named work cannot deliver.
-    - **Intersect the pinned dependency window's own *interpreter* coverage with this
-      repo's default matrix; an empty intersection settles the port on its own.** TF
+    - **Intersect the pinned dependency window's own *interpreter* coverage with the
+      matrix the port would build; an empty intersection settles the port on its own.** TF
       2.13.1/2.14.0/2.15.0 ship `cp38`-`cp311` wheels and nothing later, while this repo
       builds cp312/cp313/cp314/cp314t — zero overlap, so no matrix row could be valid even
       with a riscv64 TF 2.15 in hand. This is a cheap PyPI-JSON check (`{f['filename']}`
@@ -6313,3 +6324,163 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     (same disposition as the existing `onnxruntime-gpu`/`cuda-tile`/`sglang` entries) — revisit
     only if NVIDIA ships a riscv64 CUDA Toolkit, or if upstream ever publishes its own CPU-only
     build matrix the way `pyqrack`/`pyqrack-cpu` split theirs.
+
+704. **Gotchas 556/600/601 generalize one layer further: a legitimate, active GitHub org with
+    its own unrelated public repos can still run a product's entire build — wrapper layer and
+    native engine alike — inside a private monorepo with no public checkout at any layer, so
+    there is no repo to even clone; the wheel's own bundled SBOM is the only artifact that
+    proves it (the istari-digital-core case).** istari-digital-core's own PyPI metadata reads
+    like an ordinary open Rust/maturin binding: a `Programming Language :: Rust` classifier, an
+    OSI-approved MIT license, and a summary ("Python bindings for the Istari Digital platform")
+    whose description says it exists only as a dependency of `istari-digital-client` ("most
+    users should not need to interact with this package directly") and ships "compiled Rust
+    binaries." `project_urls` carries only a marketing homepage (`istaridigital.com`) and a docs
+    site (`docs.istaridigital.com`) — no repository link anywhere, in either `project_urls` or
+    the long description (gotcha 584's check: looked past the blank field, same result). PyPI
+    7.4.0 ships a real, cibuildwheel-shaped per-interpreter matrix (manylinux_2_17
+    x86_64/armv7l/ppc64le + manylinux_2_28 aarch64, macOS universal2, Windows, cp310–cp314, one
+    wheel per interpreter, no abi3) — no riscv64 anywhere — and `pypi.org/pypi/.../json` shows
+    **zero sdists across all 26 releases**, 5.0.0 through 7.4.0 (gotcha 431's check, confirming
+    there is no fallback source build either).
+    - **Searching GitHub for every plausible source-repo name, under every spelling of the org,
+      turns up nothing — and that absence is corroborating, not decisive, on its own.**
+      `istari-client`, `istari-core`, `istari-python`, `istari-digital-client` and
+      `istari-digital-core` all return zero matches via GitHub's repository-search API, tried
+      as bare names and with `Istari-digital`/`IstariDigital`/`istaridigital`. The real org
+      (`Istari-digital`) does exist and is active, but its only two public repos are unrelated
+      — a Helm `charts` repo and `istari-gandalf` ("Gandalf system files") — and every other
+      GitHub hit for the product name is a third-party *consumer* of the SDK (a cookbook, SDK
+      examples, demo repos), never the source itself. On its own this reads exactly like "I
+      haven't found the right repo name yet," not "there is no repo" — a legitimate org with
+      unrelated public repos is the same shape a project mid-migration or a monorepo-split repo
+      would show.
+    - **The decisive evidence is the wheel's own bundled CycloneDX SBOM, exactly as gotcha 600
+      taught — read it before trusting an exhaustive-looking but ultimately negative GitHub
+      search.** Downloading `istari_digital_core-7.4.0-cp312-cp312-manylinux_2_17_x86_64.
+      manylinux2014_x86_64.whl` shows it was built by maturin (`dist-info/WHEEL`:
+      `Generator: maturin (1.15.0)`) and bundles
+      `dist-info/sboms/istari-digital-core.cyclonedx.json` (built by `cargo-cyclonedx`, a
+      build-time artifact, not hand-written). Its root component's `bom-ref` is
+      `path+file:///home/runner/work/istari-client/istari-client/istari-python#istari-digital-core@7.4.0`
+      — GitHub Actions' own `$GITHUB_WORKSPACE` convention (`/home/runner/work/<owner>/<repo>/...`)
+      naming a private repo, `istari-client`, that the GitHub search above never found and that
+      matches none of the package's own public metadata. The SBOM's `components` list the real
+      native engine as `istari-core@7.4.0`, with
+      `purl: pkg:cargo/istari-core@7.4.0?download_url=file://../istari-core` — a bare local
+      Cargo path dependency: no `source =`, no `hashes`, no `licenses` field at all — unlike
+      every genuinely open crates.io dependency alongside it in the same SBOM (`autocfg`,
+      `aws-lc-rs`, `base64ct`, …), each of which carries a real registry source, a hash, and a
+      licenses expression. That contrast inside one SBOM is the proof: `istari-core` is a
+      sibling path crate inside the same private `istari-client` monorepo the wrapper itself
+      was built from, resolved from no registry at all, not merely an unlicensed public crate.
+    - **Where this goes past 556/600/601: those cases each had at least one public,
+      independently-checkable repo reaching toward the closed layer.** daily-python (600) at
+      least ships its own binding-layer repo, with a `Cargo.toml` comment naming the private
+      workspace it can't reach into. google-antigravity (556) ships a full, real, Apache-2.0
+      Python SDK repo under a matching org, with only the Go binary itself built privately.
+      unicon (601) at least has a public sibling (`unicon.plugins`) that depends on it like an
+      ordinary PyPI package. Here there is no public repo at *any* layer — not the wrapper, not
+      the client, not the engine — despite a real, active org that does maintain unrelated
+      public repos of its own; nothing in this checkout-that-never-existed can be cloned or
+      read, and only the SBOM already sitting inside the already-published wheel proves that,
+      rather than an exhaustive-looking GitHub search that could otherwise be mistaken for "not
+      found yet."
+    - **Verdict: `parked`** (closed-source native engine with no public source at any version,
+      corroborated by zero sdists across the full release history). No worktree/branch/PR
+      created — resolved fully read-only from PyPI's JSON API, a downloaded wheel, and GitHub's
+      repository-search API. Revisit only if Istari Digital ever publishes `istari-core`/
+      `istari-client` source, or ships a riscv64 wheel themselves.
+
+703. **A vendored per-platform binary can gate one *optional* feature only — generalizing
+    gotchas 27/35/116/157/183 to the install-and-mostly-works middle case (the nanobot-ai
+    case).** Gotchas 27, 35 and 116 each resolve a `py3-none-<platform>` wheel set to one of
+    two outcomes: cosmetic tag/nothing compiled ⇒ `not-feasible` (27), or a load-bearing
+    vendored runtime with no riscv64 story ⇒ installable-but-every-call-fails
+    `vendored-binary` (35/157), unless the *Linux* wheel is itself the universal `-any` one
+    (116). nanobot-ai (PyPI; upstream HKUDS/nanobot) is a fifth shape the first three don't
+    quite cover: its five published wheels (`macosx_13_0_{arm64,x86_64}`,
+    `manylinux_2_17_{aarch64,x86_64}`, `win_amd64`) are genuinely differentiated — each
+    bundles a different ~128MB native terminal-UI executable, compiled by
+    `bun build --compile` from a TypeScript tree committed at `tui/` — so gotcha 81's
+    size/content-diff test correctly says "real content" (pointing toward `vendored-binary`),
+    and Bun's own cross-compile target list (`darwin-arm64`, `darwin-x64`, `linux-arm64`,
+    `linux-x64`, `win32-x64`, read straight out of upstream's own
+    `.github/workflows/tui-release.yml` matrix) has no riscv64 entry, so gotcha 35's
+    "find the fetch, then the vendor's own platform table" step correctly says "no upstream
+    artifact to assemble".
+    - **The missing check: read what happens when the binary is absent, not just whether it
+      is absent.** `nanobot/cli/tui_launcher.py::resolve_tui_command()` raises a typed,
+      caught `TuiUnavailableError` naming the exact workaround (`nanobot agent --classic`);
+      `nanobot/cli/agent.py` catches it only around the *one* code path that defaults to the
+      native TUI (a bare interactive `nanobot agent`) and exits 1 with that same message —
+      every other entry point (`--message` one-shot, the SDK, the gateway/HTTP API, the
+      browser WebUI, every chat-channel integration, and `--classic` itself) never touches
+      the TUI binary at all. That is the opposite of gotcha 157's claude-agent-sdk test
+      ("every call fails, always") — here almost nothing fails, and the one thing that does
+      names its own fix.
+    - **Check what the *sdist* builds, not just what the wheels contain.** nanobot-ai's
+      sdist has no `tui/` TypeScript source, no `node_modules`, and no reference to the
+      native binary at all — the Bun-compiled executable is injected into the wheel by a
+      release-only packaging script (`tui/scripts/package-release.py`) that runs *after*
+      `uv build` produces a plain `py3-none-any` wheel, itself never uploaded to PyPI. So
+      `pip install nanobot-ai` on riscv64 today already falls back to the sdist and builds
+      that same zero-native-content wheel in seconds with no compiler — gotcha 27's exact
+      watchdog outcome, reached by a different route (a release-time injection step instead
+      of a `sys.platform == "darwin"` gate in `setup.py`).
+    - **Verdict test, in order: (1)** does the vendored-platform wheel differ for real
+      (gotcha 81's size/content diff) — if no, stop at gotcha 27; if yes, **(2)** does the
+      *runtime* degrade to a named, working alternative when the binary is absent, or does
+      every call fail (gotcha 157) — if every call fails, it's `vendored-binary`/blocked
+      regardless of (1); if it degrades gracefully, **(3)** does the *sdist* (not any
+      published wheel) already build a complete, functional package with no compiler — if
+      yes, there is nothing to port: the gap is in one optional feature, not in the package,
+      and a riscv64 wheel of the base package would carry the same zero-arch-specific bytes
+      pip's sdist fallback already produces. `parked`/no real gap, not `vendored-binary`.
+
+706. **Gotcha 600/670/704's private-monorepo wall doesn't require a path dependency or a
+    missing checkout — a plain `git` Cargo dependency, gated only on `cfg(target_os =
+    "linux")`, blocks the exact Linux target we build on even though the wrapper's own repo
+    is fully public (the chalk-remote-call-python case).** chalk-remote-call-python is an
+    open setuptools-rust/pyo3 project (tonic gRPC server) with a self-contained sdist
+    (`chalk-remote-call-rs/`, `Cargo.lock` committed, proto sources pre-generated) and no
+    vendored binary blob — none of gotcha 157/246/600/670/704's "no source anywhere" tells
+    fire, and `ci_scripts/check_riscv64_deps.py` confirms its one hard Python runtime dep
+    (`pyarrow>=14.0.0`) resolves clean on riscv64 for cp312/cp313/cp314/cp314t. PyPI ships
+    manylinux_2_28 + musllinux_1_2 wheels for x86_64/aarch64 (plus macOS/Windows), zero
+    riscv64 — a real-looking gap. The wall is one `Cargo.toml` stanza:
+    `chalk-remote-call-server`'s `[target.'cfg(target_os = "linux")'.dependencies]` pulls
+    `chalk-queue`, `chalk_metrics` and `chalk_statsd` as `git` dependencies (not `path`, not
+    crates.io) pinned by commit rev to `github.com/chalk-ai/chalk-private.git` — a private
+    repo belonging to Chalk AI, not this project's org, and not one this repo's CI has (or
+    could legitimately request) credentials for.
+    - **Confirm the git source from `Cargo.lock`, not just `Cargo.toml`'s URL.** The lock
+      file's resolved entries read `source = "git+https://github.com/chalk-ai/chalk-private.
+      git?rev=61b67cc862036cfee5346807de1f24415a5fbfba#…"` — an unambiguous, independently
+      verifiable statement that `cargo build`/`cargo fetch` must clone that exact private
+      repo at that exact commit, with no registry fallback.
+    - **Confirm the modules are unconditional, not a Cargo feature anyone could turn off.**
+      `lib.rs` declares `#[cfg(target_os = "linux")] mod self_consumer;` and `mod metrics;`
+      directly (no `[features]` gate in `Cargo.toml` controls them) — upstream's own comment
+      explains the *reason* for the OS gate (rdkafka's `sasl` feature needs cyrus-sasl, no
+      Windows support; chalk-protos needs `protoc`), but the gate's *condition* is the one
+      that matters for us: `target_os = "linux"`, true for every Linux wheel including ours.
+    - **The gate doesn't pick out riscv64 — it picks out the same OS upstream already ships
+      Linux wheels for, which is exactly why this isn't a build-portability question.**
+      Chalk AI's own CI can fetch its own private repo to build the x86_64/aarch64/
+      musllinux Linux wheels already on PyPI; a third-party build from a public checkout
+      cannot, on any CPU architecture — riscv64 is not specially blocked, *all* from-source
+      Linux builds outside Chalk AI's own CI are. Gotcha 40/126's "which party's problem is
+      this" framing applies: report the credential wall, not an architecture investigation.
+    - **There is no non-divergent fix.** Patching `self_consumer`/`metrics` out (the only way
+      to drop the private deps, since no feature flag already does it) would ship a
+      `chalk-remote-call-python` wheel missing functionality every other platform's wheel
+      has — the same not-an-equivalent-artifact problem as gotcha 50 (psycopg2) and gotcha
+      670 (ovito), just reached through a git dependency instead of a sibling package name
+      or a submodule boundary.
+    - **The shared `chalk` prefix is coincidence, not relation — check before assuming a
+      sibling.** This repo already carries `chalkpy-rs` and `chalk-viztracer`; both are
+      separate PyPI projects with separate upstream repos, built from entirely different
+      source trees, and neither's status transfers to `chalk-remote-call-python`.
+    - **Verdict: `parked`.** Revisit only if Chalk AI publishes the `chalk-queue`/
+      `chalk_metrics`/`chalk_statsd` source (or a Linux build mode that doesn't need it), or
+      ships a riscv64 wheel themselves.

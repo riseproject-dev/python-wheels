@@ -64,6 +64,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **691** — Splitting a non-relocatable native-deps build into its own job breaks CMake
   `find_package()` for the later build job unless both jobs agree on the same literal
   absolute install path (the meshioplusplus / netCDF case).
+- **702** — A build-time cross-toolchain downloader's own host-arch match list can simply be
+  stale against the toolchain project's *own* current release matrix — check the toolchain's
+  own CI/releases directly and bypass via an existing path/URL override, no patch needed (the
+  componentize-py / WASI-SDK case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -988,3 +992,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        repo. cppcheck itself has no runtime dependency on PCRE's JIT (JIT only accelerates
        regex matching); turning it off is a build fix with no feature-level downside, matching
        the proportionality already applied to loongarch/s390.
+
+702. **A build-time cross-toolchain downloader's own host-arch match list can simply be stale
+     against the toolchain project's *own* current release matrix — check the toolchain's own
+     CI/releases directly, not the consuming package's hardcoded list, and bypass via an
+     existing path/URL override env var instead of patching (the componentize-py / WASI-SDK
+     case).** componentize-py (Bytecode Alliance, maturin/pyo3) cross-compiles an embedded
+     CPython to `wasm32-wasip2` at build time using WASI-SDK's `clang`, which has to run
+     *natively on the build host* — unlike the wasm32 output it produces, this is a genuine
+     host-architecture dependency. `build.rs`'s `find_wasi_sdk()` only auto-downloads a
+     WASI-SDK release for `("x86_64"|"aarch64", "linux"|"windows"|"macos")`, `bail!`ing on
+     anything else, and upstream's own `release.yaml`/`CONTRIBUTING.md` only ever hardcode
+     `x86_64-linux`/`arm64-linux`/`arm64-macos`/`x86_64-macos`/`x86_64-windows` URLs — reading
+     as a hard host-architecture lock on the WASI-SDK step, separate from (and easy to conflate
+     with) the wasm32 *target* being architecture-neutral.
+     - **It isn't one: the match list is just older than the toolchain's own CI.**
+       `WebAssembly/wasi-sdk`'s `.github/workflows/main.yml` has its own `riscv64-linux` matrix
+       entry (`CMAKE_SYSTEM_PROCESSOR=riscv64`, `riscv64-linux-gnu-gcc`), cross-compiled on an
+       `ubuntu-24.04` runner and published as a release asset — confirmed directly, not
+       inferred: `wasi-sdk-33.0-riscv64-linux.tar.gz` and `wasi-sdk-34.0-riscv64-linux.tar.gz`
+       both download with HTTP 200 from `github.com/WebAssembly/wasi-sdk/releases/download/
+       wasi-sdk-<N>/`. componentize-py's own `build.rs` just never got updated to know this
+       exists; componentize-py's wasi-sdk-33 pin predates nothing — the riscv64-linux asset
+       has shipped since at least that release.
+     - **No patch needed: the override the build script already exposes is the fix.**
+       `find_wasi_sdk()` checks `WASI_SDK_PATH` first and returns immediately if it exists, so
+       downloading the riscv64-linux tarball ourselves in `CIBW_BEFORE_ALL_LINUX` and
+       extracting it to `/opt/wasi-sdk` (the same default path upstream's own CI uses) skips
+       the stale arch-match branch entirely — zero changes to `build.rs`, in contrast to
+       gotcha 77's pattern where a `continue`/`raise` with no escape hatch forces a real patch.
+     - **The general check: when a build step's host-architecture gate traces back to a
+       *separate* toolchain/SDK project upstream merely downloads, verify that project's own
+       current release matrix before concluding the architecture is unsupported.** The
+       consuming package's hardcoded list only proves what the package author knew about when
+       they wrote it; it says nothing about whether the SDK itself has since grown riscv64
+       support. This is the build-time-host-toolchain mirror of gotcha 550 (a vendored
+       *binary*'s own downloader lacking a riscv64 entry) — there the fix was exploiting an
+       existing PATH-search fallback because the target binary's upstream truly ships no
+       riscv64 asset; here the fix is a path override because the SDK's upstream already does.

@@ -26,6 +26,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **672** — A `before-build` hook that `uv pip install --require-hashes`s from a PEP 751
   `pylock.toml` fails outright on riscv64 if that lock file's `environments` never lists a
   `riscv64` marker (the turbohtml PGO case).
+- **707** — A workflow-level `env:` var isn't visible inside `CIBW_BEFORE_ALL_LINUX`/
+  `CIBW_BEFORE_BUILD_LINUX` unless it's passed through `CIBW_ENVIRONMENT_PASS_LINUX`.
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -103,8 +105,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     the cp312 abi3 wheel.
     Some packages ship **only** the abi3 wheel with no cp314t variant (litellm: upstream
     publishes `cp310-abi3` only, no free-threaded wheel). In that case the matrix
-    collapses to a single build; run it on cp312 (our minimum) and test-reuse on
-    cp313/cp314 via cibuildwheel's `find_compatible_wheel` logic.
+    collapses to a single build and test-reuse on newer interpreters via cibuildwheel's
+    `find_compatible_wheel` logic. `check_versions.py` derives this shape from the PyPI
+    wheel names on its own (`cp310-abi3` becomes `python-versions: ['3.10']`); if the abi3
+    floor can't build on riscv64, edit it to a floor that can (e.g. `['3.12']`).
     - **maturin abi3 is a pyproject/Cargo feature; setuptools-rust abi3 is a
       build-time *flag* you must inject.** For maturin the abi3 tag comes from
       `wheel.py-api`/the `pyo3/abi3-pyNN` crate feature — set once, inherited. But
@@ -1065,7 +1069,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     stop at 3.12. Upstream's cp310-cp312-only wheel set is the tell, and the matrix has to
     follow it (`python: ["cp312"]` here) even though cp313/cp314 wheels would build and pass
     an import check. Exercise the tool's front door — the CLI on a two-line file, not
-    `import <pkg>` — on the newest interpreter of the default matrix before committing to it.
+    `import <pkg>` — on the newest interpreter of the matrix before committing to it.
     Applies to anything that consumes the bytecode or AST details of the interpreter it runs
     on: type checkers, bytecode rewriters, coverage/debug tooling.
 
@@ -1118,15 +1122,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       comment is explicit that this is unsupported and untested ("no guarantee this will work
       and no support will be provided") — setting it to force a `cp314` build substitutes our
       own untested guess for upstream's own tested ceiling, exactly the divergence goal 2
-      (mirror upstream's own recipe) exists to prevent. Trim the matrix instead:
-      `python: ["cp312", "cp313"]`, deviating from the repo-default four with a one-line
-      comment citing the guard.
+      (mirror upstream's own recipe) exists to prevent. Trim the matrix instead
+      (drop `'3.14'` from `python-versions`, `python-exclude: "cp314*"`, or `python:
+      ["cp312", "cp313"]` in an unconverted workflow) with a one-line comment citing the
+      guard.
     - **Generalizes past cocotb**: any pure-setuptools project that gates its own supported
       range with a version check in `setup.py` (rather than only via `python_requires`, which
       pip enforces as a resolver constraint and never touches the build) needs the same
       treatment — grep the checkout's `setup.py` for `sys.version_info` comparisons against a
-      literal tuple before assuming the repo-default `cp312/cp313/cp314/cp314t` matrix
-      applies.
+      literal tuple before assuming every interpreter `check_versions.py` derives from
+      `requires_python` applies.
     - **Verify site-independent**: `python3.14 -c "exec(open('setup.py').read())"` from the
       checkout root (or just `pip wheel . --no-deps` under a 3.14 interpreter) reproduces the
       `RuntimeError` on any host, x86 included — no riscv64/QEMU needed to confirm the ceiling
@@ -1287,3 +1292,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       `--constraint` file with hashes) verbatim on riscv64, check whether that lock file was
       actually resolved for the target triple — a hash-pinned install has no fallback path
       the way an unconstrained `pip install` does.
+
+707. **A workflow-level `env:` var isn't visible inside `CIBW_BEFORE_ALL_LINUX`/
+    `CIBW_BEFORE_BUILD_LINUX` unless it's passed through `CIBW_ENVIRONMENT_PASS_LINUX`
+    (the netgen-mesher OCCT build case).** The job-level (or top-of-file) `env:` block is a
+    GitHub Actions construct: it's injected into every ordinary `run:` step's shell on the
+    runner, but `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX` execute *inside* the
+    manylinux Docker container cibuildwheel drives — a separate process environment that
+    only sees what cibuildwheel explicitly forwards. netgen-mesher's workflow set
+    `OCCT_VERSION: 7.8.1` at the top-level `env:` so the version was easy to find and bump,
+    then referenced `${OCCT_VERSION}` inside `CIBW_BEFORE_ALL_LINUX` to download and build
+    OCCT from source. With no pass-through, the container's shell saw an unset variable; the
+    script's own `set -eux` (which includes `-u`) turned that into an immediate "OCCT_VERSION:
+    unbound variable" failure on the `curl .../V${OCCT_VERSION//./_}.tar.gz | tar xz` line —
+    before `dnf install` even mattered — not a timeout or a flake, despite the job's generous
+    `timeout-minutes: 1440` for the (unreached) OCCT compile.
+    - **The fix**: add `CIBW_ENVIRONMENT_PASS_LINUX: OCCT_VERSION` alongside
+      `CIBW_ENVIRONMENT_LINUX` in the cibuildwheel step's own `env:`, so cibuildwheel forwards
+      that host var into the container unchanged. `build-libuuu.yml` (`TINYXML2_VERSION`) and
+      `build-resiliparse.yml` (`ABSEIL_VERSION RE2_VERSION LEXBOR_REF UCHARDET_VERSION`)
+      already use this exact pattern for the same reason — a source version pinned once at
+      the top of the file, consumed by a container-side `before-all` build script.
+    - **Tell this apart from gotcha 107's cascade**: `CIBW_ENVIRONMENT_PASS_LINUX` doesn't
+      *set* a value, it only forwards one that's already defined somewhere the container
+      can't otherwise reach; it has no effect on a var that's merely missing everywhere.
