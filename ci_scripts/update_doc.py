@@ -32,7 +32,6 @@ import yaml
 REPO = "riseproject-dev/python-wheels"
 CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
-PACKAGES_FILE = CI_SCRIPTS_DIR / "packages.txt"
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
 RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
@@ -244,21 +243,6 @@ def append_version(
     return "\n".join(lines) + "\n"
 
 
-def read_packages_file():
-    """Return (header lines, package entries) of ci_scripts/packages.txt."""
-    lines = PACKAGES_FILE.read_text().splitlines()
-    header_end = next(
-        i for i, line in enumerate(lines) if line and not line.startswith("#")
-    )
-    return lines[:header_end], [line for line in lines[header_end:] if line]
-
-
-def add_to_packages_file(slug):
-    header, entries = read_packages_file()
-    entries = sorted(set(entries) | {slug}, key=str.casefold)
-    PACKAGES_FILE.write_text("\n".join(header + entries) + "\n")
-
-
 def git_run(*args, check=True):
     return subprocess.run(["git", *args], check=check)
 
@@ -278,22 +262,51 @@ def push_remote():
     return f"https://x-access-token:{GH_TOKEN}@github.com/{REPO}"
 
 
-def checkout_shared_branch(branch):
+def checkout_package_branch(branch):
     """
-    Check out the shared docs branch as a local worktree HEAD, based on
+    Check out the package's branch as a local worktree HEAD, based on
     origin/<branch> if it already exists, otherwise on origin/main, and replay
     its pending commits on top of origin/main.
 
-    All docs updates are pushed to this single branch, so a run needs to build
-    on whatever is already there rather than starting from main each time. main
-    keeps moving under it while it waits for review, so without the rebase the
-    branch carries an ever older tree and the PR ends up conflicting.
+    Nightly declarations and publication metadata share this package-specific
+    branch, so a run needs to build on whatever is already there rather than
+    starting from main each time. main keeps moving under it while it waits for
+    review, so without the rebase the branch carries an ever older tree and the
+    PR ends up conflicting.
 
     Returns the origin/<branch> commit the checkout started from, or None when
     the branch is new, so the push can lease against it.
     """
-    git_run("fetch", "origin")
+    # Checkout starts at depth 1. Fetch only main and this package branch with
+    # enough history to find their merge base, deepening only when necessary.
+    branch_ref = f"refs/heads/{branch}"
+    branch_exists = subprocess.run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch_ref],
+        stdout=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    refspecs = ["+refs/heads/main:refs/remotes/origin/main"]
+    if branch_exists:
+        refspecs.append(f"+{branch_ref}:refs/remotes/origin/{branch}")
+
+    git_run(
+        "fetch",
+        "--depth=100" if branch_exists else "--depth=1",
+        "origin",
+        *refspecs,
+    )
     remote_ref = f"origin/{branch}"
+    if branch_exists:
+        for deepen in (500, 2000):
+            if git_run(
+                "merge-base", "origin/main", remote_ref, check=False
+            ).returncode == 0:
+                break
+            git_run("fetch", f"--deepen={deepen}", "origin", *refspecs)
+        else:
+            # Rare fallback for a package branch with a very old merge base.
+            git_run("fetch", "--unshallow", "origin", *refspecs)
+
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", remote_ref],
         capture_output=True,
@@ -377,17 +390,16 @@ def main():
     comment = None
     yaml_path = DOCS_DIR / f"{slug}.yaml"
 
-    branch = "github-actions/update-doc"
-    pr_title = "docs: Update projects"
+    branch = f"package/{slug}"
+    pr_title = f"{slug}: update packages"
 
     def compute_content():
-        """Read the current YAML and return (is_new, old_content, new_content)."""
+        """Read the current YAML and return (old_content, new_content)."""
         if not yaml_path.exists():
             raise SystemExit(
                 f"{yaml_path} does not exist; a package's first PR must add it "
                 "(see docs/development.md)"
             )
-        is_new = slug not in read_packages_file()[1]
         old_content = yaml_path.read_text()
         package_data = yaml.safe_load(old_content) or {}
         new_content = append_version(
@@ -399,10 +411,10 @@ def main():
             publication,
             comment,
         )
-        return is_new, old_content, new_content
+        return old_content, new_content
 
     if DRY_RUN:
-        is_new, old_content, new_content = compute_content()
+        old_content, new_content = compute_content()
         if new_content is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
@@ -417,19 +429,17 @@ def main():
             tofile=str(yaml_path),
         )
         sys.stdout.writelines(diff)
-        if is_new:
-            print(f"[dry-run] Would add '{slug}' to {PACKAGES_FILE}")
         print(
             f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main"
         )
         return
 
     configure_git_identity()
-    remote_sha = checkout_shared_branch(branch)
+    remote_sha = checkout_package_branch(branch)
 
-    # Compute the change against the shared branch's contents, so a package
-    # already documented there by an earlier run in this batch is seen.
-    is_new, _old_content, new_content = compute_content()
+    # Compute the change against the package branch's contents, so a version
+    # declared by the nightly workflow is retained and filled in here.
+    _old_content, new_content = compute_content()
     if new_content is None:
         print(f"{slug} {version} is already documented; nothing to do")
         return
@@ -437,12 +447,7 @@ def main():
     yaml_path.write_text(new_content)
     git_run("add", str(yaml_path))
 
-    if is_new:
-        add_to_packages_file(slug)
-        git_run("add", str(PACKAGES_FILE))
-        git_run("commit", "-s", "-m", f"docs: add {slug}\n\nAdd version {version}")
-    else:
-        git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
+    git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
 
     # The rebase rewrote whatever was on the branch, so the push is no longer a
     # fast-forward; the lease keeps it from clobbering a concurrent update.
@@ -467,7 +472,7 @@ def main():
             "--head",
             branch,
             "--reviewer",
-            "threexc,luhenry",
+            "luhenry",
             "--title",
             pr_title,
             "--body",

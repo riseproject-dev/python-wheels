@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `version-bump`/`build-wheels-linux` jobs of
+# https://github.com/xa11y/xa11y/blob/v0.15.2/.github/workflows/publish.yml
+# and the `python` job of https://github.com/xa11y/xa11y/blob/v0.15.2/.github/workflows/ci.yml
+name: Build xa11y wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/xa11y.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-xa11y.yml'
+      - 'docs/packages/xa11y.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-xa11y.yml'
+      - 'docs/packages/xa11y.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: xa11y
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build xa11y ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      XA11Y_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout xa11y v${{ env.XA11Y_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: xa11y/xa11y
+          ref: v${{ env.XA11Y_VERSION }}
+          persist-credentials: false
+
+      # Upstream's release job stamps the workspace version into xa11y-python after tagging.
+      - name: Sync Python package version
+        run: |
+          VERSION=$(sed -n '/\[workspace\.package\]/,/\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          test "$VERSION" = "$XA11Y_VERSION"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" xa11y-python/Cargo.toml
+
+      - name: Stage the licence beside xa11y-python's pyproject.toml
+        run: cp LICENSE xa11y-python/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: xa11y-python
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            dnf install -y dbus-devel libxkbcommon-devel &&
+            cp /usr/share/licenses/libxkbcommon/LICENSE {project}/xa11y-python/LICENSE.libxkbcommon
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: xa11y-python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md;
+            lic = {p.name for p in md.files('xa11y') if '.dist-info/licenses/' in str(p)} - {''};
+            assert lic == {'LICENSE', 'LICENSE.libxkbcommon'}, lic" &&
+            python -m pytest -v xa11y-python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: xa11y-${{ env.XA11Y_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish xa11y ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: xa11y-${{ matrix.version }}-*-manylinux_riscv64

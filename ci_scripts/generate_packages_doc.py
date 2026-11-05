@@ -413,7 +413,6 @@ def generate_index(package_entries, out_dir):
         "# List of Supported Packages",
         "",
     ]
-    # Relative so the links keep working under a PR preview's baseurl.
     for name in package_entries:
         lines.append(f"- [{name}](../project/{name}/)")
 

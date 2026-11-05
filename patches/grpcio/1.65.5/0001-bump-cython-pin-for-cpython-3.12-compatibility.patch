@@ -1,0 +1,49 @@
+From 927c8bbde50c0e44298fea4d9a216ac327091cc3 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 25 Oct 2026 18:00:00 +0000
+Subject: [PATCH] bump cython pin for CPython 3.12 compatibility
+
+install_all_python_modules.sh (run via CIBW_TEST_COMMAND to build and
+test grpcio_tools against the just-built grpcio wheel) pins
+"cython<3.0.0rc1", which resolves to a pre-3.0 Cython release (0.29.37
+on PyPI, or the 3.0.0b3 beta depending on what the index serves).
+Either way, cythonizing grpc_tools/_protoc_compiler.pyx with one of
+those produces C++ that calls CPython 3.12's new
+_PyLong_IsCompact()/_PyLong_CompactValue() with a bare PyObject*
+instead of a PyLongObject*, which fails to compile under cp312:
+
+  _protoc_compiler.cpp:12211:47: error: cannot convert 'PyObject*' to
+  'const PyLongObject*'
+
+Reproduced locally by cythonizing the unmodified .pyx from this tag
+with both Cython 0.29.37 and 3.0.0b3 against Python 3.12 headers -
+both hit the same error; regenerating with Cython 3.1.1 compiles
+clean.
+
+grpc fixed this themselves by bumping the pin to "cython==3.1.1" once
+they started testing on cp312/cp313 (e.g. unchanged at v1.78.0's
+tools/distrib/install_all_python_modules.sh), but that rewrite
+postdates v1.65.5. Backport just the version bump.
+
+Upstream-Status: Backport [https://github.com/grpc/grpc/blob/v1.78.0/tools/distrib/install_all_python_modules.sh]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tools/distrib/install_all_python_modules.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/distrib/install_all_python_modules.sh b/tools/distrib/install_all_python_modules.sh
+index b389df4..aee999e 100755
+--- a/tools/distrib/install_all_python_modules.sh
++++ b/tools/distrib/install_all_python_modules.sh
+@@ -31,7 +31,7 @@ BASEDIR=$(realpath "$BASEDIR")/../..
+ PACKAGES="grpcio_channelz  grpcio_csds  grpcio_admin grpcio_health_checking  grpcio_reflection  grpcio_status  grpcio_testing grpcio_csm_observability grpcio_tests"
+
+ (cd "$BASEDIR";
+-  pip install --upgrade "cython<3.0.0rc1";
++  pip install --upgrade "cython==3.1.1";
+   python setup.py install;
+   pushd tools/distrib/python/grpcio_tools;
+     ../make_grpcio_tools.py
+--
+2.43.0
