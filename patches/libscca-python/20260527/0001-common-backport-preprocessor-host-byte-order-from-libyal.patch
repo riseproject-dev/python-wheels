@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 14:00:00 +0000
+Subject: [PATCH] common: backport preprocessor host byte order
+
+synclibs.sh checks out the latest tag of every libyal support library at
+build time, not the version the release was cut with. libfvalue 20260531
+and later test the host byte order in `#if` directives
+(`#if _BYTE_STREAM_HOST_BYTE_ORDER == _BYTE_STREAM_ENDIAN_BIG`), which
+needs the preprocessor-level _BYTE_STREAM_HOST_BYTE_ORDER that upstream
+added to common/byte_stream.h a week after the 20260527 release. Against
+the release's header, which only has the runtime
+_BYTE_STREAM_HOST_IS_ENDIAN_* checks and `(uint8_t)`-cast constants,
+libfvalue_binary_data.c fails with "missing binary operator before token
+'b'" on every architecture.
+
+Take the header from upstream's main branch unchanged; nothing in libscca
+itself uses the removed macros.
+
+Upstream-Status: Backport [https://github.com/libyal/libscca/commit/c15aca5981fef05c148003e3d797485539380795]
+---
+ common/byte_stream.h | 67 +++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/common/byte_stream.h b/common/byte_stream.h
+index db5bfaa..ca209bf 100644
+--- a/common/byte_stream.h
++++ b/common/byte_stream.h
+@@ -29,13 +29,68 @@
+ extern "C" {
+ #endif
+ 
+-#define _BYTE_STREAM_HOST_IS_ENDIAN_BIG		( *((uint32_t *) "\x01\x02\x03\x04" ) == 0x01020304 )
+-#define _BYTE_STREAM_HOST_IS_ENDIAN_LITTLE	( *((uint32_t *) "\x01\x02\x03\x04" ) == 0x04030201 )
+-#define _BYTE_STREAM_HOST_IS_ENDIAN_MIDDLE	( *((uint32_t *) "\x01\x02\x03\x04" ) == 0x02010403 )
++#define _BYTE_STREAM_ENDIAN_BIG		'b'
++#define _BYTE_STREAM_ENDIAN_LITTLE	'l'
++#define _BYTE_STREAM_ENDIAN_MIDDLE	'm'
+ 
+-#define _BYTE_STREAM_ENDIAN_BIG			(uint8_t) 'b'
+-#define _BYTE_STREAM_ENDIAN_LITTLE		(uint8_t) 'l'
+-#define _BYTE_STREAM_ENDIAN_MIDDLE		(uint8_t) 'm'
++#undef _BYTE_STREAM_HOST_BYTE_ORDER
++
++#if defined( __BYTE_ORDER__ ) && defined( __ORDER_LITTLE_ENDIAN__ ) && defined( __ORDER_BIG_ENDIAN__ ) && defined( __ORDER_PDP_ENDIAN__ )
++#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_BIG
++
++#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_LITTLE
++
++#elif __BYTE_ORDER__ == __ORDER_PDP_ENDIAN__
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_MIDDLE
++#endif
++
++#elif defined( __linux__ ) || defined( __GLIBC__ )
++#include <endian.h>
++
++#if defined( __BYTE_ORDER ) && defined( __LITTLE_ENDIAN ) && defined( __BIG_ENDIAN ) && defined( __PDP_ENDIAN )
++#if __BYTE_ORDER == __BIG_ENDIAN
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_BIG
++
++#elif __BYTE_ORDER == __LITTLE_ENDIAN
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_LITTLE
++
++#elif __BYTE_ORDER == __PDP_ENDIAN
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_MIDDLE
++
++#endif
++#endif
++
++#elif defined( __APPLE__ ) || defined( __FreeBSD__ ) || defined( __OpenBSD__ ) || defined( __NetBSD__ )
++#include <machine/endian.h>
++
++#if defined( BYTE_ORDER ) && defined( LITTLE_ENDIAN ) && defined( BIG_ENDIAN )
++#if BYTE_ORDER == BIG_ENDIAN
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_BIG
++
++#elif BYTE_ORDER == LITTLE_ENDIAN
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_LITTLE
++
++#endif
++#endif
++
++#elif defined( _MSC_VER ) || defined( _WIN32 )
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_LITTLE
++
++#elif defined( __hppa__ ) || defined( __m68k__ ) || defined( __mips__ ) || defined( __powerpc__ ) || defined( __sparc__ )
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_BIG
++
++#elif defined( __i386__ ) || defined( __x86_64__ ) || defined( __arm__ ) || defined( __aarch64__ )
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_LITTLE
++
++#elif defined( __pdp11__ )
++#define _BYTE_STREAM_HOST_BYTE_ORDER _BYTE_STREAM_ENDIAN_MIDDLE
++#endif
++
++#if !defined( _BYTE_STREAM_HOST_BYTE_ORDER )
++#error "Unable to determine host byte-order"
++#endif
+ 
+ typedef union byte_stream_float32
+ {
+-- 
+2.43.0
+
