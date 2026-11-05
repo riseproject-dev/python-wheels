@@ -109,11 +109,13 @@ changes below.
 **The interpreter matrix comes from upstream, per version.** There
 is no RISE-wide list of Python versions any more. Each version entry of the package YAML
 carries `python-versions`, the interpreters upstream built that release for, and
-`_setup.yml` outputs `matrix`, an `include:` list of `{version, python}` pairs built from it
-by `ci_scripts/pending_versions.py --python-matrix` (no network access needed). It is
-computed for every workflow; the ones still hard-coding `python:` simply ignore it. A
-version without `python-versions` is left out of it with a warning annotation, so in a
-workflow that uses the matrix, fill it in before building.
+`_setup.yml` outputs `matrix`, an `include:` list of `{version, python, python-version}`
+entries built from it by `ci_scripts/pending_versions.py --python-matrix` (no network access
+needed). `python` is a cibuildwheel tag such as `cp314t`; `python-version` is its interpreter
+form such as `3.14t`. It is
+computed for every workflow; the ones still hard-coding `python:` simply ignore it.
+`python-versions` is required for every version entry, and the packages YAML validation
+fails if it is missing.
 
 `python-versions` is written by `ci_scripts/check_versions.py` from upstream's wheels on PyPI:
 the nightly job adds it to every version it declares; for a version you add by hand, run
