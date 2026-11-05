@@ -1,0 +1,34 @@
+From: RISE Project <info@riseproject.dev>
+Subject: [PATCH] postprocess-binary: skip local symbols in the export check
+
+library_symbols() takes field 6 of every `objdump -T` line that mentions
+.text, assuming each one is an exported symbol of the form
+`addr flags type .text size version name`. On RISC-V, binutils' ld always
+keeps a local section symbol for .text in .dynsym (it is there in every
+riscv64 shared library, e.g. Rocky 10's own libzstd.so.1), which objdump
+prints with one field fewer:
+
+  0000000000024a10 l    d  .text	0000000000000000              .text
+
+so the list comprehension raises IndexError on libopenslide.so.1 and the
+bdist build stops. Local symbols are never exports, so skip them.
+
+Upstream-Status: To upstream [riscv64 is not an upstream openslide-bin platform yet]
+
+--- a/artifacts/postprocess-binary.py
++++ b/artifacts/postprocess-binary.py
+@@ -35,7 +35,13 @@
+         out = subprocess.check_output(
+             [os.environ['OBJDUMP'], '-T', file]
+         ).decode()
+-        return [line.split()[6] for line in out.split('\n') if '.text' in line]
++        return [
++            line.split()[6]
++            for line in out.split('\n')
++            # skip local symbols, such as the .text section symbol that
++            # RISC-V linkers add to .dynsym
++            if '.text' in line and line.split()[1] != 'l'
++        ]
+     elif host == 'darwin':
+         out = subprocess.check_output(
+             [os.environ['DYLD_INFO'], '-exports', file]
