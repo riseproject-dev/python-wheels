@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/corinwagen/pymsym/blob/v0.3.7/.github/workflows/build_wheel.yml
+name: Build pymsym wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pymsym.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymsym.yml'
+      - 'docs/packages/pymsym.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymsym.yml'
+      - 'docs/packages/pymsym.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pymsym
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pymsym ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's `build = "cp311-* cp312-* cp313-* cp314-*"` ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    env:
+      PYMSYM_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The PyPI 0.3.5 release was built from tag v0.3.7; pyproject.toml was never bumped.
+      - id: tag
+        run: |
+          case "$PYMSYM_VERSION" in
+            0.3.5) echo "ref=v0.3.7" ;;
+            *) echo "ref=v$PYMSYM_VERSION" ;;
+          esac >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pymsym ${{ steps.tag.outputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: corinwagen/pymsym
+          ref: ${{ steps.tag.outputs.ref }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream runs no tests; get_point_group() returns "C1" on any libmsym error, so assert real groups.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib; m = importlib.import_module('pymsym.pymsym'); assert m._libmsym_location.endswith('libpymsym.so'), m._libmsym_location" &&
+            python -c "import math, pymsym;
+            water = ([8, 1, 1], [[0, 0, 0.1173], [0, 0.7572, -0.4692], [0, -0.7572, -0.4692]]);
+            a = 0.629;
+            methane = ([6, 1, 1, 1, 1], [[0, 0, 0], [a, a, a], [-a, -a, a], [-a, a, -a], [a, -a, -a]]);
+            ring = [(r * math.cos(i * math.pi / 3), r * math.sin(i * math.pi / 3), 0) for r in (1.39, 2.47) for i in range(6)];
+            benzene = ([6] * 6 + [1] * 6, [list(p) for p in ring]);
+            got = [(pymsym.get_point_group(*m), pymsym.get_symmetry_number(*m)) for m in (water, methane, benzene)];
+            assert got == [('C2v', 2), ('Td', 12), ('D6h', 12)], got;
+            assert pymsym.get_point_group([1], [[0, 0, 0]]) == 'Kh'"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymsym-${{ env.PYMSYM_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymsym ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pymsym-${{ matrix.version }}-*riscv64
