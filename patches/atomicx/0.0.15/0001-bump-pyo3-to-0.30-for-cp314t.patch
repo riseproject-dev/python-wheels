@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 19:50:00 +0000
+Subject: [PATCH] bump pyo3 to 0.30 for cp314t
+
+The riscv64 manylinux image ships no cp313t interpreter (gotcha 11), so the
+free-threaded leg of this build targets cp314t instead of upstream's own
+cp313t (see upstream's .github/workflows/CI.yml, which only ever builds and
+tests against 3.13t). pyo3 0.23.5 enforces a hard ceiling in
+pyo3-build-config: "the configured Python interpreter version (3.14) is newer
+than PyO3's maximum supported version (3.13)", and the free-threaded build of
+CPython has no limited-API fallback to dodge it with, so the cp314t leg fails
+to compile outright, on any architecture, before riscv64 is even reached.
+
+pyo3 0.30.1 raises that ceiling to 3.15 and fully supports Python 3.14's
+free-threaded build. Bumping the dependency version is the only change
+needed: this crate's own pyo3 usage (#[pyclass]/#[pymethods] over
+Bound<'_, PyAny>, no raw C API calls) is already written against the modern
+Bound-based API pyo3 0.21+ introduced and needs no source changes. pyo3 0.30
+also dropped the `abi3-py38` feature (its own floor moved to Python 3.9), so
+the `gil-abi3` feature's reference to it has to move to `abi3-py39` in the
+same patch or cargo's own feature-graph validation fails before reaching the
+ceiling check at all; this is harmless for the abi3 leg, which already
+builds on cp39 as the oldest interpreter in the riscv64 image (gotcha 96).
+
+Verified locally: `cargo build --release --no-default-features` (the
+cp314t leg's own `MATURIN_PEP517_ARGS`) and `cargo build --release --features
+gil-abi3` (the abi3 leg's default) both compile clean against pyo3 0.30.1,
+with only pre-existing `fetch_update`-is-now-`try_update` deprecation
+warnings from the `portable-atomic` dependency, no errors.
+
+Upstream-Status: Inappropriate [our riscv64 image's missing cp313t interpreter forces this build onto cp314t, which upstream's own CI never builds or tests against]
+---
+ Cargo.toml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index b5ea86d..6560b42 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
+ [dependencies]
+ num = "0.4.3"
+ portable-atomic = { version = "1.9.0", features = ["std", "float"] }
+-pyo3 = { version = "0.23", default-features = false, features = ["extension-module", "macros"] }
++pyo3 = { version = "0.30", default-features = false, features = ["extension-module", "macros"] }
+
+ [features]
+ default = ["gil-abi3"]
+-gil-abi3 = ["pyo3/abi3", "pyo3/abi3-py38"]
++gil-abi3 = ["pyo3/abi3", "pyo3/abi3-py39"]

@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# discord-markdown-py's upstream (github.com/discord/markdown) is not a public repository;
+# Discord publishes only the PyPI sdist, which carries the whole Cargo workspace (the parser
+# crate plus the pyo3 binding under ffi/py), so the sdist is fetched here and used as the
+# upstream tree, same shape as build-chalkpy-rs.yml. Everything else mirrors upstream's own
+# publish-python.yaml: maturin over ffi/py/Cargo.toml, one abi3-py38 wheel per platform.
+name: Build discord-markdown-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/discord-markdown-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-discord-markdown-py.yml'
+      - 'docs/packages/discord-markdown-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-discord-markdown-py.yml'
+      - 'docs/packages/discord-markdown-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: discord-markdown-py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build discord-markdown-py ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # ffi/py/Cargo.toml turns on pyo3's abi3-py38 feature unconditionally, so one
+          # abi3 wheel serves every interpreter it claims. pyo3 0.22.6 (Cargo.lock) predates
+          # free-threading support, matching upstream shipping no cp314t wheel either.
+          - tag: cp38-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+
+    env:
+      DISCORD_MARKDOWN_PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch discord-markdown-py ${{ env.DISCORD_MARKDOWN_PY_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/discord-markdown-py/${DISCORD_MARKDOWN_PY_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          test -f "discord_markdown_py-${DISCORD_MARKDOWN_PY_VERSION}/pyproject.toml"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: discord_markdown_py-${{ env.DISCORD_MARKDOWN_PY_VERSION }}
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl host toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The sdist ships no [tool.cibuildwheel], so the Rust toolchain maturin needs is
+          # installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # lib/py/test.py is a standalone assert-and-print script, not a pytest suite.
+          # discord_markdown/__init__.py is a pure-Python re-export shim (gotcha 56); the
+          # compiled extension is the discord_markdown.discord_markdown submodule.
+          CIBW_TEST_SOURCES: discord_markdown_py-${{ env.DISCORD_MARKDOWN_PY_VERSION }}/lib/py
+          CIBW_TEST_COMMAND: >-
+            python -c "import discord_markdown.discord_markdown as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python discord_markdown_py-${{ env.DISCORD_MARKDOWN_PY_VERSION }}/lib/py/test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: discord-markdown-py-${{ env.DISCORD_MARKDOWN_PY_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish discord-markdown-py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: discord-markdown-py-${{ matrix.version }}-*-manylinux_riscv64

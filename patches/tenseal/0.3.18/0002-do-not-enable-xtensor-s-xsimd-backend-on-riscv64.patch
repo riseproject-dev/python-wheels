@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 24 Oct 2026 12:00:00 +0200
+Subject: [PATCH] do not enable xtensor's xsimd backend on riscv64
+
+cmake/xtensor.cmake unconditionally defines XTENSOR_USE_XSIMD (and sets
+the xtensor CMake option of the same name, which xtensor's interface
+target also propagates as a compile definition). xtensor then allocates
+every xarray buffer through xsimd::aligned_allocator<T,
+XSIMD_DEFAULT_ALIGNMENT>.
+
+The pinned xsimd 7.4.10 only knows x86 and ARM instruction sets. On
+riscv64 it detects none ("No SIMD instructions set detected" #warning)
+and, with GCC >= 7, defines XSIMD_DEFAULT_ALIGNMENT to 0.
+detail::xaligned_malloc() returns nullptr whenever the alignment is 0,
+so aligned_allocator::allocate() throws std::bad_alloc on every
+allocation: every TensorStorage, and therefore every PlainTensor,
+CKKSTensor and BFVTensor, fails to construct, e.g.
+
+    ts.plain_tensor([0])  ->  MemoryError: std::bad_alloc
+
+Reproduced with a standalone program building
+xt::xarray<double>(xt::adapt(vector, shape)) against xtl 0.7.2, xsimd
+7.4.10 and xtensor 0.23.5 under GCC 14 in manylinux_2_39_riscv64: it
+throws std::bad_alloc with -DXTENSOR_USE_XSIMD and works without it.
+
+TenSEAL never uses xsimd directly, so on riscv64 leave XTENSOR_USE_XSIMD
+off and let xtensor use std::allocator with its scalar code paths.
+xsimd is still fetched and on the include path, so LICENSE.xsimd stays
+in the wheel.
+
+Upstream-Status: To upstream [not yet submitted; this port may only touch riseproject-dev/python-wheels]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cmake/xtensor.cmake | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/cmake/xtensor.cmake b/cmake/xtensor.cmake
+index fe48ee0..281ae89 100644
+--- a/cmake/xtensor.cmake
++++ b/cmake/xtensor.cmake
+@@ -1,7 +1,11 @@
+ include(FetchContent)
+ 
+-add_definitions(-DXTENSOR_USE_XSIMD)
+-set(XTENSOR_USE_XSIMD ON)
++# xsimd 7.x has no RISC-V backend: XSIMD_DEFAULT_ALIGNMENT is 0 there and
++# xsimd::aligned_allocator then throws std::bad_alloc on every allocation.
++if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^riscv")
++  add_definitions(-DXTENSOR_USE_XSIMD)
++  set(XTENSOR_USE_XSIMD ON)
++endif()
+ set(JSON_BuildTests OFF)
+ set(JSON_Install OFF)
+ 
