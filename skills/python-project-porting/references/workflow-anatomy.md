@@ -38,6 +38,7 @@ source-code: <repo url>
 license: <SPDX id>
 versions:
 - version: <wheel version>
+  python-versions: ['3.12', '3.13', '3.14', '3.14t']   # filled in by check_versions.py
 ```
 
 An entry with neither `tag:` nor `files:` is pending. The `setup` job hands the pending
@@ -58,13 +59,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       <PKG>_VERSION: ${{ matrix.version }}       # steps keep using env.<PKG>_VERSION
 ```
 
-Every job that consumes the matrix carries the `if:` guard, the `version:` vector and (for
+Every job that consumes the matrix carries the `if:` guard, the `version:` vector (or the
+`include:` matrix, for the build jobs) and (for
 `runs-on` jobs) the `env:` line; a `uses:` job (publish) takes no `env:`. `version` is the
 version the **wheel** will carry — `update_doc.py` refuses to document a wheel whose version
 is not declared — so the workflow derives the git ref from it (`ref: v${{ env.X_VERSION }}`,
@@ -105,12 +106,50 @@ architectures, macOS/Windows, and the sdist job unless a build or test step cons
 Repeat for the test workflow if upstream keeps it separate. Only then apply the riscv64
 changes below.
 
-**Default interpreter matrix is `["cp312", "cp313", "cp314", "cp314t"]`.** RISE used to
-track the four newest `major.minor` plus free-threaded variants, but numpy (as of 2.5.0)
-sets 3.12 as its floor, and enough of the registry depends on numpy that everything
-follows it. `3.13t` is deliberately excluded — it was experimental with limited support
-(and the riscv64 manylinux image ships no cp313t either, gotcha 11). Deviating is allowed,
-but weigh similarity-to-upstream against maintenance cost.
+**The interpreter matrix comes from upstream, per version.** There
+is no RISE-wide list of Python versions any more. Each version entry of the package YAML
+carries `python-versions`, the interpreters upstream built that release for, and
+`_setup.yml` outputs `matrix`, an `include:` list of `{version, python, python-version}`
+entries built from it by `ci_scripts/pending_versions.py --python-matrix` (no network access
+needed). `python` is a cibuildwheel tag such as `cp314t`; `python-version` is its interpreter
+form such as `3.14t`. It is
+computed for every workflow; the ones still hard-coding `python:` simply ignore it.
+`python-versions` is required for every version entry, and the packages YAML validation
+fails if it is missing.
+
+`python-versions` is written by `ci_scripts/check_versions.py` from upstream's wheels on PyPI:
+the nightly job adds it to every version it declares; for a version you add by hand, run
+`uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>`. It maps:
+
+- `cpXY-cpXY` / `cpXY-cpXYt` wheels to `'3.X'` / `'3.Xt'`; a `cpXY-abi3` wheel to one
+  `'3.X'` build (gotcha 11), so abi3 packages collapse on their own.
+- No version-specific wheels (sdist-only, pure): `requires_python` decides, without
+  free-threaded builds. Not on PyPI at all: nothing is written; add it by hand.
+
+Values must be quoted strings (`'3.10'`, not `3.10`, which YAML reads as 3.1);
+`pending_versions.py --check` (run by pr-checks) rejects anything else. When building the
+matrix, versions riscv64 can't build are dropped: the matrix is limited to `RISCV64_PYTHONS`,
+the `*-manylinux_riscv64` identifiers of the pinned cibuildwheel (cp39…cp315t, no cp313t).
+Update that list when bumping cibuildwheel; it is a technical limit, not a policy.
+
+Override in two ways, each with a comment saying why. Edit a version's `python-versions` to
+build more or fewer interpreters than upstream for that version (e.g. add `'3.14t'`). Use the
+`python-exclude` input to drop cibuildwheel tags (globs) for every version. It defaults to
+`"cp39 cp310 cp311"`, since numpy ≥ 2.5 (which much of the registry depends on) has no
+wheel below cp312; setting it replaces that default, so `python-exclude: ""` builds
+everything upstream does and `"cp39 cp31[01] cp315*"` also drops 3.15.
+
+**Converting old workflows is gradual.** Most `build-<pkg>.yml` still hard-code `python:
+[...]` next to `version:`. When a workflow is touched to build a new release, switch it:
+make sure the new version's entry has `python-versions`, and replace the `version:` +
+`python:` vectors of the build job(s) with
+`include: ${{ fromJSON(needs.setup.outputs.matrix) }}` (see `build-falcon.yml`). The matrix may grow (e.g. cp315/cp315t): exclude what fails for
+riscv64-specific reasons rather than reverting to a hard-coded list. Workflows whose extra
+axes (`libc`, `build`) don't fit a `{version, python}` include can stay hard-coded.
+
+A JSON `include:` can't carry per-entry keys (`test_skip`, `pytest_k`, …) or be trimmed by
+`exclude:`, so compute per-interpreter values in expressions instead, e.g.
+`CIBW_TEST_SKIP: ${{ endsWith(matrix.python, 't') && '*' || '' }}`.
 
 **Check the upstream repo out at the workspace root** — `actions/checkout` with
 `repository:`/`ref:` and no `path:`. It replaces the default python-wheels checkout so the
@@ -141,7 +180,7 @@ Two build shapes exist in the repo — pick based on the package:
 
 - **sdist → bdist** (see `build-cffi.yml`, `build-protobuf.yml`): job 1 produces
   an sdist and uploads it as `<pkg>-<version>-sdist`; job 2 (a
-  matrix over `cp312/cp313/cp314/cp314t`) downloads the sdist, extracts it, and
+  matrix over the interpreters) downloads the sdist, extracts it, and
   runs `cibuildwheel ./extracted`; job 3 publishes. cibuildwheel also accepts the
   sdist tarball directly as `package-dir` (it extracts internally), so you can skip
   the manual `tar zxf` (see `build-apache-tvm-ffi.yml`).
@@ -152,7 +191,7 @@ Two build shapes exist in the repo — pick based on the package:
   `CIBW_ENVIRONMENT`/CMake, or a prebuilt dependency wheel from our registry via
   `CIBW_BEFORE_BUILD` (see gotcha 17 for the dep-wheel pattern).
   Prefer the `build-fastuuid.yml`/`build-fonttools.yml` matrix convention: entries are
-  **bare interpreter tags** (`python: ["cp312", "cp313", "cp314", "cp314t"]`) and the
+  **bare interpreter tags** (`cp312`, `cp314t`, as the `setup` matrix emits them) and the
   `-manylinux_riscv64` suffix is appended at each use site (job `name:`, cibuildwheel
   `only:`, artifact `name:`) — cleaner than embedding the full `cp312-manylinux_riscv64`
   tag in the matrix (the older `build-onnx.yml` `matrix.build` style).
@@ -183,9 +222,9 @@ publish:
 ```
 
 `_publish-wheel.yml` fills the version's entry of `docs/packages/<pkg>.yaml` with the
-release tag and wheel files (`ci_scripts/update_doc.py`) and adds the package to
-`ci_scripts/packages.txt` on first publish, so beyond the YAML **a new package needs no
-manual registration anywhere**. Per-version `patched: true`, `comment:` and `warning:` keys
+release tag and wheel files (`ci_scripts/update_doc.py`). The package YAML is also the
+package registry, so beyond the YAML **a new package needs no manual registration
+anywhere**. Per-version `patched: true`, `comment:` and `warning:` keys
 may be pre-filled on the pending entry. `permissions` needs `contents: write` **and**
 `pull-requests: write` (not `contents: read`) because that docs step pushes a branch and
 opens a PR with the default `GITHUB_TOKEN`.
