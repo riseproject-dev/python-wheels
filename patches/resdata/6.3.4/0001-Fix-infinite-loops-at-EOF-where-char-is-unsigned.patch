@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 17 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Fix infinite loops at EOF where char is unsigned
+
+Upstream-Status: Backport [https://github.com/equinor/resdata/commit/ce341a3666855c57839466d9daa876252b54c8c0]
+
+fgetc() returns EOF (-1) as an int. Three loops store it in a plain
+char and then test c == EOF; where char is unsigned (riscv64, aarch64)
+c becomes 255, the test is always false (GCC: "comparison is always
+false due to limited range of data type"), and the loop spins forever
+once fgetc() keeps returning EOF:
+
+- rd_kw_qskip(): any formatted file without a quote character, e.g.
+  tests/rd_tests/test_rd_file.py::test_broken_file, which hangs the
+  test suite at that test on riscv64;
+- util_fskip_lines(): fixed upstream by the commit above;
+- fscanf_grdecl_data(): a trailing "--" comment without a newline.
+
+Upstream fixed the first as part of the rd::KW rewrite (d9eacc14e,
+skip_space_until_quote()) and removed the third file in c05264026;
+all three fixes are in 7.0.0b3 and in none of the 6.3.x releases.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ lib/resdata/rd_kw.cpp        | 2 +-
+ lib/resdata/rd_kw_grdecl.cpp | 2 +-
+ lib/util/util.cpp            | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/lib/resdata/rd_kw.cpp b/lib/resdata/rd_kw.cpp
+index 17e08f4e7..f3c2475d1 100644
+--- a/lib/resdata/rd_kw.cpp
++++ b/lib/resdata/rd_kw.cpp
+@@ -1043,7 +1043,7 @@ static bool rd_kw_qskip(FILE *stream) {
+     const char newline = '\n';
+     const char tab = '\t';
+     bool OK = true;
+-    char c;
++    int c;
+     bool cont = true;
+     while (cont) {
+         c = fgetc(stream);
+diff --git a/lib/resdata/rd_kw_grdecl.cpp b/lib/resdata/rd_kw_grdecl.cpp
+index 55785de1f..34262a88b 100644
+--- a/lib/resdata/rd_kw_grdecl.cpp
++++ b/lib/resdata/rd_kw_grdecl.cpp
+@@ -232,7 +232,7 @@ fscanf_grdecl_data(const char *header, bool strict, int &kw_size,
+         if (fscanf(stream, "%32s", buffer.get()) == 1) {
+             if (strcmp(buffer.get(), RD_COMMENT_STRING) == 0) {
+                 // We have read a comment marker - just read up to the end of line.
+-                char c;
++                int c;
+                 while (true) {
+                     c = fgetc(stream);
+                     if (c == newline)
+diff --git a/lib/util/util.cpp b/lib/util/util.cpp
+index 4014b594b..ad2485779 100644
+--- a/lib/util/util.cpp
++++ b/lib/util/util.cpp
+@@ -807,7 +807,7 @@ void util_fskip_lines(FILE *stream, int lines) {
+     int line_nr = 0;
+     do {
+         bool at_eof = false;
+-        char c;
++        int c;
+         do {
+             c = fgetc(stream);
+             if (c == EOF)
+--
+2.47.3
+

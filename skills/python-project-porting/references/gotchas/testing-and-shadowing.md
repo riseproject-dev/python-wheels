@@ -39,6 +39,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
   exit; `sys._base_executable` helpers escape the test venv.
 - **612** — A same-run `importlib.metadata` check can shadow to a checkout's leftover
   `egg-info` instead of the installed wheel, not just `import <pkg>` (extends gotcha 25).
+- **667** — A src-layout project's pytest `pythonpath = ["src"]` ini option shadows the
+  wheel from `{project}/tests` even though the package is not at the checkout root.
+- **680** — `--doctest-modules --pyargs <pkg>` can crash at collection on a cffi project's own
+  build helper, even though the package's real doctests are fine.
 
 ---
 
@@ -691,7 +695,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       into `{project}` for cibuildwheel to carry into the container (gotcha 7) therefore finds
       `{project}/<pkg>.egg-info`, the in-tree build's leftover, even though cibuildwheel's
       test cwd is a fresh temp dir (the sqlcipher3 case). `cd` doesn't help there. Run it as
-      `python -P {project}/<script>.py` (3.11+, which the default matrix always is): `-P`
+      `python -P {project}/<script>.py` (3.11+; with cp39/cp310 in the matrix use `python -I`): `-P`
       skips that `sys.path[0]` entry, and the script itself still runs.
 
 618. **`--import-mode=importlib` does not immunize a package-nested test suite against
@@ -744,3 +748,50 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       take effect for that file — e.g. a leftover `--ignore=` still pointed at the old path,
       skipping rather than fixing it. The fix must make every collected file resolve
       `<pkg>` to site-packages, not just quiet the ones an `--ignore=` glob already hid.
+
+667. **A src-layout project is not immune to gotcha 25: a pytest ini `pythonpath = ["src"]`
+    puts the checkout's source package ahead of the installed wheel (the munkres case; see
+    `build-munkres.yml`).** Gotchas 25/174/218 all key off a `<pkg>/` directory at the
+    checkout *root*; a `src/` layout looks safe by construction because neither rootdir
+    insertion nor `python -m`'s `''` reaches `src/`. But pytest's own `pythonpath` ini key
+    (pytest >= 7, in `[tool.pytest.ini_options]`) inserts each listed directory, resolved
+    against the rootdir, at the front of `sys.path` before collection. munkres 3.0.0 sets
+    `pythonpath = ["src"]` for its dev loop, and upstream's own cibuildwheel test-command
+    `python -m pytest {project}/tests/v3` therefore imports `src/munkres/` — pure Python,
+    because the optional `_lapc` C kernel is only built into the wheel, never in place. The
+    188-test suite passes either way, so the whole compiled kernel goes untested; only the
+    separate `python -c "...; assert _native.available()"` probe (run from cibuildwheel's
+    empty `test_cwd`) sees the wheel.
+    - **The tell is one grep**: `grep -n pythonpath pyproject.toml pytest.ini setup.cfg
+      tox.ini` in the upstream tree. Any entry naming the directory that holds the package
+      makes `{project}/tests` a shadowed run.
+    - **Fix with gotcha 25's staging, unchanged**: `CIBW_TEST_SOURCES: tests pyproject.toml`
+      and a relative `python -m pytest tests/...`. Staging `pyproject.toml` keeps the rest
+      of the ini (`markers`, `--strict-markers`, `xfail_strict`); its `pythonpath = ["src"]`
+      then points at a directory that does not exist in `test_cwd` and is harmless.
+    - **Prove it on any host in a minute**: install a locally built wheel into a venv, drop a
+      one-line test that prints `<pkg>.__file__`, and run it once from the checkout (shows
+      `.../src/<pkg>/__init__.py`) and once from a dir holding only `tests/` +
+      `pyproject.toml` (shows site-packages).
+
+680. **`--doctest-modules --pyargs <pkg>` can crash at collection on a cffi project's own
+    build helper, even though the package's real doctests are fine (the imagequant case).**
+    A `cffi_modules` project's `*_build.py` script (e.g. `libimagequant_build.py`, which calls
+    `ffibuilder.set_source()`/`ffibuilder.cdef()`) ships inside the installed package alongside
+    `__init__.py` — `setup.py` never excludes it, and `--pyargs <pkg>` collects every `.py`
+    file under the resolved package, not just the one with doctests. The script's own
+    top-level `ffibuilder.cdef(open("<pkg>/<header>.h").read())` call then raises
+    `FileNotFoundError`: the header it reads is build-time-only (consumed by `set_source()`
+    into the compiled extension) and is not itself shipped in the wheel, only alongside the
+    helper in the checkout. Upstream's own test session (`pytest --doctest-modules <pkg>`,
+    run from a nox/tox session) never hits this, because it collects from the **source
+    checkout**, where the header sits right next to the helper — a cibuildwheel test step
+    collects the **installed wheel** instead, a different layout upstream's own CI never
+    exercises.
+    - **Fix by not collecting the whole package** — target the real module file directly,
+      resolved off the *installed* location rather than the checkout, so the build helper
+      never enters collection:
+      `pytest --doctest-modules "$(python -c "import <pkg>, os; print(os.path.join(os.path.dirname(<pkg>.__file__), '__init__.py'))")"`.
+    - **The tell**: a collection-time `FileNotFoundError` naming a `.h`/build-script path
+      under the package's own `site-packages` directory, with the doctests you actually
+      wrote never getting a chance to run.

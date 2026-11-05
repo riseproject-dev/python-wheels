@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 16 Oct 2026 00:00:00 +0200
+Subject: [PATCH] Fix signedness of vector_of_kll_sketches.serialize's isk
+ default argument
+
+Every other vector_of_kll_sketches method that accepts the "isk"
+selector (get_quantiles, get_ranks, get_pmf, get_cdf, collapse) binds
+it as py::array_t<int>& with default py::arg("isk")=-1, where -1
+means "all sketches" (see get_indices()). serialize() alone binds the
+same -1-sentinel "isk" as py::array_t<uint32_t>&, an unsigned type
+that cannot represent -1. pybind11 materializes a bound method's
+Python-side default by converting the C++ default expression through
+the parameter's own type caster, and converting the Python int -1 to
+an unsigned array_t default is rejected, so the test suite's
+unparameterized `kll.serialize()` call fails at the Python/C++
+boundary before entering the function body:
+
+  TypeError: serialize(): incompatible function arguments. The
+  following argument types are supported:
+    1. (self: ..., isk: ... numpy.uint32 = -1) -> list
+
+Reproduces on cp39/cp310/cp311/cp312 alike and is unrelated to
+riscv64; the test only now surfaces it in this fork because it is the
+first time this code path is wheel-tested rather than just built, per
+CLAUDE.md's "test as much real functionality as possible" guidance.
+Fix: match the signed py::array_t<int>& used by every sibling method.
+
+Upstream-Status: Inappropriate [this fork has no upstream issue tracker of its own for python/ bindings bugs]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ python/src/vector_of_kll.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/python/src/vector_of_kll.cpp b/python/src/vector_of_kll.cpp
+index 0000000..0000000 100644
+--- a/python/src/vector_of_kll.cpp
++++ b/python/src/vector_of_kll.cpp
+@@ -76,7 +76,7 @@ class vector_of_kll_sketches {
+     std::string to_string(bool print_levels = false, bool print_items = false) const;
+
+     // binary output/input
+-    py::list serialize(py::array_t<uint32_t>& isk);
++    py::list serialize(py::array_t<int>& isk);
+     // note: deserialize() replaces the sketch at the specified
+     //       index. Not a static method.
+     void deserialize(const py::bytes& sk_bytes, uint32_t idx);
+@@ -409,7 +409,7 @@ py::array vector_of_kll_sketches<T,C,S>::get_cdf(const py::array_t<T>& split_p
+ }
+
+ template<typename T, typename C, typename S>
+-py::list vector_of_kll_sketches<T,C,S>::serialize(py::array_t<uint32_t>& isk) {
++py::list vector_of_kll_sketches<T,C,S>::serialize(py::array_t<int>& isk) {
+   std::vector<uint32_t> inds = get_indices(isk);
+   const size_t num_sketches = inds.size();
+
+--
+2.50.1
