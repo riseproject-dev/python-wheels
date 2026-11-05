@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# This mirrors cyclonedds-python's own pyproject.toml [tool.cibuildwheel] recipe (clone
+# eclipse-cyclonedds/cyclonedds, cmake configure/build/install with
+# ENABLE_SSL=off/ENABLE_SECURITY=off/BUILD_DDSPERF=off, STANDALONE_WHEELS=1, auditwheel
+# repair) driven ourselves since cibuildwheel has no riscv64 target. The C library is
+# pinned to the tag matching matrix.version instead of upstream's floating master, since
+# cyclonedds and cyclonedds-python are released in lockstep under the same version number.
+name: Build cyclonedds wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cyclonedds.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cyclonedds.yml'
+      - 'docs/packages/cyclonedds.yaml'
+      - 'patches/cyclonedds/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cyclonedds.yml'
+      - 'docs/packages/cyclonedds.yaml'
+      - 'patches/cyclonedds/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cyclonedds
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cyclonedds ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      CYCLONEDDS_VERSION: ${{ matrix.version }}
+      PYTHON_TAGS: cp310 cp311 cp312 cp313
+
+    steps:
+      - name: Checkout cyclonedds-python v${{ env.CYCLONEDDS_VERSION }}
+        run: |
+          set -eux
+          git clone --depth 1 --branch "${CYCLONEDDS_VERSION}" \
+            https://github.com/eclipse-cyclonedds/cyclonedds-python.git cyclonedds-python
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # gotcha 38: run_ddsls_watchmode's fixed `--runtime` budget leaves no slack on this
+      # repo's riscv64 runner for DDS discovery/dispose/qos-change propagation to land
+      # before the watcher subprocess's own deadline and final snapshot write.
+      # gotcha 708: raising that `--runtime` budget alone isn't enough - run_ddsls()'s own
+      # process.communicate() kill-timeout defaults to a fixed 10s unrelated to `--runtime`,
+      # so the harness itself needs a matching headroom bump too.
+      - name: Patch cyclonedds-python source
+        working-directory: cyclonedds-python
+        run: git apply ../python-wheels/patches/cyclonedds/${{ env.CYCLONEDDS_VERSION }}/*.patch
+
+      - name: Install dependencies with dnf
+        run: dnf install -y --setopt=install_weak_deps=False ninja-build
+
+      - name: Build cyclonedds C library ${{ env.CYCLONEDDS_VERSION }}
+        working-directory: cyclonedds-python
+        run: |
+          set -eux
+          git clone --depth 1 --branch "${CYCLONEDDS_VERSION}" \
+            https://github.com/eclipse-cyclonedds/cyclonedds.git main
+          cmake -S main -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_PREFIX="$(pwd)/cyclonedds-build" \
+            -DBUILD_DDSPERF=off -DENABLE_SSL=off -DENABLE_SECURITY=off
+          cmake --build build --target install --parallel "$(nproc)"
+          mkdir -p /tmp/licenses
+          cp main/LICENSE /tmp/licenses/LICENSE.cyclonedds-c
+
+      - name: Build and test wheels
+        working-directory: cyclonedds-python
+        env:
+          STANDALONE_WHEELS: '1'
+        run: |
+          set -eux
+          export LD_LIBRARY_PATH="$(pwd)/cyclonedds-build/lib:$(pwd)/cyclonedds-build/lib64"
+          mkdir -p /tmp/wheelhouse
+          for tag in $PYTHON_TAGS; do
+            py="/opt/python/${tag}-${tag}/bin/python"
+            "$py" -m pip install -U pip build
+            rm -rf dist build/bdist.linux-riscv64 "cyclonedds.egg-info"
+            "$py" -m build --wheel
+            auditwheel repair --strip -w /tmp/wheelhouse dist/cyclonedds-*.whl
+
+            "$py" -m venv "/tmp/venv-${tag}"
+            . "/tmp/venv-${tag}/bin/activate"
+            pip install -U pip
+            # gotcha 210: the [dev] extra's twine->keyring->SecretStorage chain pulls in
+            # cryptography, and pip's resolver picks the newest version across both indexes
+            # even when only an older one has a riscv64 wheel for this interpreter.
+            PIP_ONLY_BINARY=cryptography pip install "$(ls /tmp/wheelhouse/cyclonedds-*-${tag}-*.whl)[dev]"
+            (cd / && python -c "import cyclonedds; from cyclonedds.domain import DomainParticipant; DomainParticipant()")
+            pytest tests || pytest tests --lf
+            deactivate
+          done
+          ls -la /tmp/wheelhouse
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cyclonedds-${{ env.CYCLONEDDS_VERSION }}-manylinux_riscv64
+          path: /tmp/wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cyclonedds ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cyclonedds-${{ matrix.version }}-manylinux_riscv64

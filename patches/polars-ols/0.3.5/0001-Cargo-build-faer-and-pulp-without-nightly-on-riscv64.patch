@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Cargo: build faer and pulp without "nightly" on riscv64
+
+Every non-ARM target enables pulp's and faer's "nightly" features.
+faer's "nightly" turns on faer-entity/gemm/gemm-common "nightly", which
+all end up enabling pulp/nightly. On riscv64, pulp 0.18.22 then does
+
+    #[cfg(all(feature = "nightly", target_arch = "riscv64"))]
+    pub use core::arch::riscv64::*;
+
+without adding #![feature(riscv_ext_intrinsics)], so the crate fails
+to compile on the nightly toolchain:
+
+    error[E0658]: use of unstable library feature 'riscv_ext_intrinsics'
+      --> pulp-0.18.22/src/core_arch/mod.rs:24:13
+
+pulp has no riscv64 SIMD paths for "nightly" to switch on (its
+re-export is never used on riscv64), so on riscv64 build faer and pulp
+without "nightly", as Cargo.toml already does for ARM. faer keeps the
+same "std", "rayon", "serde", "rand", "npy" features. The dependency
+graph is unchanged, so Cargo.lock still resolves with --locked; on
+x86_64 the feature set is identical to before.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against azmyrajab/polars_ols]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ Cargo.toml | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -40,7 +40,12 @@ ndarray-linalg = {version = "*"}
+ faer = { version = "*" }  # don't allow nightly for ARM due to issues with NEON support
+ faer-ext = { version = "*", features = ["ndarray"] }
+
+-[target.'cfg(not(target_arch = "arm"))'.dependencies]
++[target.'cfg(target_arch = "riscv64")'.dependencies]
++pulp = { version = "0.18.22" }  # pulp's "nightly" re-exports core::arch::riscv64 without enabling riscv_ext_intrinsics
++faer = { version = "*", features = ["std", "rayon", "serde", "rand", "npy"] }
++faer-ext = { version = "*", features = ["ndarray"] }
++
++[target.'cfg(not(any(target_arch = "arm", target_arch = "riscv64")))'.dependencies]
+ pulp = { version = "0.18.22", features = ["nightly"] }
+ faer = { version = "*", features = ["std", "rayon", "serde", "rand", "npy", "nightly"] }
+ faer-ext = { version = "*", features = ["ndarray"] }
+--
+2.43.0

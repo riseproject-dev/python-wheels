@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] setup.py: force platlib placement for auditwheel
+
+custom_bdist_wheel.finalize_options sets root_is_pure = False to get a
+platform-specific wheel tag, but setup.py declares no ext_modules, so
+distutils' install_lib command still treats the build as pure and
+installs every file (including librnnoise.so) under the wheel's
+purelib data category. auditwheel's manylinux/musllinux repair step
+refuses to process a shared library placed there: "Invalid binary
+wheel, found the following shared library/libraries in purelib
+folder: librnnoise.so. The wheel has to be platlib compliant in order
+to be repaired by auditwheel."
+
+Overriding has_ext_modules() to True makes install_lib install the
+whole package to platlib instead, which lands it at the wheel root
+with no .data split and lets auditwheel repair the wheel normally.
+
+Upstream-Status: Inappropriate [upstream's own release.yml never runs auditwheel on any platform, so this only matters for a build pipeline like this one's]
+---
+ setup.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/setup.py b/setup.py
+index a6fba1b..ca22400 100644
+--- a/setup.py
++++ b/setup.py
+@@ -23,6 +23,7 @@ class custom_bdist_wheel(bdist_wheel):
+     def finalize_options(self):
+         bdist_wheel.finalize_options(self)
+         self.root_is_pure = False
++        self.distribution.has_ext_modules = lambda: True
+
+     def get_tag(self):
+         python, abi, plat = bdist_wheel.get_tag(self)
+--
+2.43.0

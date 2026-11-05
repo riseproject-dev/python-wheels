@@ -20,6 +20,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
+- **668** — A per-release "binding revision" digit appended to upstream's own version can
+  have no git-tag counterpart at all, several PyPI versions sharing one tag.
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
@@ -43,6 +45,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
   without resolving their LFS objects first.
 - **546** — A project can ship its C++ dependency-manager cache inside the sdist, making the
   from-sdist build hermetic where a from-checkout build is not.
+- **683** — `CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file into `{project}` dirties
+  a `setuptools-git-versioning` checkout via untracked files alone.
+- **687** — When the Python version is the literal count of commits on master, bisect
+  `git rev-list --count` on a blobless clone instead of gotcha 103/213's timestamp or
+  diff heuristics — the formula gives an exact answer.
+- **700** — In a multi-package monorepo, a release-please-style bot can stamp the real
+  published version into a *different* language binding's own manifest, leaving a Rust
+  workspace member's `Cargo.toml` on an unrelated, already-bumped value at the exact tag.
 
 ---
 
@@ -563,6 +573,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       `setuptools_scm`; the fix differs only because `versioneer` offers no pretend-version
       variable to short-circuit its own git calls the way `setuptools_scm` does.
 
+683. **`CIBW_BEFORE_ALL_LINUX` staging a vendored LICENSE file straight into `{project}`
+    dirties a `setuptools-git-versioning` checkout even though nothing is `git apply`'d or
+    committed (the pymp3 case).** Gotchas 31 and 315 are both about a *patch* dirtying a
+    tracked file; this is a third, lighter way to poison the version, and it needs no patch
+    at all. pymp3's `CIBW_BEFORE_ALL_LINUX` `cp`s `libmad`'s and `lame`'s vendored `COPYING`
+    files to `{project}/LICENSE.libmad` and `{project}/LICENSE.lame` so setuptools' default
+    license glob picks them up (gotcha 44) — new, untracked files, never `git add`ed. The
+    build still succeeds and the wheel still carries both licenses, but the version embedded
+    in its metadata comes out as `0.2.0.post0+git.<sha>.dirty` instead of the tagged `0.2.0`,
+    breaking gotcha 18's three-way match (`update_doc.py` then refuses to publish: "version
+    ... is not declared in the package YAML"). The reason gotchas 31/315's usual read of
+    "dirty" doesn't apply: pymp3 uses `setuptools-git-versioning`, not `setuptools_scm` or
+    `versioneer`, and its `is_dirty()` runs `git status --short` — which, unlike
+    `git describe --dirty`, reports untracked files (`??`) as dirty too, not just modified
+    tracked ones. Also unlike `setuptools_scm`, `setuptools-git-versioning` has no
+    `SETUPTOOLS_SCM_PRETEND_VERSION`-style environment escape hatch at all (confirmed by
+    reading its source: the only `os.environ` read is template `{env:VAR}` substitution, not
+    a version override).
+    - **Fix is cheaper than either 31 or 315: make the new files invisible to
+      `git status`, not patched-around.** Append their names to `{project}/.git/info/exclude`
+      *before* copying them in:
+      ```yaml
+      CIBW_BEFORE_ALL_LINUX: >-
+        ... &&
+        printf '%s\n' LICENSE.libmad LICENSE.lame >> {project}/.git/info/exclude &&
+        cp /tmp/libmad/COPYING {project}/LICENSE.libmad &&
+        cp /tmp/lame/COPYING {project}/LICENSE.lame
+      ```
+      `.git/info/exclude` is the repo-local, untracked-by-git twin of `.gitignore` — it
+      changes nothing Python/setuptools ever reads (the files still land on disk and still
+      glob into the wheel), it only changes what `git status --short`/`git diff` report, so
+      `is_dirty()` goes back to `False` and the tag's own version (`0.2.0`) comes through
+      clean. Verified standalone: a throwaway repo tagged and then given one untracked file
+      reports `is_dirty() == True`; adding that filename to `.git/info/exclude` flips it to
+      `False` with the file's content completely untouched.
+    - **Costs nothing to catch**: a local `pip wheel .` after the `CIBW_BEFORE_ALL_LINUX`
+      equivalent prints the wheel filename, so a stray `.postN+git....dirty` is visible
+      before it ever reaches CI (same local-validation habit as gotcha 31).
+    - **Generalizes beyond LICENSE staging**: anything a `CIBW_BEFORE_ALL*` step writes
+      into `{project}` — a generated header, a staged vendor tree, a stamped version file —
+      dirties a `setuptools-git-versioning` (or any `git status`-based) checkout the same
+      way, even when nothing is ever `git add`ed or committed.
+
 319. **A release tag can exist, be reachable, and check out cleanly, yet still be the
     wrong commit — because it is not even an ancestor of the default branch (the
     memory-allocator case).** Gotcha 103 covers upstream shipping no tag at all; this is
@@ -751,3 +804,87 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
        drives a step that re-fetches and re-verifies each pointer file's content by its own
        embedded `oid` before overwriting it, and is a no-op (skipped entirely) for every other
        version, whose manifest file doesn't exist.
+
+668. **A per-release "binding revision" digit appended to upstream's own version can have no
+    git-tag counterpart at all, several PyPI versions sharing one tag (the ufal.udpipe
+    case).** ufal.udpipe's PyPI releases are `<UDPipe-version>.<binding-rev>` — `1.2.0.1`,
+    `1.2.0.2` and `1.2.0.3` are all built from the single git tag `v1.2.0`;
+    `releases/pypi/Changes` is the only place that records which binding revision maps to
+    which UDPipe release. Gotcha 3 covers a tag and version that differ by a fixed
+    transform; this is looser still — strip the trailing `.<N>` segment to get the tag
+    (`sed -E 's/\.[0-9]+$//'`), never assume a `<pkg>-<ver>` tag exists for the full PyPI
+    version string. Gotcha 135's version-placeholder shape applies here too: the checked-out
+    `setup.py` carries a literal empty `version = ''`, stamped by upstream's own
+    `releases/pypi/gen.sh <version>` (a `sed` substitution, repeated for the SWIG-generated
+    `__init__.py`'s `# __version__ =` comment) — replaying that exact substitution in the
+    workflow, rather than inventing a different versioning scheme, is the smaller
+    divergence.
+    - **This project has no public GitHub Actions at all** (gotcha 391's shape taken one
+      step further): UDPipe's real release infra (`releases/release-udpipe.sh`) shells out
+      to a private institutional cross-compile farm (`/net/projects/cpp_builtem/compilers`,
+      including a remote macOS leg over ssh), invisible from the public repo. The only
+      public recipe is `releases/pypi/gen.sh` itself — read and replay that script's steps
+      directly (amalgamate sources, run SWIG, stamp the version, `setup.py sdist`) instead of
+      inventing an unrelated build.
+    - **A project's own internal build-system bootstrap can gate an unrelated codegen step
+      to x86/i386 even when the actual extension is fully portable.** UDPipe's
+      `src/Makefile.builtem` (transitively `include`d by both the sdist-generation Makefiles)
+      runs `$(error Architecture ... is currently not supported on platform ...)` at parse
+      time for any `uname -m` other than `x86_64`/`i386`/`i686` on the `linux-gcc` platform,
+      and separately hardcodes `-msse -msse2 -mfpmath=sse` unconditionally for that platform
+      — gating the tiny `merge_sources` helper tool and the SWIG invocation, neither of which
+      the actual compiled extension depends on (that part uses `setup.py`'s own
+      `-std=c++11`-only flags). Building the sdist on `ubuntu-latest` instead of the riscv64
+      runner (gotcha 4) sidesteps this gate entirely rather than needing to patch it.
+
+687. **When upstream ties the Python version to the literal count of commits on master, not
+    a human-maintained version string, find the release commit by bisecting `git rev-list
+    --count`, not gotcha 103's timestamp proximity or gotcha 213's version-bump diff (the
+    packingsolver case).** packingsolver's own `.github/workflows/python.yml` computes
+    `version = <base>.<N>` where `<base>` comes from `python/packingsolver/_version.py` and
+    `<N> = git rev-list --count HEAD`, run on every commit of master — every commit is its
+    own release. Neither existing technique fits: gotcha 213's diff has nothing to match
+    (the checked-out tree's `_version.py` never contains the literal string "0.1.1273" —
+    only the release workflow writes that, after checkout, right before building), and
+    gotcha 103's timestamp proximity is unnecessary precision-guessing when the exact answer
+    is a formula. The fix is cheap and exact: `git clone --bare --filter=blob:none
+    <url>` (a few MB even when the repo's own test fixtures make a full checkout
+    multi-gigabyte — packingsolver's `data/` directory alone exhausted a shared sandbox's
+    disk on a naive full clone), then `git rev-list --count master~<i>` for increasing `<i>`
+    until the count matches the target version's last component (`master~2` = 1273 for
+    version `0.1.1273`, two commits behind the tip at triage time). Still finish with gotcha
+    103's proof step — diffed the candidate commit's `CMakeLists.txt`/`extern/CMakeLists.txt`/
+    `python/CMakeLists.txt`/`pyproject.toml` against the real PyPI sdist, byte-identical
+    except `_version.py` itself. Recognize the shape before reaching for either other
+    gotcha: grep the release workflow for `rev-list --count` (or an equivalent `git log
+    --oneline | wc -l`) before assuming a missing tag means "guess from the timestamp."
+
+700. **In a multi-package monorepo, a release-please-style bot can stamp the real published
+    version into a *different* language binding's own manifest, leaving a Rust workspace
+    member's `Cargo.toml` on an unrelated, already-bumped value at the exact tag (the
+    formatjs/formatjs `icu_messageformat` case; see `build-icu-messageformat.yml`).**
+    formatjs/formatjs builds this Python binding with Bazel, whose `formatjs_python_wheel`
+    macro call in `python/icu_messageformat/BUILD.bazel` takes an explicit `version = "0.1.1"
+    # x-release-please-version` argument — that comment marks the field release-please
+    rewrites on each release, and it is what actually lands on PyPI as `icu_messageformat
+    0.1.1`. At the exact `icu_messageformat@0.1.1` tag, the bound crate's own
+    `crates/icu_messageformat_python/Cargo.toml` reads `version = "0.1.2"`: one release ahead,
+    because release-please bumps each of this monorepo's many release-please-tracked
+    manifests (one per crate, one per Python/npm binding) independently, on its own
+    publish-detecting schedule, not in lockstep. A workflow that trusts `dynamic =
+    ["version"]` sourced from that `Cargo.toml` — the default, reasonable-looking choice for
+    a maturin build with no real upstream `pyproject.toml` to copy from (gotcha 312) — ships
+    `icu_messageformat-0.1.2-...`, silently wrong and off by one release, with no build
+    failure to catch it.
+    - **The wheel macro's own version argument is the ground truth, not the crate's
+      manifest.** Before wiring a dynamic/inferred version for any Bazel- or
+      release-please-managed monorepo binding, grep the actual packaging target (a
+      `py_wheel`/`formatjs_python_wheel`/analogous macro call, or a sibling `package.json`)
+      for a literal version string or a `release-please` marker comment, and diff it against
+      the dependency crate's own `[package] version` at the same tag — a mismatch here means
+      hardcode the macro's value (interpolated from the build matrix, per gotcha 18's
+      three-way match) instead of trusting `dynamic = ["version"]`.
+    - **Distinct from gotcha 668.** That gotcha is about a PyPI version with no git-tag
+      counterpart at all (an extra digit PyPI carries that the tag never does); this one is
+      about a *tagged* release whose own dependency's manifest still disagrees with the tag,
+      because the monorepo's version-bumping bot tracks each binding's manifest separately.
