@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/adrian-lorenz/leakguard/blob/v1.0.4/.github/workflows/release.yml
+name: Build leakguard wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/leakguard.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-leakguard.yml'
+      - 'docs/packages/leakguard.yaml'
+      - 'patches/leakguard/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-leakguard.yml'
+      - 'docs/packages/leakguard.yaml'
+      - 'patches/leakguard/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: leakguard
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build leakguard ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      LEAKGUARD_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout leakguard v${{ env.LEAKGUARD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: adrian-lorenz/leakguard
+          ref: v${{ env.LEAKGUARD_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/leakguard
+          persist-credentials: false
+
+      - name: Patch leakguard source
+        run: |
+          git apply -v python-wheels/patches/leakguard/${{ env.LEAKGUARD_VERSION }}/*.patch
+          rm -rf python-wheels
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # Cargo.toml's extension-module feature enables pyo3's abi3-py38,
+          # so one wheel covers every interpreter; it is built on cp312 and
+          # re-tested on the newer ones via find_compatible_wheel, same as
+          # the other simple maturin/abi3 ports in this repo (datefinder,
+          # clvm-tools-rs, dbt-extractor). cp314t is dropped: an abi3 wheel
+          # is not free-threading-compatible and upstream publishes no
+          # cp3XXt wheel. musllinux is dropped: rustup.rs ships no riscv64
+          # musl toolchain.
+          CIBW_BUILD: >-
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # leakguard ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # Upstream ships no Python test suite with the source (confirmed
+          # against the real v1.0.4 tag); this exercises the compiled PyO3
+          # extension's documented Python API (README.md) and CLI entry
+          # point, and asserts the LICENSE patch landed in dist-info.
+          CIBW_TEST_COMMAND: >-
+            python -c "import leakguard; assert leakguard.leakguard.__file__.endswith('.abi3.so'), leakguard.leakguard.__file__; from importlib import metadata; licences = {p.name for p in metadata.files('leakguard') if '.dist-info/licenses/' in str(p)}; assert licences == {'LICENSE'}, licences; findings = leakguard.scan_text('AKIAIOSFODNN7EXAMPLE'); assert findings and findings[0].rule_id == 'aws-access-key', findings" &&
+            leakguard --help
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: leakguard-${{ env.LEAKGUARD_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish leakguard ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: leakguard-${{ matrix.version }}-*-manylinux_riscv64

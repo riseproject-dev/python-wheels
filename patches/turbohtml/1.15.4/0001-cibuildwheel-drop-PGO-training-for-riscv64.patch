@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 17:50:04 +0000
+Subject: [PATCH] cibuildwheel: drop PGO training for riscv64
+
+pylock.pgo.toml's `environments` only cover the linux x86_64/aarch64, darwin
+arm64 and win32 AMD64/ARM64 markers cibuildwheel's own hosted runners build
+on. riscv64 (sys_platform == "linux" and platform_machine == "riscv64")
+matches none of them, so the linux.before-build hook's
+`uv pip install --require-hashes --requirements pylock.pgo.toml` fails outright
+with a no-compatible-environment error before the PGO training run ever
+starts, on any interpreter.
+
+Add a riscv64 override next to the existing PyPy one that drops before-build
+and the -Db_pgo=use config-setting (keeping LTO and the release strip), the
+same way the PyPy override already drops PGO for a different reason. This is
+riscv64-build-infra-specific (pylock.pgo.toml's own environments list is a
+project choice, not a bug), so it is not expected to be picked up upstream
+unless/until riscv64 wheels become something upstream's own CI builds.
+
+Upstream-Status: Inappropriate [riscv64 is absent from pylock.pgo.toml's own environments list, which is a project choice for its own CI matrix, not a bug]
+---
+ pyproject.toml | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index a9198b9..6d6a223 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -293,6 +293,16 @@ select = "pp*-manylinux*"
+ config-settings.setup-args = [ "-Dbuildtype=release", "-Db_lto=true", "-Dstrip=true" ]
+ before-build = ""
+ 
++# pylock.pgo.toml's `environments` only cover the linux x86_64/aarch64, darwin arm64 and win32
++# AMD64/ARM64 markers cibuildwheel's own hosted runners build on; riscv64 matches none of them,
++# so `uv pip install --require-hashes --requirements pylock.pgo.toml` refuses the install outright
++# ("no environment ... is compatible") before the training run ever starts. Drop PGO (and its
++# build directory) for riscv64 the same way the override above drops it for PyPy, and keep LTO.
++[[tool.cibuildwheel.overrides]]
++select = "*-manylinux_riscv64 *-musllinux_riscv64"
++config-settings.setup-args = [ "-Dbuildtype=release", "-Db_lto=true", "-Dstrip=true" ]
++before-build = ""
++
+ [tool.ruff]
+ line-length = 120
+ extend-exclude = [

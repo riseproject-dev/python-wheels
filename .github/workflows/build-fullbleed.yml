@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/fullbleed-engine/fullbleed-official/blob/v2.5.51/.github/workflows/release.yml
+# and tools/build_linux_wheel_container.sh from the same tree.
+name: Build fullbleed wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fullbleed.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fullbleed.yml'
+      - 'docs/packages/fullbleed.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fullbleed.yml'
+      - 'docs/packages/fullbleed.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fullbleed
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fullbleed ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      FULLBLEED_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fullbleed v${{ env.FULLBLEED_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: fullbleed-engine/fullbleed-official
+          ref: v${{ env.FULLBLEED_VERSION }}
+          persist-credentials: false
+
+      - name: Build manylinux riscv64 wheel
+        shell: bash
+        run: |
+          podman run --rm \
+            --network=host \
+            -v "$(pwd):/io" \
+            --workdir /io \
+            --pull=newer \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            sh -c '
+              set -eu
+              export CARGO_HOME=/tmp/fullbleed-cargo-home
+              export RUSTUP_HOME=/tmp/fullbleed-rustup-home
+              curl --proto "=https" --tlsv1.2 --silent --show-error --fail \
+                https://sh.rustup.rs -o /tmp/rustup-init.sh
+              sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+              export PATH="$CARGO_HOME/bin:$PATH"
+              rustup target add riscv64gc-unknown-linux-gnu
+              # The build backend only knows manylinux2014 (x86_64/aarch64/i686/armv7/
+              # s390x/ppc64le) for --compatibility; riscv64 is not in its arch table.
+              # --plat-name bypasses that table entirely and needs no source patch.
+              /opt/python/cp310-cp310/bin/python build_backend/fullbleed_build_backend.py wheel \
+                --out dist \
+                --target riscv64gc-unknown-linux-gnu \
+                --compatibility off \
+                --plat-name manylinux_2_39_riscv64
+            '
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        run: |
+          uv pip install dist/*.whl
+          python tools/smoke_installed_package.py --expected-version "${FULLBLEED_VERSION}" --json
+          python -m fullbleed --version
+          python -m fullbleed doctor --strict --json
+          python -m fullbleed compliance --strict --json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fullbleed-${{ env.FULLBLEED_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fullbleed ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fullbleed-${{ matrix.version }}-*-manylinux_riscv64
