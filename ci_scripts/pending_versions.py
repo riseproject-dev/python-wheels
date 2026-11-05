@@ -19,7 +19,7 @@ YAML already declares are left out, so a pull request only builds the versions
 it adds.  An empty or missing base file means every version is new.
 
 With --python-matrix, print instead a matrix `include:` list of
-{"version", "python"} pairs, where each version gets the interpreters of its
+{"version", "python", "python-version"} entries, where each version gets the interpreters of its
 `python-versions` (the ones upstream builds for, recorded by
 check_versions.py) that riscv64 can build, minus --python-exclude.
 """
@@ -67,7 +67,12 @@ def load_versions(package):
             raise SystemExit(
                 f"{path}: version {version} has one of tag/files but not both"
             )
-        pythons = entry.get("python-versions", [])
+        if "python-versions" not in entry:
+            raise SystemExit(
+                f"{path}: version {version} has no python-versions; run "
+                f"`check_versions.py --python-versions {package}` or add it by hand"
+            )
+        pythons = entry["python-versions"]
         if not isinstance(pythons, list) or not all(
             isinstance(v, str) and re.fullmatch(r"3\.\d+t?", v) for v in pythons
         ):
@@ -112,21 +117,12 @@ def adjust(tags, exclude=()):
 def python_matrix(package, entries, selected, exclude=()):
     """
     Return the matrix entries of the selected versions, and a warning for each
-    version left out of it. Leaving a version out rather than failing keeps
-    workflows that don't use the matrix yet working; one that does use it gets
-    no build for that version, so its publish fails.
+    version whose interpreters cannot produce a riscv64 build.
     """
     matrix, warnings = [], []
     for entry in entries:
         version = str(entry["version"])
         if version not in selected:
-            continue
-        if "python-versions" not in entry:
-            warnings.append(
-                f"{package} {version} has no python-versions in docs/packages/{package}.yaml, "
-                f"so it is not in the matrix; run `check_versions.py --python-versions {package}` "
-                "or write it by hand"
-            )
             continue
         tags = {cp_tag(v) for v in entry["python-versions"]}
         tags = adjust([t for t in RISCV64_PYTHONS if t in tags], exclude)
@@ -135,7 +131,17 @@ def python_matrix(package, entries, selected, exclude=()):
                 f"{package} {version} is not in the matrix: none of "
                 f"{entry['python-versions']} can be built for riscv64, or all are excluded"
             )
-        matrix += [{"version": version, "python": tag} for tag in tags]
+        matrix += [
+            {
+                "version": version,
+                "python": tag,
+                "python-version": tag.removeprefix("cp").removesuffix("t")[0]
+                + "."
+                + tag.removeprefix("cp").removesuffix("t")[1:]
+                + ("t" if tag.endswith("t") else ""),
+            }
+            for tag in tags
+        ]
     return matrix, warnings
 
 
@@ -143,17 +149,17 @@ def _self_test():
     entries = [
         {"version": "1.0", "python-versions": ["3.8", "3.12", "3.13t", "3.14", "3.14t"]},
         {"version": "2.0", "python-versions": ["3.13"]},
-        {"version": "3.0"},
     ]
     # Upstream's list in RISCV64_PYTHONS order, minus what riscv64 can't build.
     assert python_matrix("pkg", entries, ["1.0"], ["cp314t"]) == ([
-        {"version": "1.0", "python": "cp312"},
-        {"version": "1.0", "python": "cp314"},
+        {"version": "1.0", "python": "cp312", "python-version": "3.12"},
+        {"version": "1.0", "python": "cp314", "python-version": "3.14"},
     ], [])
-    assert python_matrix("pkg", entries, ["2.0"]) == ([{"version": "2.0", "python": "cp313"}], [])
-    # Left out with a warning, never fatal: unconverted workflows ignore the matrix.
-    matrix, warnings = python_matrix("pkg", entries, ["2.0", "3.0"], ["cp31?"])
-    assert matrix == [] and len(warnings) == 2, warnings
+    assert python_matrix("pkg", entries, ["2.0"]) == ([
+        {"version": "2.0", "python": "cp313", "python-version": "3.13"}
+    ], [])
+    matrix, warnings = python_matrix("pkg", entries, ["2.0"], ["cp31?"])
+    assert matrix == [] and len(warnings) == 1, warnings
     print("[+] self-test passed")
 
 
@@ -177,7 +183,7 @@ def main():
     parser.add_argument(
         "--python-matrix",
         action="store_true",
-        help="print {version, python} matrix entries instead of versions",
+        help="print {version, python, python-version} matrix entries instead of versions",
     )
     parser.add_argument(
         "--python-exclude",
