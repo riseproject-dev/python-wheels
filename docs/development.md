@@ -119,8 +119,9 @@ versions:
 published on PyPI for that version:
 
 - a `cpXY-cpXY` or `cpXY-cpXYt` wheel adds `3.X` or `3.Xt` (free-threaded);
-- a `cpXY-abi3` wheel adds a single `3.X` build, which serves every later
-  CPython;
+- a `cpXY-abi3` wheel adds `3.X-abi3`, which records its ABI floor. The
+  matrix selects the oldest available non-free-threaded interpreter at or
+  above that floor to build the one wheel;
 - with no version-specific wheels at all (sdist-only or pure-Python
   releases), `requires_python` decides, and no free-threaded build is made.
 
@@ -132,13 +133,17 @@ uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_
 ```
 
 which adds `python-versions` to every entry of the YAML that lacks it. The
-field is required, and the packages YAML validation fails if it is missing.
-The values must be quoted: unquoted, YAML reads `3.10` as the number 3.1.
+field is required and non-empty, and the packages YAML validation fails if
+it is missing. The accepted forms are `3.X`, `3.Xt`, and `3.X-abi3`. Values
+must be quoted: unquoted, YAML reads `3.10` as the number 3.1.
 
 The `setup` job of every build workflow outputs a `matrix` with one entry
 per listed version that cibuildwheel can build for riscv64. Each entry has a
-cibuildwheel `python` tag such as `cp314t` and its `python-version` form such
-as `3.14t`, for jobs that install interpreters directly
+cibuildwheel build-interpreter `python` tag such as `cp314t`, its
+`python-version` form such as `3.14t`, and `wheel-tag`. An abi3 entry also has
+`abi3-floor`. For example, `3.8-abi3` with the default exclusions produces
+`python: cp312`, `python-version: 3.12`, `wheel-tag: cp38-abi3`, and
+`abi3-floor: 3.8`
 (`RISCV64_PYTHONS` in `ci_scripts/pending_versions.py`: currently 3.9 to 3.15
 and 3.14t/3.15t, but not 3.13t). That list is a technical limit, updated
 when cibuildwheel is bumped, not a policy choice.
