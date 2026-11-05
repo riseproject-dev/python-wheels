@@ -15,48 +15,45 @@ https://gitlab.com/riseproject/python/wheel_builder/-/blob/main/ci_scripts/check
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set
 from packaging import version
+from packaging.specifiers import SpecifierSet
 from pathlib import Path
 import requests
 import yaml
 
+from pending_versions import base_versions, RISCV64_PYTHONS
 from update_doc import normalize_name, version_blocks
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "docs" / "packages"
-PACKAGES_FILE = "ci_scripts/packages.txt"
-DEPRECATED_FILE = "ci_scripts/deprecated.txt"
+PATCHES_DIR = ROOT_DIR / "patches"
 REPO = "riseproject-dev/python-wheels"
 
-# Python versions (interpreter tags) a package must have upstream riscv64
-# wheels for before we deprecate our own build. "3.14t" is the free-threaded
+# Python versions riscv64 can build (cp314t -> "3.14t"); an upstream riscv64
+# wheel for any of them deprecates our own build. "3.14t" is the free-threaded
 # build — a distinct ABI from "3.14", so it needs its own wheel.
-TARGET_PYTHON_VERSIONS = ["3.12", "3.13", "3.14", "3.14t"]
+TARGET_PYTHON_VERSIONS = [f"3.{tag[3:]}" for tag in RISCV64_PYTHONS]
 
 
 def read_packages() -> List[str]:
-    """Read the list of packages from packages.txt."""
+    """Read active package names from docs/packages/<pkg>.yaml files."""
     packages = []
-    try:
-        with open(PACKAGES_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    packages.append(line)
-    except FileNotFoundError:
-        print(f"Error: {PACKAGES_FILE} not found")
-        sys.exit(1)
+    for yaml_file in sorted(DOCS_DIR.glob("*.yaml")):
+        package_data = yaml.safe_load(yaml_file.read_text()) or {}
+        if "deprecated" in package_data:
+            continue
+        packages.append(yaml_file.stem)
     return packages
 
 
 def package_yaml(package: str) -> Path:
-    # packages.txt keeps PyPI's spelling (PyYAML), the YAMLs use the normalized name.
     return DOCS_DIR / f"{normalize_name(package)}.yaml"
 
 
@@ -72,20 +69,15 @@ def declared_versions(package_data: Dict) -> Set[str]:
 
 
 def get_registry_latest_version(package_data: Dict) -> Optional[str]:
-    """
-    Latest version published to the riscv64 registry, read from the package
-    YAML. Entries without `files` are declared but not built yet.
-    """
-    released = []
+    """Latest version tracked in the package YAML, published or pending."""
+    tracked = []
     for entry in package_data.get("versions") or []:
-        if "files" not in entry:
-            continue
         raw = str(entry["version"])
         try:
-            released.append((version.parse(raw), raw))
+            tracked.append((version.parse(raw), raw))
         except version.InvalidVersion:
             continue
-    return max(released)[1] if released else None
+    return max(tracked)[1] if tracked else None
 
 
 def get_pypi_package_info(package: str, retries: int = 3) -> Optional[Dict]:
@@ -173,6 +165,44 @@ def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
     return has_wheels
 
 
+def upstream_python_versions(package_info: Dict, target_version: str) -> Optional[List[str]]:
+    """
+    The Python versions ("3.10", "3.14t") upstream builds target_version for,
+    from its wheels on PyPI, or None if PyPI doesn't have that version.
+
+    A cpXY-cpXY or cpXY-cpXYt wheel means that interpreter, and a cpXY-abi3
+    wheel a single cpXY build (it loads on every later CPython, gotcha 11).
+    Without any (sdist-only or pure wheels), requires_python decides over the
+    RISCV64_PYTHONS, leaving out free-threaded builds since nothing says
+    upstream supports them.
+    """
+    files = package_info.get("releases", {}).get(target_version)
+    if not files:
+        return None
+    built = set()
+    for f in files:
+        tags = _parse_wheel_tags(f.get("filename", ""))
+        if not tags:
+            continue
+        for py in tags[0].split("."):
+            if not re.fullmatch(r"cp3\d+", py):
+                continue
+            for abi in tags[1].split("."):
+                if abi in (py, py + "t"):
+                    built.add(abi)
+                elif abi.startswith("abi3"):
+                    built.add(py)
+    if not built:
+        spec = SpecifierSet(next((f["requires_python"] for f in files if f.get("requires_python")), ""))
+        built = {t for t in RISCV64_PYTHONS if not t.endswith("t") and spec.contains(f"3.{t[3:]}")}
+    return sorted((f"3.{t[3:]}" for t in built), key=lambda v: (int(v[2:].rstrip("t")), v.endswith("t")))
+
+
+def python_versions_line(pythons: List[str]) -> str:
+    """Quoted, so YAML can't read '3.10' as the float 3.1."""
+    return "  python-versions: [" + ", ".join(f"'{v}'" for v in pythons) + "]"
+
+
 def find_upstream_issue(package: str) -> Optional[str]:
     """
     Find issue for a package in the wheel_builder's Upstream milestone.
@@ -202,28 +232,15 @@ def find_upstream_issue(package: str) -> Optional[str]:
 
 def deprecate_package(package: str) -> bool:
     """
-    Deprecate our wheel in the working tree: prefix docs/packages/<pkg>.yaml
-    with `deprecated:`, drop the package from packages.txt and add it to
-    deprecated.txt. Returns False when it is already deprecated.
+    Deprecate our wheel in the working tree by prefixing
+    docs/packages/<pkg>.yaml with `deprecated:`. Returns False when it is
+    already deprecated.
     """
     yaml_file = package_yaml(package)
     content = yaml_file.read_text()
     if content.startswith("deprecated:"):
         return False
     yaml_file.write_text(f"deprecated:\n{content}")
-
-    packages_file = Path(PACKAGES_FILE)
-    lines = [line for line in packages_file.read_text().splitlines() if line.strip() != package]
-    packages_file.write_text("\n".join(lines) + "\n")
-
-    deprecated_file = Path(DEPRECATED_FILE)
-    lines = deprecated_file.read_text().splitlines()
-    i = next(i for i, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#"))
-    comments, deprecated_packages = lines[:i], lines[i:]
-    if package not in deprecated_packages:
-        deprecated_packages.append(package)
-        deprecated_packages.sort(key=str.lower)
-        deprecated_file.write_text("\n".join(comments + deprecated_packages) + "\n")
     return True
 
 
@@ -301,10 +318,11 @@ def get_versions_since(package_info: Dict, declared: Set[str], since: datetime) 
     return sorted(result, key=version.parse)
 
 
-def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
+def declare_versions(yaml_file: Path, new_versions: List[str], package_info: Dict) -> List[str]:
     """
-    Append a bare `- version:` entry for each version not yet listed in the
-    package YAML, and return the versions that were added.
+    Append a `- version:` entry, with the `python-versions` upstream builds it
+    for, for each version not yet listed in the package YAML, and return the
+    versions that were added.
 
     An entry without `tag`/`files` is what the build workflow builds, so this
     is all an upgrade PR has to change.
@@ -317,8 +335,91 @@ def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
     lines = [content.rstrip("\n")]
     for v in added:
         lines.append(yaml.safe_dump([{"version": v}], default_flow_style=False).rstrip("\n"))
+        pythons = upstream_python_versions(package_info, v)
+        if pythons is not None:
+            lines.append(python_versions_line(pythons))
     yaml_file.write_text("\n".join(lines) + "\n")
     return added
+
+
+def carry_over_patches(
+    package: str, new_versions: List[str], declared: Set[str], patches_dir: Path = PATCHES_DIR
+) -> List[str]:
+    """
+    Copy patches/<pkg>/<previous>/ to patches/<pkg>/<new>/ for each new version,
+    where <previous> is the version declared immediately before <new> (new
+    versions are handled in order, so each one follows the one before it).
+
+    Only that one preceding version is considered: if it has no patch
+    directory, the new version gets none either, since its patches may have
+    been upstreamed since. A local suffix of the previous directory
+    (`2.13.0+cpu`) is kept. Versions that already have a directory are left
+    alone. Returns the directories created, relative to `patches_dir`.
+    """
+    package_dir = next(
+        (d for d in sorted(patches_dir.glob("*")) if d.is_dir() and normalize_name(d.name) == normalize_name(package)),
+        None,
+    )
+    if package_dir is None:
+        return []
+
+    # Public version -> patch directory name.
+    dirs = {}
+    for d in package_dir.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            dirs[version.Version(d.name).public] = d.name
+        except version.InvalidVersion:
+            continue
+
+    known = sorted(set(declared) | set(new_versions), key=version.parse)
+    created = []
+    for new in sorted(new_versions, key=version.parse):
+        new_public = version.parse(new).public
+        index = known.index(new)
+        if index == 0 or new_public in dirs:
+            continue
+        source = dirs.get(version.parse(known[index - 1]).public)
+        if source is None:
+            continue
+        local = version.Version(source).local
+        target = package_dir / (f"{new}+{local}" if local else new)
+        shutil.copytree(package_dir / source, target)
+        dirs[new_public] = target.name
+        created.append(str(target.relative_to(patches_dir)))
+    return created
+
+
+def fill_python_versions(yaml_file: Path, package_info: Dict) -> List[str]:
+    """
+    Add or update `python-versions` for every entry whose version PyPI has,
+    preserving the rest of the file byte-for-byte, and return the versions
+    that changed.
+    """
+    lines = yaml_file.read_text().splitlines()
+    changed = []
+    # Bottom-up so earlier block ranges stay valid after inserts.
+    for start, end in reversed(list(version_blocks(lines))):
+        raw = str(yaml.safe_load("\n".join(lines[start:end]))[0].get("version"))
+        pythons = upstream_python_versions(package_info, raw)
+        if pythons is None:
+            continue
+        new_line = python_versions_line(pythons)
+        existing = next(
+            (i for i in range(start, end) if lines[i].startswith("  python-versions:")),
+            None,
+        )
+        if existing is None:
+            lines.insert(start + 1, new_line)
+        elif lines[existing] == new_line:
+            continue
+        else:
+            lines[existing] = new_line
+        changed.append(raw)
+    if changed:
+        yaml_file.write_text("\n".join(lines) + "\n")
+    return changed[::-1]
 
 
 def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
@@ -379,6 +480,7 @@ def check_package(
     package: str,
     since: Optional[datetime] = None,
     declare: bool = False,
+    base_file: Optional[Path] = None,
 ) -> Dict[str, any]:
     """
     Check a single package against PyPI and optionally apply the outcome to
@@ -387,7 +489,7 @@ def check_package(
     With `since`, every stable release uploaded since that date and missing
     from the YAML counts as an upgrade, not just the ones newer than the
     registry. With `declare`, the upgrade, deprecation or yanked marking is
-    written to docs/packages/<pkg>.yaml (and packages.txt/deprecated.txt) for
+    written to docs/packages/<pkg>.yaml for
     the caller to commit. Versions yanked upstream are reported in the
     result's `yanked` alongside the upgrade/deprecation status.
     """
@@ -399,8 +501,8 @@ def check_package(
 
     registry_version = get_registry_latest_version(package_data)
     if registry_version is None:
-        print(f"[X] No released version in {package_yaml(package).relative_to(ROOT_DIR)}")
-        return {"status": "error", "package": package, "error": "No released version in YAML"}
+        print(f"[X] No tracked version in {package_yaml(package).relative_to(ROOT_DIR)}")
+        return {"status": "error", "package": package, "error": "No tracked version in YAML"}
 
     pypi_info = get_pypi_package_info(package)
     if pypi_info is None:
@@ -414,7 +516,7 @@ def check_package(
             marked = mark_yanked(package_yaml(package), yanked)
             print(f"    [+] marked {', '.join(f'v{v}' for v in marked)} yanked in {package_yaml(package).relative_to(ROOT_DIR)}")
 
-    result = check_upgrade(package, package_data, pypi_info, registry_version, since, declare)
+    result = check_upgrade(package, package_data, pypi_info, registry_version, since, declare, base_file)
     result["yanked"] = yanked
     return result
 
@@ -426,6 +528,7 @@ def check_upgrade(
     registry_version: str,
     since: Optional[datetime],
     declare: bool,
+    base_file: Optional[Path] = None,
 ) -> Dict[str, any]:
     """Classify the package as up to date, deprecatable or upgradable, and act on it."""
     pypi_version = get_pypi_latest_version(pypi_info)
@@ -461,8 +564,19 @@ def check_upgrade(
     if new_versions:
         print(f"[^] {package} can be upgraded: v{registry_version} -> {', '.join(f'v{v}' for v in new_versions)}")
         if declare:
-            added = declare_versions(package_yaml(package), new_versions)
+            added = declare_versions(package_yaml(package), new_versions, pypi_info)
             print(f"    [+] declared {', '.join(f'v{v}' for v in added)} in {package_yaml(package).relative_to(ROOT_DIR)}")
+            # The package branch can be stale (it is not rebased while its PR is
+            # open), so a version it adds may already be on the base branch, where
+            # it was built with or without patches. Only a version the base does
+            # not declare is new enough to get the previous version's patches.
+            on_base = base_versions(base_file) if base_file else set()
+            fresh = [v for v in added if v not in on_base]
+            if len(fresh) < len(added):
+                print(f"    [=] {package}: {', '.join(f'v{v}' for v in added if v not in fresh)} "
+                      "already declared on the base branch, not copying patches")
+            for created in carry_over_patches(package, fresh, declared):
+                print(f"    [+] copied the patches of the previous version to patches/{created}")
         return {
             "status": "need_upgrade",
             "package": package,
@@ -505,7 +619,7 @@ def check_upgrade(
 def deprecation_result(package: str, registry_version: str, pypi_version: str, reason: str, declare: bool) -> Dict[str, any]:
     upstream_issue = find_upstream_issue(package)
     if declare and deprecate_package(package):
-        print(f"    [+] deprecated {package} in {package_yaml(package).relative_to(ROOT_DIR)}, packages.txt and deprecated.txt")
+        print(f"    [+] deprecated {package} in {package_yaml(package).relative_to(ROOT_DIR)}")
     return {
         "status": "can_deprecate",
         "package": package,
@@ -705,6 +819,42 @@ def _self_test():
     assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
     assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
 
+    def files(requires_python, *wheels):
+        return [{"filename": f"pkg-1.0-{w}-manylinux_2_28_x86_64.whl", "requires_python": requires_python}
+                for w in wheels] + [{"filename": "pkg-1.0.tar.gz", "requires_python": requires_python}]
+
+    def pythons(*args):
+        return upstream_python_versions({"releases": {"1.0": files(*args)}}, "1.0")
+
+    assert upstream_python_versions({"releases": {}}, "1.0") is None
+    # Upstream's own list, cp313t included; ancient cp37m and pp wheels say nothing.
+    assert pythons(">=3.7", "cp37-cp37m", "pp310-pypy310_pp73", "cp310-cp310", "cp313-cp313",
+                   "cp313-cp313t", "cp315-cp315t") == ["3.10", "3.13", "3.13t", "3.15t"]
+    # Compressed tag sets count; abi3 is one build, pure wheels say nothing.
+    assert pythons(None, "cp313.cp314-cp313") == ["3.13"]
+    assert pythons(None, "cp310-abi3", "cp314-cp314t", "py3-none") == ["3.10", "3.14t"]
+    assert pythons(">=3.12,<3.14", "py3-none") == ["3.12", "3.13"]
+    assert python_versions_line(["3.10", "3.14t"]) == "  python-versions: ['3.10', '3.14t']"
+    assert yaml.safe_load(python_versions_line(["3.10"]).strip()) == {"python-versions": ["3.10"]}
+
+    # Existing python-versions are refreshed, while current values remain untouched.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        package_file = Path(tmp) / "pkg.yaml"
+        package_file.write_text(
+            "versions:\n"
+            "- version: '1.0'\n"
+            "  python-versions: ['3.10']\n"
+            "- version: '2.0'\n"
+            "  python-versions: ['3.12']\n"
+        )
+        info = {"releases": {
+            "1.0": files(">=3.11", "cp311-cp311", "cp312-cp312"),
+            "2.0": files(">=3.12", "cp312-cp312"),
+        }}
+        assert fill_python_versions(package_file, info) == ["1.0"]
+        assert "  python-versions: ['3.11', '3.12']\n" in package_file.read_text()
+
     # Per-package PR titles, one PR per package.
     upgrade = {"status": "need_upgrade", "package": "PyYAML", "registry_version": "6.0",
                "new_versions": ["6.0.1", "6.0.2"], "yanked": []}
@@ -716,6 +866,26 @@ def _self_test():
     # The body names the package YAML by its normalized name, not PyPI's spelling.
     assert "docs/packages/pyyaml.yaml" in package_report(upgrade)
 
+    # Patches are carried over only from the immediately preceding version.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name in ("1.0.0", "2.0.0"):
+            (root / "My_Pkg" / name).mkdir(parents=True)
+            (root / "My_Pkg" / name / "0001-fix.patch").write_text(name)
+        (root / "torch" / "2.13.0+cpu").mkdir(parents=True)
+        (root / "torch" / "2.13.0+cpu" / "0001-fix.patch").write_text("x")
+        declared = {"1.0.0", "1.1.0", "2.0.0"}  # 1.1.0 is on main without patches
+        # 1.2.0 follows 1.1.0, which has none: nothing is copied (upstreamed).
+        assert carry_over_patches("my-pkg", ["1.2.0"], declared, root) == []
+        # 2.1.0 and 2.2.0 chain from 2.0.0 and then from 2.1.0.
+        assert carry_over_patches("my-pkg", ["2.2.0", "2.1.0"], declared, root) == \
+            ["My_Pkg/2.1.0", "My_Pkg/2.2.0"]
+        assert (root / "My_Pkg" / "2.2.0" / "0001-fix.patch").read_text() == "2.0.0"
+        # A new version below everything declared has no predecessor.
+        assert carry_over_patches("my-pkg", ["0.9.0"], declared, root) == []
+        assert carry_over_patches("unpatched", ["1.0.0"], {"0.1"}, root) == []
+        assert carry_over_patches("torch", ["2.14.0"], {"2.13.0"}, root) == ["torch/2.14.0+cpu"]
+
     print("[+] self-test passed")
 
 
@@ -723,13 +893,19 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Check package versions between riscv64 registry and PyPI")
-    parser.add_argument("packages", nargs="*", help="Specific packages to check (default: all packages from packages.txt)")
+    parser.add_argument("packages", nargs="*", help="Specific packages to check (default: active docs/packages/*.yaml files)")
     parser.add_argument("--since", type=parse_since, metavar="DATE|Nd|Nm",
                         help="Treat every stable release uploaded since this date (YYYY-MM-DD) or duration (e.g. 12m, 90d) "
                              "that docs/packages/<pkg>.yaml does not list as a version to add, uncapped")
     parser.add_argument("--declare", action="store_true",
                         help="Apply the outcome to the working tree: declare new versions and mark yanked ones in "
-                             "docs/packages/<pkg>.yaml, deprecate packages in the YAML, packages.txt and deprecated.txt")
+                             "docs/packages/<pkg>.yaml, and deprecate packages in the YAML")
+    parser.add_argument("--base-file", type=Path, metavar="FILE",
+                        help="Base branch copy of the package YAML (as for pending_versions.py): with --declare, "
+                             "only versions it does not declare get the previous version's patches")
+    parser.add_argument("--python-versions", action="store_true",
+                        help="Add or update every docs/packages/<pkg>.yaml entry with the "
+                             "python-versions that upstream builds (e.g. a new port's pending version)")
     parser.add_argument("--report", type=Path, metavar="FILE", help="Write a Markdown summary of the whole run")
     parser.add_argument("--report-dir", type=Path, metavar="DIR",
                         help="Write one Markdown PR body per changed package, plus a packages.json manifest, "
@@ -743,6 +919,21 @@ def main():
         _self_test()
         return
 
+    if args.python_versions:
+        if not args.packages:
+            parser.error("--python-versions needs the packages to fill in")
+        for package in args.packages:
+            package_data = load_package_yaml(package)
+            if package_data is None:
+                sys.exit(f"[X] No {package_yaml(package).relative_to(ROOT_DIR)}")
+            pypi_info = get_pypi_package_info(package_data.get("package-name", package))
+            if pypi_info is None:
+                sys.exit(f"[X] Could not get PyPI info for {package}")
+            changed = fill_python_versions(package_yaml(package), pypi_info)
+            print(f"[+] {package}: python-versions updated for "
+                  f"{', '.join(f'v{v}' for v in changed) or 'nothing'}")
+        return
+
     if args.packages:
         packages = args.packages
         print(f"Checking {len(packages)} specified package(s)...")
@@ -754,7 +945,7 @@ def main():
     results = []
     for package in packages:
         try:
-            results.append(check_package(package, since=args.since, declare=args.declare))
+            results.append(check_package(package, since=args.since, declare=args.declare, base_file=args.base_file))
         except KeyboardInterrupt:
             print("\n[!] Interrupted by user")
             sys.exit(1)

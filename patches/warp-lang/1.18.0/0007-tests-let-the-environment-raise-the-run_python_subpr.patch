@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 29 Oct 2026 21:40:00 +0000
+Subject: [PATCH] tests: let the environment raise the run_python_subprocess()
+ timeout
+
+Upstream-Status: To upstream [no riscv64 runner upstream to regression-test it on]
+
+run_python_subprocess() hands every child interpreter a wall-clock limit its
+callers hard-code (test_tile_block_dim_mismatch, test_tile_print and
+test_tile_shared_memory all pass timeout=60). The child imports warp and
+JIT-compiles its kernels with Clang before it can do what the test checks, and
+on the riscv64 runner that alone exceeds 60s: all three cases fail with
+subprocess.TimeoutExpired at exactly the limit, while the rest of the 4151
+tests pass. The same shape as the limits patches 0004 and 0005 already make
+overridable, and those only cover unittest_parallel and test_tile_oob.
+
+Read a floor for the limit from WARP_TEST_SUBPROCESS_TIMEOUT. The environment can
+only raise it, and with the variable unset nothing changes for anyone.
+---
+ warp/tests/unittest_utils.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/warp/tests/unittest_utils.py b/warp/tests/unittest_utils.py
+index 1a989c2..798af21 100644
+--- a/warp/tests/unittest_utils.py
++++ b/warp/tests/unittest_utils.py
+@@ -434,6 +434,10 @@ def run_python_subprocess(
+     elif os.name == "posix":
+         source = f"import resource as _resource; _resource.setrlimit(_resource.RLIMIT_CORE, (0, 0));\n{source}"
+ 
++    # How long the child needs to import Warp and JIT-compile its kernels with Clang is a property
++    # of the machine running the tests, so let the environment raise (never lower) the limit.
++    timeout = max(timeout, float(os.environ.get("WARP_TEST_SUBPROCESS_TIMEOUT", 0)))
++
+     try:
+         return subprocess.run(
+             [sys.executable, "-u", "-c", source, *args],
+-- 
+2.43.0
+

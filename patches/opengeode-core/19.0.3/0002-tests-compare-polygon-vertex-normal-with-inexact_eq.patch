@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 3 Nov 2026 00:00:00 +0000
+Subject: [PATCH] tests: compare the polygon vertex normal with inexact_equal
+
+test-py-polygonal-surface.py's test_polygon_vertex_normal checks the
+vertex normal at vertex 0 (shared by two triangles meeting there) with
+an exact `!=` against the literal (0, 0, 1). The computed normal goes
+through a cross product, an accumulation across the two adjacent
+triangles and a normalize() (sqrt-based) - it only lands exactly on
+(0, 0, 1) when every multiply-add in that chain is rounded separately.
+
+Same root cause as the existing 0001 patch in this directory (GCC's
+default -ffp-contract=fast fuses multiply-adds into FMA on riscv64's
+rv64gc baseline, one ULP away from the literal answer; upstream only
+ships baseline x86_64/win_amd64 wheels, neither of which contracts, so
+this has never run on an FMA target). Same fix: switch to inexact_equal
+(GLOBAL_EPSILON = 1e-6), which other tests in this same file and
+elsewhere in the suite already use for computed results. Vector3D
+inherits inexact_equal from Point3D's pybind11 binding (vector.cpp
+registers class_<Vector3D, Point3D>); no new binding needed. The
+library code is unchanged.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against Geode-solutions/OpenGeode]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ bindings/python/tests/mesh/test-py-polygonal-surface.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bindings/python/tests/mesh/test-py-polygonal-surface.py b/bindings/python/tests/mesh/test-py-polygonal-surface.py
+index f6d2504..e5d1a0c 100644
+--- a/bindings/python/tests/mesh/test-py-polygonal-surface.py
++++ b/bindings/python/tests/mesh/test-py-polygonal-surface.py
+@@ -209,7 +209,7 @@ def test_polygon_vertex_normal():
+     builder.compute_polygon_adjacencies()
+
+     answer = geom.Vector3D([0., 0., 1.])
+-    if polygonal_surface.polygon_vertex_normal(0) != answer:
++    if not polygonal_surface.polygon_vertex_normal(0).inexact_equal(answer):
+         raise ValueError(
+             "[Test] PolygonalSurface polygon vertex normal is not correct")
+
+--
+2.43.0
