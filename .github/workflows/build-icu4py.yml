@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/adamchainz/icu4py/blob/1.2.0/.github/workflows/main.yml
+name: Build icu4py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/icu4py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-icu4py.yml'
+      - 'docs/packages/icu4py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-icu4py.yml'
+      - 'docs/packages/icu4py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: icu4py
+      version: ${{ inputs.version }}
+
+  build:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build icu4py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      ICU4PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: adamchainz/icu4py
+          ref: ${{ env.ICU4PY_VERSION }}
+          persist-credentials: false
+
+      # icu4c-builds publishes no riscv64 ICU for download_icu.py; build its pinned release with its own build.py.
+      - name: Resolve the icu4c-builds release download_icu.py pins
+        run: |
+          tag=$(sed -n 's|^BASE_URL = "https://github.com/adamchainz/icu4c-builds/releases/download/\(.*\)"$|\1|p' download_icu.py)
+          test -n "$tag"
+          echo "ICU4C_BUILDS_TAG=$tag" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: adamchainz/icu4c-builds
+          ref: ${{ env.ICU4C_BUILDS_TAG }}
+          path: icu4c-builds
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # CIBW_BEFORE_ALL runs once per container before cibuildwheel puts any
+          # interpreter-specific bin dir on PATH, so plain `python` resolves to this
+          # image's default bootstrap interpreter -- cp39 here, regardless of which
+          # interpreter the job is actually building for. build.py's own
+          # `from typing import assert_never` needs 3.11+, so it ImportErrors
+          # identically on every leg. Pin to a floor interpreter new enough instead.
+          CIBW_BEFORE_ALL_LINUX: >-
+            cd {project}/icu4c-builds &&
+            /opt/python/cp312-cp312/bin/python build.py --platform linux --in-docker &&
+            mkdir -p /tmp/icu &&
+            cp -a build/install /tmp/icu/icu &&
+            cp /tmp/icu/icu/LICENSE {project}/LICENSE-ICU
+          CIBW_TEST_REQUIRES: pytest pytest-randomly
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_ENVIRONMENT: PYTHONDEVMODE=1
+          CIBW_TEST_COMMAND: python -W error -m pytest tests
+
+      - name: Check the wheel bundles ICU and its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              for ext in ("locale", "messageformat", "breakers", "_version"):
+                  assert any(n.startswith(f"icu4py/{ext}.cpython-") and n.endswith(".so") for n in names), (whl, ext, names)
+              assert any(n.startswith("icu4py.libs/libicudata") for n in names), (whl, names)
+              assert any(n.endswith(".dist-info/licenses/LICENSE-ICU") for n in names), (whl, names)
+              print(whl, "OK")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: icu4py-${{ env.ICU4PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish icu4py ${{ matrix.version }}
+    needs: [setup, build]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: icu4py-${{ matrix.version }}-*-manylinux_riscv64

@@ -1621,3 +1621,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       every test leg fails at `uv pip install` with "no wheels with a matching platform tag".
       pip accepts it. The riscv64 counterpart of "lowest floor" is `manylinux_2_31_riscv64`.
       Check with a dummy wheel and `uv pip compile --python-platform riscv64-unknown-linux`.
+
+686. **Bumping a stale pyo3/numpy(-rust) pin on a pyo3 crate embedded inside a monorepo
+    Cargo workspace (not the detached `local_dependencies/` copy a maturin sdist makes) hits
+    two traps before the bump even reaches a compile, both found by `cargo metadata`/`cargo
+    generate-lockfile` alone, no build needed (DeepFilterLib's pyDF, a sibling of
+    `pyDF-data` under one root `[workspace]`).**
+    - **The sibling-binding "links" conflict.** cibuildwheel's `package-dir: pyDF` still
+      builds from a live checkout, not a repackaged sdist, so Cargo auto-joins the ambient
+      root workspace (it walks up from `pyDF/Cargo.toml` and finds `[workspace] members =
+      [..., "pyDF", "pyDF-data", ...]`). A sibling member's own pyo3 pin then blocks the
+      bump outright: `pyo3-ffi` sets `links = "python"`, and Cargo refuses two different
+      versions of a `links`-key crate anywhere in one workspace resolve, even though only
+      `pyDF` is actually being built (`error: failed to select a version for 'pyo3-ffi' ...
+      conflicts with a previous package which links to 'python' as well`). Add an empty
+      `[workspace]` table to the crate's own `Cargo.toml` (same mechanism maturin's sdist
+      packaging uses to detach it) to make it its own workspace root; the fix is a patch to
+      one file, not to every sibling's pin.
+    - **The silent ndarray-major-version split.** Once detached, raising `pyo3`/`numpy`
+      (the rust-numpy crate) resolves fine on its own, but the crate's *own* direct `ndarray`
+      dependency (used for the plain `Array3`/`ArrayView3` types it builds before handing
+      them to `IntoPyArray`/`PyReadonlyArray3`) does not automatically track numpy-rust's
+      internal one. `cargo tree -i ndarray@<old>` after the bump showed the crate's own
+      `path`-dependency sibling still pinned to the old major (`^0.15`) while `numpy` had
+      moved to a newer one (`0.17.2`) — two incompatible `ndarray` majors in one graph,
+      which is allowed (it is an ordinary crate, not a `links` one) but breaks the
+      PyArray/ndarray trait impls at every call site with a nominal type mismatch, since
+      they are implemented for numpy-rust's own `ndarray::Array`. Loosening just the
+      top-level binding crate's `ndarray` req is not enough either: if a second crate in the
+      path (here `libDF`, which the binding calls into directly with `&ArrayView3`) has its
+      *own* separate `ndarray` dependency, it has to move to the same major too, or the
+      split just relocates one hop down. Check with `cargo tree -i ndarray@<version>` for
+      every version `cargo metadata`'s resolve shows, not by reading either Cargo.toml in
+      isolation — and if the called-into crate's own API used ndarray methods that moved
+      between the two majors (`into_shape` was renamed/removed around 0.16), the version
+      bump needs a source patch there too, not just a `Cargo.toml` edit, which this port's
+      sandbox had no way to verify (compiling external code was blocked), so it was left
+      for whoever picks up the follow-up with a real compiler to confirm against.

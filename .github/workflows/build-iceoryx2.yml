@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-python-wheels` job of
+# https://github.com/eclipse-iceoryx/iceoryx2/blob/v0.10.0/.github/workflows/release.yml
+name: Build iceoryx2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/iceoryx2.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-iceoryx2.yml'
+      - 'docs/packages/iceoryx2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-iceoryx2.yml'
+      - 'docs/packages/iceoryx2.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: iceoryx2
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build iceoryx2 ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # tag is a real matrix dimension (not just an `include:` key) so that each
+        # `include:` entry below *updates* its matching combination instead of both
+        # competing to add the same new key to the one combination there would
+        # otherwise be - see CLAUDE.md gotcha 402.
+        tag: [cp38-abi3, cp314t]
+        include:
+          # pyo3's abi3-py38 feature is on unconditionally (iceoryx2-ffi/python's
+          # Cargo.toml), so one abi3 wheel serves every interpreter below.
+          # Upstream also ships a separate free-threaded cp314t wheel (pyo3
+          # auto-disables abi3 for it); we build that as its own leg, exactly
+          # as upstream's release.yml does.
+          - tag: cp38-abi3
+            # Built on cp312 -- the oldest interpreter in our matrix -- and
+            # re-tested on the newer ones via find_compatible_wheel.
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    env:
+      ICEORYX2_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout iceoryx2 v${{ env.ICEORYX2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: eclipse-iceoryx/iceoryx2
+          ref: v${{ env.ICEORYX2_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: iceoryx2-ffi/python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # iceoryx2-ffi/python ships no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          # cibuildwheel's copy_test_sources() resolves CIBW_TEST_SOURCES
+          # relative to the host checkout root (where actions/checkout put
+          # the whole iceoryx2 repo), not package-dir -- so this must be the
+          # full path down to the python bindings' tests/ (gotcha 23). It
+          # then stages the dir at that same relative path under the empty
+          # test_cwd, so CIBW_TEST_COMMAND must use the same path too.
+          CIBW_TEST_SOURCES: iceoryx2-ffi/python/tests
+          # iox2.testing.generate_isolated_config() (used throughout tests/)
+          # gives each test its own shared-memory/config namespace, so this
+          # is safe to run concurrently with other jobs on a shared runner.
+          # Upstream's own files are *_tests.py, which pytest's default
+          # python_files (test_*.py/*_test.py) never matches when pointed at
+          # the directory, so recursive collection finds nothing. Mirror
+          # upstream's own `poe test` (pyproject.toml: `pytest tests/*`) and
+          # pass the expanded file list instead of the directory.
+          CIBW_TEST_COMMAND: >-
+            python -c "import iceoryx2._iceoryx2 as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v iceoryx2-ffi/python/tests/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: iceoryx2-${{ env.ICEORYX2_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish iceoryx2 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: iceoryx2-${{ matrix.version }}-*-manylinux_riscv64
