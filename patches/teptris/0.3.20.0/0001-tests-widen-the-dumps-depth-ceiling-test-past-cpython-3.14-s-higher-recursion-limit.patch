@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH] tests: widen the dumps depth-ceiling test past CPython
+ 3.14's higher recursion limit
+
+test_dumps_depth_named_error builds a 5000-level-deep dict and asserts
+teptris.dumps() turns the engine's bare RecursionError into a ValueError
+("nesting too deep"). The C walk's only protection is a handful of
+Py_EnterRecursiveCall() guards per level (src/teptris/_native.c), which
+check against CPython's internal C-recursion ceiling, not against a
+constant the engine or the wrapper controls.
+
+CPython 3.14 raised that ceiling substantially. Measured directly (same
+mechanism, pickle's C accelerator, which guards with the same API) on an
+otherwise identical x86_64 build:
+
+    CPython 3.12 / 3.13: RecursionError first appears at depth  4999
+    CPython 3.14 / 3.14t: RecursionError first appears at depth 11585
+
+So a fixed depth of 5000 sits inside the gap the 3.14 change opened up:
+on 3.12/3.13 it still safely clears the (much lower) old ceiling and the
+test passes, but on 3.14/3.14t it no longer reaches the new, roughly
+2x-higher one, dumps() returns normally, and
+"self.assertRaises(ValueError)" fails with "ValueError not raised" -
+observed identically on both cp314 and cp314t, manylinux and musllinux,
+confirming it is this interpreter-version change and not a free-threading
+or libc difference. It reproduces the same way on a plain x86_64 build,
+so it is not a riscv64-specific defect either.
+
+Go two orders of magnitude past the old depth so the assertion keeps
+clearing whichever ceiling is in effect, rather than chasing the exact
+constant on each new CPython release.
+
+Upstream-Status: To upstream [not yet filed as an issue from this registry; the fix is a one-line depth bump in tests/test_teptris.py, harmless on every currently supported CPython]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tests/test_teptris.py | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/tests/test_teptris.py b/tests/test_teptris.py
+index 7ac9c40..b41c634 100644
+--- a/tests/test_teptris.py
++++ b/tests/test_teptris.py
+@@ -49,9 +49,15 @@ class Loads(unittest.TestCase):
+ 
+     def test_dumps_depth_named_error(self):
+         # the C walk raises Python's bare RecursionError; the wrapper
+-        # names the engine's 512 ceiling (matches ruby's contract)
++        # names the engine's 512 ceiling (matches ruby's contract).
++        # CPython 3.14 raised the C recursion ceiling Py_EnterRecursiveCall
++        # checks against by roughly 2x (measured ~5000 -> ~11500 on this
++        # same build/platform combination), so a fixed depth of 5000 no
++        # longer reliably exceeds it; go two orders of magnitude deeper so
++        # the assertion holds on 3.10-3.14t alike without depending on the
++        # exact ceiling of any one CPython release.
+         deep = {"v": 1}
+-        for _ in range(5000):
++        for _ in range(200000):
+             deep = {"n": deep}
+         with self.assertRaises(ValueError) as cm:
+             teptris.dumps(deep)
