@@ -1,0 +1,226 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on `build-wheels.sh`/`prepare-etcd.sh` of
+# https://github.com/sighingnow/etcd-distro/blob/767d87075baabe364c7d5932beeb5f3c3ff3be91
+name: Build etcd-distro wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/etcd-distro.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-etcd-distro.yml'
+      - 'docs/packages/etcd-distro.yaml'
+      - 'patches/etcd-distro/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-etcd-distro.yml'
+      - 'docs/packages/etcd-distro.yaml'
+      - 'patches/etcd-distro/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: etcd-distro
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build etcd-distro ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      ETCD_DISTRO_VERSION: ${{ matrix.version }}
+
+    steps:
+      # etcd-distro's own v3.5.1 git tag predates the actual 3.5.1 PyPI
+      # upload (it lacks the Mac M1 / ABI / signal-handling fixes the
+      # release wheels carry); this is main's next commit, matching the
+      # PyPI upload date exactly, and the repo has had no commit since.
+      - name: Checkout etcd-distro
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sighingnow/etcd-distro
+          ref: 767d87075baabe364c7d5932beeb5f3c3ff3be91
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch etcd-distro source
+        run: git apply python-wheels/patches/etcd-distro/${{ env.ETCD_DISTRO_VERSION }}/0001-*.patch
+
+      # etcd-io/etcd publishes no linux-riscv64 release asset at any
+      # version (prepare-etcd.sh has nothing to download), so this builds
+      # from source instead of fetching a prebuilt archive like the other
+      # platforms.
+      - name: Checkout etcd v${{ env.ETCD_DISTRO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: etcd-io/etcd
+          ref: v${{ env.ETCD_DISTRO_VERSION }}
+          path: etcd-upstream
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: 'stable'
+
+      # etcd/etcdctl/etcdutl are each their own Go module (server/,
+      # etcdctl/, etcdutl/) with no cgo anywhere in the core server
+      # (grepped for cgo/immintrin/import "C"), so this is the same
+      # cross-build scripts/build-release.sh does for the other
+      # platforms, narrowed to riscv64 -- not in its own TARGET_ARCH list
+      # (amd64/arm64/ppc64le/s390x).
+      - name: Build the etcd binaries
+        working-directory: etcd-upstream
+        run: |
+          set -euo pipefail
+          outdir="$GITHUB_WORKSPACE/etcd/v${ETCD_DISTRO_VERSION}/etcd-v${ETCD_DISTRO_VERSION}-linux-riscv64"
+          mkdir -p "$outdir"
+          for mod in server:etcd etcdctl:etcdctl etcdutl:etcdutl; do
+            dir="${mod%%:*}"
+            name="${mod##*:}"
+            ( cd "$dir" && CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -installsuffix=cgo -trimpath -ldflags "-s -w" -o "$outdir/$name" . )
+          done
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build wheel
+        env:
+          BUILD_LINUX_RISCV64: '1'
+        run: |
+          uv pip install setuptools wheel
+          python setup.py bdist_wheel
+
+      - name: Check the wheel ships the riscv64 etcd/etcdctl/etcdutl binaries
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith("-py2.py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              for name in ("etcd", "etcdctl", "etcdutl"):
+                  path = f"etcd_distro/etcdbin/{name}"
+                  assert path in names, names
+                  header = zf.read(path)[:20]
+                  assert header[:4] == b"\x7fELF", (name, header)
+                  assert header[18] == 0xF3, (name, header)  # e_machine EM_RISCV
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE"], licenses
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: etcd-distro-${{ env.ETCD_DISTRO_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test etcd-distro ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      ETCD_DISTRO_VERSION: ${{ matrix.version }}
+      # etcd's own checkSupportArch() calls os.Exit(1) on an architecture
+      # outside its hardcoded support list unless this is set to that
+      # architecture -- the same opt-in real riscv64 etcd deployments
+      # already have to use.
+      ETCD_UNSUPPORTED_ARCH: riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: etcd-distro-${{ env.ETCD_DISTRO_VERSION }}-py2.py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . etcd-distro
+
+      # etcd_distro:etcddutl (the `etcdutl` console-script target) is a
+      # pre-existing upstream typo, reproduces off riscv64 and on the real
+      # PyPI 3.5.1 wheels too, so this goes through the module that
+      # entry_points.txt would reach if it weren't misspelled. Otherwise
+      # mirrors etcd's own e2e ctl tests (TestCtlV3Put) more closely than
+      # a --version-only check.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          [ "$(etcdctl version | head -1 | awk '{print $NF}')" = "${ETCD_DISTRO_VERSION}" ]
+          python3 -m etcd_distro.etcdutl version
+
+          work=$(mktemp -d)
+          etcd --data-dir "$work" \
+            --listen-client-urls http://127.0.0.1:23790 --advertise-client-urls http://127.0.0.1:23790 \
+            --listen-peer-urls http://127.0.0.1:23791 --initial-advertise-peer-urls http://127.0.0.1:23791 \
+            --initial-cluster default=http://127.0.0.1:23791 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 20); do
+            curl -sf http://127.0.0.1:23790/health && break
+            sleep 0.5
+          done
+
+          etcdctl --endpoints=http://127.0.0.1:23790 put riscv64-key riscv64-value
+          [ "$(etcdctl --endpoints=http://127.0.0.1:23790 get riscv64-key --print-value-only)" = "riscv64-value" ]
+
+  publish:
+    name: Publish etcd-distro ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: etcd-distro-${{ matrix.version }}-py2.py3-none-manylinux_riscv64

@@ -1,0 +1,55 @@
+From 9671cc7d2c2c9fcaf7c739cae8b01677b2015521 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 23 Oct 2026 23:04:21 +0000
+Subject: [PATCH 2/2] Dispatch NPY_BYTE to signed char, not plain char
+
+NPY_BYTE (int8) was dispatched to plain `char`, whose signedness is
+implementation-defined: signed on x86_64, unsigned on riscv64 (and on
+aarch64, ppc64le and s390x). On riscv64 every int8 code path therefore
+saw -128..-1 as 128..255. In features/_texture.cpp's cooccurence() this
+defeats the negative-value check, and the out-of-range value is used to
+index the cooccurrence matrix, which Python sized from the correctly
+signed max(). The resulting heap corruption kills the interpreter with
+SIGABRT in test_texture.py::test_negative_values_haralick instead of
+raising ValueError. That was reproduced on a riscv64 build of 1.4.19
+under qemu-user, and the test passes with this change.
+
+Use `signed char` for NPY_BYTE in dispatch.hpp and numpy.hpp. This is
+upstream commit 8dbfd97d9241 without its ChangeLog hunk. It is not in
+any release yet; 1.4.19 is the latest.
+
+Upstream-Status: Backport [https://github.com/luispedro/mahotas/commit/8dbfd97d9241fea7df680a32df404f31ae09cad1]
+---
+ mahotas/numpypp/dispatch.hpp | 2 +-
+ mahotas/numpypp/numpy.hpp    | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/mahotas/numpypp/dispatch.hpp b/mahotas/numpypp/dispatch.hpp
+index ffc7f05..fd92d5a 100644
+--- a/mahotas/numpypp/dispatch.hpp
++++ b/mahotas/numpypp/dispatch.hpp
+@@ -8,7 +8,7 @@ typedef unsigned short ushort;
+     case NPY_BOOL: HANDLE(bool); break; \
+     \
+     case NPY_UBYTE: HANDLE(unsigned char); break; \
+-    case NPY_BYTE: HANDLE(char); break; \
++    case NPY_BYTE: HANDLE(signed char); break; \
+     \
+     case NPY_SHORT: HANDLE(short); break; \
+     case NPY_USHORT: HANDLE(unsigned short); break; \
+diff --git a/mahotas/numpypp/numpy.hpp b/mahotas/numpypp/numpy.hpp
+index f766585..0409f23 100644
+--- a/mahotas/numpypp/numpy.hpp
++++ b/mahotas/numpypp/numpy.hpp
+@@ -31,7 +31,7 @@ npy_intp dtype_code();
+ 
+ DECLARE_DTYPE_CODE(bool, NPY_BOOL)
+ DECLARE_DTYPE_CODE(float, NPY_FLOAT)
+-DECLARE_DTYPE_CODE(char, NPY_BYTE)
++DECLARE_DTYPE_CODE(signed char, NPY_BYTE)
+ DECLARE_DTYPE_CODE(unsigned char, NPY_UBYTE)
+ DECLARE_DTYPE_CODE(short, NPY_SHORT)
+ DECLARE_DTYPE_CODE(unsigned short, NPY_USHORT)
+-- 
+2.43.0
+

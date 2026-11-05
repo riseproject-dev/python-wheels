@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream builds lc3py with meson-python + cibuildwheel (archs=auto64, see
+# pyproject.toml / .github/workflows/pypi.yaml). The wheel wraps liblc3.so with
+# ctypes (python/lc3.py), so meson-python tags it py3-none-<platform> with no
+# per-CPython content; cibuildwheel's per-interpreter matrix doesn't fit that,
+# so this drives the manylinux image directly instead, same as
+# build-adbc-driver-sqlite.yml.
+name: Build lc3py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lc3py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lc3py.yml'
+      - 'docs/packages/lc3py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lc3py.yml'
+      - 'docs/packages/lc3py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: lc3py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build lc3py ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      LC3PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout google/liblc3 v${{ env.LC3PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/liblc3
+          ref: v${{ env.LC3PY_VERSION }}
+          persist-credentials: false
+
+      - name: Write the build script
+        run: |
+          cat > build.sh <<'BUILD_SCRIPT'
+          set -euo pipefail
+
+          PY=/opt/python/cp312-cp312/bin
+          "$PY"/pip install -q --upgrade pip meson meson-python ninja wheel auditwheel
+
+          "$PY"/pip wheel . --no-deps -w dist
+
+          cd dist
+          "$PY"/python -m wheel unpack ./*.whl -d unpacked
+          distinfo=$(find unpacked -maxdepth 1 -type d -name '*.dist-info')
+          mkdir -p "$distinfo/licenses"
+          cp /workspace/LICENSE "$distinfo/licenses/LICENSE"
+          rm ./*.whl
+          "$PY"/python -m wheel pack unpacked/* --dest-dir .
+          rm -rf unpacked
+
+          "$PY"/python -m auditwheel repair ./*.whl -w /workspace/wheelhouse --plat manylinux_2_39_riscv64
+          BUILD_SCRIPT
+
+      - name: Build the library and package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash build.sh
+
+      - name: Install the wheel and run the test suite
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # The runner's stock pip predates riscv64 manylinux tag support and
+          # rejects the wheel as unsupported.
+          pip install -q --upgrade pip
+          pip install -q wheelhouse/*.whl pytest
+
+          python -c "import lc3"
+          pytest -vv python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lc3py-${{ env.LC3PY_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish lc3py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: lc3py-${{ matrix.version }}-*-manylinux_riscv64
