@@ -171,7 +171,8 @@ def upstream_python_versions(package_info: Dict, target_version: str) -> Optiona
     from its wheels on PyPI, or None if PyPI doesn't have that version.
 
     A cpXY-cpXY or cpXY-cpXYt wheel means that interpreter, and a cpXY-abi3
-    wheel a single cpXY build (it loads on every later CPython, gotcha 11).
+    wheel records `3.X-abi3`: its ABI floor, distinct from the interpreter
+    selected to build it on riscv64 (gotcha 11).
     Without any (sdist-only or pure wheels), requires_python decides over the
     RISCV64_PYTHONS, leaving out free-threaded builds since nothing says
     upstream supports them.
@@ -180,6 +181,7 @@ def upstream_python_versions(package_info: Dict, target_version: str) -> Optiona
     if not files:
         return None
     built = set()
+    abi3_floors = set()
     for f in files:
         tags = _parse_wheel_tags(f.get("filename", ""))
         if not tags:
@@ -191,11 +193,28 @@ def upstream_python_versions(package_info: Dict, target_version: str) -> Optiona
                 if abi in (py, py + "t"):
                     built.add(abi)
                 elif abi.startswith("abi3"):
-                    built.add(py)
+                    abi3_floors.add(py)
+    if abi3_floors:
+        floor = min(abi3_floors, key=lambda tag: int(tag[2:]))
+        floor_minor = int(floor[3:])
+        built = {
+            tag for tag in built
+            if tag.endswith("t") or int(tag[3:].removesuffix("t")) < floor_minor
+        }
+        built.add(floor + "-abi3")
     if not built:
         spec = SpecifierSet(next((f["requires_python"] for f in files if f.get("requires_python")), ""))
         built = {t for t in RISCV64_PYTHONS if not t.endswith("t") and spec.contains(f"3.{t[3:]}")}
-    return sorted((f"3.{t[3:]}" for t in built), key=lambda v: (int(v[2:].rstrip("t")), v.endswith("t")))
+    def display(tag):
+        abi3 = tag.endswith("-abi3")
+        tag = tag.removesuffix("-abi3")
+        value = f"3.{tag[3:]}"
+        return value + ("-abi3" if abi3 else "")
+
+    return sorted(
+        (display(t) for t in built),
+        key=lambda v: (int(v[2:].removesuffix("t").removesuffix("-abi3")), v.endswith("t"), v.endswith("-abi3")),
+    )
 
 
 def python_versions_line(pythons: List[str]) -> str:
@@ -832,9 +851,14 @@ def _self_test():
                    "cp313-cp313t", "cp315-cp315t") == ["3.10", "3.13", "3.13t", "3.15t"]
     # Compressed tag sets count; abi3 is one build, pure wheels say nothing.
     assert pythons(None, "cp313.cp314-cp313") == ["3.13"]
-    assert pythons(None, "cp310-abi3", "cp314-cp314t", "py3-none") == ["3.10", "3.14t"]
+    assert pythons(None, "cp310-abi3", "cp314-cp314t", "py3-none") == ["3.10-abi3", "3.14t"]
+    # Platform-specific abi3 floors collapse to the oldest floor, and regular
+    # builds it covers do not create redundant matrix legs.
+    assert pythons(None, "cp38-abi3", "cp311-abi3", "cp311-cp311", "cp314-cp314t") == [
+        "3.8-abi3", "3.14t"
+    ]
     assert pythons(">=3.12,<3.14", "py3-none") == ["3.12", "3.13"]
-    assert python_versions_line(["3.10", "3.14t"]) == "  python-versions: ['3.10', '3.14t']"
+    assert python_versions_line(["3.10-abi3", "3.14t"]) == "  python-versions: ['3.10-abi3', '3.14t']"
     assert yaml.safe_load(python_versions_line(["3.10"]).strip()) == {"python-versions": ["3.10"]}
 
     # Existing python-versions are refreshed, while current values remain untouched.
