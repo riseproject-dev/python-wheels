@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-urdfdom/blob/v6.0.0.c0/.github/workflows/release.yml
+name: Build cmeel-urdfdom wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-urdfdom.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-urdfdom.yml'
+      - 'docs/packages/cmeel-urdfdom.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-urdfdom.yml'
+      - 'docs/packages/cmeel-urdfdom.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-urdfdom
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-urdfdom ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_URDFDOM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cmeel-urdfdom v${{ env.CMEEL_URDFDOM_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-urdfdom
+          ref: v${{ env.CMEEL_URDFDOM_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # has-sitelib = false: the wheel holds no Python extension, so one
+          # py3-none wheel covers every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for lib in ("model", "world", "sensor"):
+              assert f"cmeel.prefix/lib/liburdfdom_{lib}.so.6.0.0" in names, names
+          assert "cmeel.prefix/bin/check_urdf" in names, names
+          EOF
+
+      - name: Test wheel
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q --only-binary :all: cmeel cmeel-console-bridge cmeel-tinyxml2 cmeel-urdfdom-headers
+          pip install -q --only-binary :all: wheelhouse/*.whl
+          prefix=$(python3 -c "import pathlib, sysconfig; print(pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix')")
+          python3 -c "import ctypes; ctypes.CDLL('$prefix/lib/liburdfdom_model.so')"
+          cat > robot.urdf <<'EOF'
+          <?xml version="1.0"?>
+          <robot name="arm">
+            <link name="base"/>
+            <link name="upper"/>
+            <link name="lower"/>
+            <joint name="shoulder" type="revolute">
+              <parent link="base"/>
+              <child link="upper"/>
+              <axis xyz="0 0 1"/>
+              <limit lower="-1.57" upper="1.57" effort="10" velocity="1"/>
+            </joint>
+            <joint name="elbow" type="continuous">
+              <parent link="upper"/>
+              <child link="lower"/>
+              <origin xyz="0 0 0.5"/>
+            </joint>
+          </robot>
+          EOF
+          # cmeel's patch gives the libraries an $ORIGIN RPATH but not the tools, as upstream ships them.
+          export LD_LIBRARY_PATH="$prefix/lib"
+          "$prefix/bin/check_urdf" robot.urdf | tee check.log
+          grep -q "Successfully Parsed XML" check.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-urdfdom-${{ env.CMEEL_URDFDOM_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-urdfdom ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cmeel-urdfdom-${{ matrix.version }}-*-manylinux_riscv64

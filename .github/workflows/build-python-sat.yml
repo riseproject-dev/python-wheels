@@ -35,10 +35,6 @@ permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # Upstream pushes no git tag for its releases; this commit sets
-  # VERSION = (1, 9, 'dev', 15) and its tree is byte-identical to the released
-  # sdist. Move it together with the version in docs/packages/python-sat.yaml.
-  PYTHON_SAT_REF: 152884a6d1889f56a61049aaa773be23f0a8d8c1
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
@@ -66,11 +62,24 @@ jobs:
       PYTHON_SAT_VERSION: ${{ matrix.version }}
 
     steps:
-      - name: Checkout pysat ${{ env.PYTHON_SAT_REF }}
+      # Upstream pushes no git tag for its releases; each commit below sets
+      # VERSION = (1, 9, 'dev', N) and its tree is the released sdist's. Add the
+      # commit of every new version here, together with docs/packages/python-sat.yaml.
+      - name: Resolve upstream commit for ${{ env.PYTHON_SAT_VERSION }}
+        id: upstream_ref
+        run: |
+          case "$PYTHON_SAT_VERSION" in
+            1.9.dev15) ref=152884a6d1889f56a61049aaa773be23f0a8d8c1 ;;
+            1.9.dev17) ref=5c6d801fb1fae958f6504af5692fa26b807c8e76 ;;
+            *) echo "No upstream commit recorded for python-sat $PYTHON_SAT_VERSION" >&2; exit 1 ;;
+          esac
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pysat ${{ steps.upstream_ref.outputs.ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pysathq/pysat
-          ref: ${{ env.PYTHON_SAT_REF }}
+          ref: ${{ steps.upstream_ref.outputs.ref }}
           persist-credentials: false
 
       - name: Checkout python-wheels
@@ -106,14 +115,18 @@ jobs:
           #   Rewrite that one slot to 0 in the unpacked sdist before installing it.
           # The python-sat wheel itself builds unchanged on musllinux; only this
           # test dependency needs the workaround. Alpine is detected in-container.
+          # From 1.9.dev17 requirements.txt lists pindakaas (a Rust extension with no
+          # riscv64 wheel) instead of pypblib; the tests that need it importorskip it,
+          # so it is left out rather than source-built.
           CIBW_BEFORE_TEST: >-
-            if [ -f /etc/alpine-release ]; then
+            if [ -f /etc/alpine-release ] && grep -q '^pypblib' {project}/requirements.txt; then
             pip download --no-deps --no-binary :all: pypblib==0.0.4 -d /tmp/pypblib &&
             tar -xzf /tmp/pypblib/pypblib-0.0.4.tar.gz -C /tmp/pypblib &&
             sed -i 's|NULL\(, */\* tp_print \*/\)|0\1|' /tmp/pypblib/pypblib-0.0.4/Modules/pblib/*.cpp &&
             CPPFLAGS="-include sys/types.h" pip install /tmp/pypblib/pypblib-0.0.4;
             fi &&
-            pip install -r {project}/requirements.txt
+            grep -v '^pindakaas' {project}/requirements.txt > /tmp/requirements.txt &&
+            pip install -r /tmp/requirements.txt
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_SOURCES: tests
           CIBW_TEST_COMMAND: >-

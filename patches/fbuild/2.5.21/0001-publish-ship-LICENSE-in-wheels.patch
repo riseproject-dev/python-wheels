@@ -1,0 +1,69 @@
+Upstream-Status: To upstream [upstream's wheels ship no licence file or licence metadata on any platform]
+
+ci/publish.py hand-assembles every fbuild wheel, but writes only METADATA,
+WHEEL and RECORD into the dist-info: the AGPL-3.0-only LICENSE from the
+repository root never reaches the wheel, and METADATA carries no licence
+field, although pyproject.toml declares `license = "AGPL-3.0-only"`.
+Ship the LICENSE as `<dist-info>/licenses/LICENSE` and declare it with the
+PEP 639 `License-Expression`/`License-File` fields (Metadata-Version 2.4),
+reading the expression from `[project] license` in pyproject.toml.
+diff --git a/ci/publish.py b/ci/publish.py
+index e785a9d..6b47738 100644
+--- a/ci/publish.py
++++ b/ci/publish.py
+@@ -74,6 +74,9 @@ PLATFORMS: dict[str, list[str]] = {
+ # Extension filenames produced by build.yml
+ EXTENSION_NAMES = {"_native.abi3.so", "_native.pyd"}
+ 
++# Shipped in every wheel as `<dist-info>/licenses/<name>` (PEP 639).
++LICENSE_FILES = ("LICENSE",)
++
+ 
+ # ---------------------------------------------------------------------------
+ # Helpers
+@@ -103,6 +106,13 @@ def read_project_meta() -> tuple[str, str, str, str, str]:
+     )
+ 
+ 
++def read_project_license() -> str | None:
++    """Return the SPDX `[project] license` expression from pyproject.toml, if any."""
++    with open(ROOT / "pyproject.toml", "rb") as f:
++        license_expression = tomllib.load(f)["project"].get("license")
++    return license_expression if isinstance(license_expression, str) else None
++
++
+ def record_hash(data: bytes) -> str:
+     digest = hashlib.sha256(data).digest()
+     return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+@@ -151,13 +161,20 @@ def build_wheel(
+         tag_prefix = "py3-none"
+         wheel_filename = f"{name_norm}-{version}-py3-none-{tag_plat}.whl"
+ 
++    license_expression = read_project_license()
++    license_files = [ROOT / n for n in LICENSE_FILES if (ROOT / n).is_file()]
++
+     metadata = (
+-        f"Metadata-Version: 2.1\n"
++        f"Metadata-Version: 2.4\n"
+         f"Name: {name}\n"
+         f"Version: {version}\n"
+         f"Summary: {summary}\n"
+         f"Requires-Python: {requires_python}\n"
+     )
++    if license_expression:
++        metadata += f"License-Expression: {license_expression}\n"
++    for license_file in license_files:
++        metadata += f"License-File: {license_file.name}\n"
+     if readme:
+         # Per PEP 566: blank line separates headers from the description body,
+         # and Description-Content-Type declares the rendering format PyPI uses.
+@@ -227,6 +244,9 @@ def build_wheel(
+             )
+ 
+         # dist-info
++        for license_file in license_files:
++            add_file(whl, f"{dist_info}/licenses/{license_file.name}", license_file.read_bytes())
++
+         meta_bytes = metadata.encode()
+         add_file(whl, f"{dist_info}/METADATA", meta_bytes)
+ 

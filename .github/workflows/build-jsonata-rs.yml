@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# jsonata-rs's source repository (localstack/jsonata-rs, its PyPI trusted publisher)
+# is private, so the PyPI sdist, which carries the whole Cargo workspace, is the
+# upstream tree. Otherwise this mirrors upstream's CI.yml as its README describes it:
+# PyO3/maturin-action building one cp311-abi3 wheel per platform.
+name: Build jsonata-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/jsonata-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jsonata-rs.yml'
+      - 'docs/packages/jsonata-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jsonata-rs.yml'
+      - 'docs/packages/jsonata-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: jsonata-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build jsonata-rs ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      JSONATA_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch jsonata-rs ${{ env.JSONATA_RS_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/jsonata-rs/${JSONATA_RS_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          mv "jsonata_rs-${JSONATA_RS_VERSION}" jsonata-rs
+          # maturin sdist hoists pyproject.toml to the root, which drops the jsonata.pyi
+          # stub and py.typed upstream's wheels ship; put it back beside the crate.
+          sed '/^manifest-path = /d' jsonata-rs/pyproject.toml > jsonata-rs/crates/jsonata-py/pyproject.toml
+          rm jsonata-rs/pyproject.toml
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          working-directory: jsonata-rs/crates/jsonata-py
+          args: --release --out dist -i python3.11
+          manylinux: '2_39'
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      # The abi3 wheel is built on its cp311 floor and tested on every interpreter it claims.
+      - name: Test wheel
+        working-directory: jsonata-rs/crates/jsonata-py
+        run: |
+          for py in 3.11 3.12 3.13 3.14; do
+            venv="$RUNNER_TEMP/venv-$py"
+            uv venv -p "$py" "$venv"
+            VIRTUAL_ENV="$venv" uv pip install dist/*.whl pytest
+            "$venv/bin/python" -m pytest -v tests
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: jsonata-rs-${{ env.JSONATA_RS_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: jsonata-rs/crates/jsonata-py/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish jsonata-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: jsonata-rs-${{ matrix.version }}-*-manylinux_riscv64
