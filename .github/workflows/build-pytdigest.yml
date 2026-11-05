@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream ships no wheel-building CI at all (.github/workflows/pytest.yaml only
+# runs tests, via `gcc pytdigest/tdigest.c -shared -o pytdigest/tdigest.so`); its
+# PyPI wheels are built by hand with plain `setup.py bdist_wheel`.
+name: Build pytdigest wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytdigest.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytdigest.yml'
+      - 'docs/packages/pytdigest.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytdigest.yml'
+      - 'docs/packages/pytdigest.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytdigest
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytdigest ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYTDIGEST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pytdigest v${{ env.PYTDIGEST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: protivinsky/pytdigest
+          ref: v${{ env.PYTDIGEST_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # setup.py declares ext_modules (so cibuildwheel tags cp312-cp312) purely
+          # to get tdigest.c compiled; pytdigest/pytdigest.py loads the result via
+          # ctypes.CDLL and no PyInit_* symbol exists anywhere, so the build is
+          # retagged py3-none below (gotcha 398) and one build serves every
+          # interpreter. musllinux is skipped: numpy/pandas (install_requires)
+          # have no musllinux riscv64 wheel anywhere yet.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/pandas (install_requires) and statsmodels (test-only) have no
+          # riscv64 wheels on public PyPI yet.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest statsmodels
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: pytest -v tests/test_pytdigest.py
+
+      - name: Retag the wheel py3-none (tdigest.so is ctypes-loaded, not interpreter-specific)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q "wheel>=0.42"
+          python3 -m wheel tags --python-tag py3 --abi-tag none --remove wheelhouse/pytdigest-*.whl
+
+      - name: Check the wheel carries tdigest.so
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("pytdigest/tdigest.so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytdigest-${{ env.PYTDIGEST_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytdigest ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytdigest-${{ matrix.version }}-*riscv64
