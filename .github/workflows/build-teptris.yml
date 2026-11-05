@@ -1,0 +1,209 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `sdist`/`wheels` jobs of
+# https://github.com/leptris/teptris-py/blob/v0.3.20.0/.github/workflows/cibuildwheel.yml
+name: Build teptris wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/teptris.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-teptris.yml'
+      - 'docs/packages/teptris.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-teptris.yml'
+      - 'docs/packages/teptris.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: teptris
+      version: ${{ inputs.version }}
+
+  sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-latest
+    env:
+      TEPTRIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      # upstream tags the engine (leptris/teptris) as v<engine>, one component
+      # short of the wheel version's trailing iteration digit (family law).
+      - id: tag
+        run: echo "libteptris_ref=v${TEPTRIS_VERSION%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout teptris-py v${{ env.TEPTRIS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: leptris/teptris-py
+          ref: v${{ env.TEPTRIS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout libteptris ${{ steps.tag.outputs.libteptris_ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: leptris/teptris
+          ref: ${{ steps.tag.outputs.libteptris_ref }}
+          path: libteptris-src
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # CPython 3.14 raised the C recursion ceiling
+      # Py_EnterRecursiveCall() checks against by ~2x, so
+      # tests/test_teptris.py::test_dumps_depth_named_error's fixed
+      # depth-5000 nesting no longer reliably trips it on cp314/cp314t
+      # (reproduces on x86_64 too, not riscv64-specific) - widen the
+      # depth so the test clears either ceiling. See
+      # patches/teptris/0.3.20.0/ for the full writeup.
+      - name: Patch teptris-py source
+        run: git apply python-wheels/patches/teptris/${{ env.TEPTRIS_VERSION }}/*.patch
+
+      # Mirrors scripts/make-sdist.sh: vendor the pinned engine tag into
+      # vendor/ so setup.py's self-contained mode compiles it at install time
+      # on any platform with a C compiler - no cmake, no PGO, no prebuilt
+      # archive (that half of setup.py is only for upstream's own
+      # PGO-optimized release wheels, which this registry does not build).
+      - name: Vendor libteptris into the sdist
+        run: |
+          set -eux
+          mkdir -p vendor/libteptris
+          cp -R libteptris-src/src vendor/libteptris/src
+          cp libteptris-src/LICENSE.md vendor/libteptris/LICENSE.md
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        run: |
+          uv pip install build
+          python -m build --sdist
+
+      - name: Self-test the sdist
+        run: |
+          uv venv /tmp/sdt
+          uv pip install --python /tmp/sdt/bin/python dist/*.tar.gz
+          /tmp/sdt/bin/python -c "import teptris; assert teptris.loads('a = 1') == {'a': 1}; print('sdist self-test OK')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: teptris-${{ env.TEPTRIS_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build teptris ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    env:
+      TEPTRIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: teptris-${{ env.TEPTRIS_VERSION }}-sdist
+
+      - id: sdist_path
+        run: echo "path=$(echo ${{ steps.fetch_sdist.outputs.download-path }}/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ${{ steps.sdist_path.outputs.path }}
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # The vendored engine compiles straight into the extension (no
+          # archive, no PGO - that half of setup.py is only for upstream's
+          # own release wheels); still stage it under _engine/ so the
+          # package-data globs in pyproject.toml carry its MIT licence and
+          # sources into the wheel, same as upstream's own wheels do.
+          CIBW_BEFORE_BUILD: >-
+            mkdir -p src/teptris/_engine &&
+            cp -r vendor/libteptris/src src/teptris/_engine/src &&
+            cp vendor/libteptris/LICENSE.md src/teptris/_engine/LICENSE.md
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m unittest discover -s tests -v
+
+      - name: Check the wheel carries the compiled extension, engine sources and licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("teptris/_native") and n.endswith(".so") for n in names), names
+              assert "teptris/_engine/LICENSE.md" in names, names
+              sources = [n for n in names if n.startswith("teptris/_engine/src/teptris/") and n.endswith(".c")]
+              assert len(sources) >= 20, (whl, len(sources))
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {"LICENSE.txt"}, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: teptris-${{ env.TEPTRIS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish teptris ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: teptris-${{ matrix.version }}-*riscv64

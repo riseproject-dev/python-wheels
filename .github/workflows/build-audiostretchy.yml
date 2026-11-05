@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/twardoch/audiostretchy/blob/v1.3.14/.github/workflows/wheels.yml
+name: Build audiostretchy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/audiostretchy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-audiostretchy.yml'
+      - 'docs/packages/audiostretchy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-audiostretchy.yml'
+      - 'docs/packages/audiostretchy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: audiostretchy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build audiostretchy ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      AUDIOSTRETCHY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout audiostretchy v${{ env.AUDIOSTRETCHY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: twardoch/audiostretchy
+          ref: v${{ env.AUDIOSTRETCHY_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # hatch_build.py tags the ctypes-loaded _stretch.so py3-none, so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.AUDIOSTRETCHY_VERSION }}
+          # PyPI's newest numpy can be ahead of the registry's riscv64 wheel (gotcha 354).
+          CIBW_TEST_ENVIRONMENT: PIP_PREFER_BINARY=1
+
+      - name: Check the compiled library made it into the wheel
+        run: |
+          unzip -l wheelhouse/*.whl | grep 'audiostretchy/c_interface/lib/_stretch.so$'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: audiostretchy-${{ env.AUDIOSTRETCHY_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test audiostretchy ${{ matrix.version }} ${{ matrix.python }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp313", "cp314", "cp314t"]
+
+    env:
+      AUDIOSTRETCHY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout audiostretchy v${{ env.AUDIOSTRETCHY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: twardoch/audiostretchy
+          ref: v${{ env.AUDIOSTRETCHY_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: audiostretchy-${{ env.AUDIOSTRETCHY_VERSION }}-py3-none-manylinux_riscv64
+          path: dist
+
+      - name: Write container script
+        run: |
+          cat > riscv64-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          export PATH="${python_dir}:${PATH}"
+
+          python -m pip install --prefer-binary /audiostretchy_src/dist/*.whl pytest pytest-cov soundfile
+          cd /tmp
+          python -m pytest /audiostretchy_src/tests -o addopts=
+          EOF
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/audiostretchy_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /audiostretchy_src/riscv64-test.sh
+
+  publish:
+    name: Publish audiostretchy ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: audiostretchy-${{ matrix.version }}-*-manylinux_riscv64
