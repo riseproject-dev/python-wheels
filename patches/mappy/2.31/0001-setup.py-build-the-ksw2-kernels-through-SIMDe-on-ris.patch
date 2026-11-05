@@ -1,0 +1,42 @@
+From 51b574499894a4bdfb49b37678ba5cff55b3964b Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 17:42:28 +0000
+Subject: [PATCH] setup.py: build the ksw2 kernels through SIMDe on riscv64
+
+Every machine that is not aarch64/arm64 falls through to the x86
+branch and gets -msse4.1, which riscv64 GCC rejects outright
+("unrecognized command-line option '-msse4.1'"), so mappy cannot be
+built on riscv64 at all.
+
+The ksw2_*_sse.c kernels already support compiling through SIMDe
+(#ifdef USE_SIMDE -> <simde/x86/sse2.h>, as Makefile.simde does), and
+.gitmodules still declares SIMDe at lib/simde. Add a riscv64 branch
+that mirrors the aarch64/sse2neon one: build the SSE2-only kernels
+(-DKSW_SSE2_ONLY -D__SSE2__) with -DUSE_SIMDE and
+-DSIMDE_ENABLE_NATIVE_ALIASES against lib/simde, plus -fsigned-char as
+the Makefile does for its non-x86 targets. SIMDe only treats __SSE2__
+as native SSE on x86, so defining it here does not make it reach for
+<emmintrin.h>.
+
+Upstream-Status: To upstream [not yet submitted; lib/simde is declared in .gitmodules but not committed in the tree or shipped in the sdist, so this needs SIMDe vendored back alongside it]
+---
+ setup.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index 4c98b31..a3cbccc 100644
+--- a/setup.py
++++ b/setup.py
+@@ -14,6 +14,9 @@ include_dirs = ["."]
+ if platform.machine() in ["aarch64", "arm64"]:
+ 	include_dirs.append("sse2neon/")
+ 	extra_compile_args.extend(['-ftree-vectorize', '-DKSW_SSE2_ONLY', '-D__SSE2__'])
++elif platform.machine() == "riscv64":
++	include_dirs.append("lib/simde")
++	extra_compile_args.extend(['-ftree-vectorize', '-fsigned-char', '-DKSW_SSE2_ONLY', '-D__SSE2__', '-DUSE_SIMDE', '-DSIMDE_ENABLE_NATIVE_ALIASES'])
+ else:
+ 	extra_compile_args.append('-msse4.1') # WARNING: ancient x86_64 CPUs don't have SSE4
+ 
+-- 
+2.43.0
+

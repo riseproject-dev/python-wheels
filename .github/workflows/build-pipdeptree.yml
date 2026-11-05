@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 ---
 # This workflow builds directly from a checkout, mirroring upstream's own `wheels` job in
-# https://github.com/tox-dev/pipdeptree/blob/4.2.2/.github/workflows/dist.yaml, narrowed to
+# https://github.com/tox-dev/pipdeptree/blob/4.2.7/.github/workflows/dist.yaml, narrowed to
 # riscv64. Cargo.lock is committed, so no separate sdist step is needed (gotcha 10 doesn't
 # apply here).
 name: Build pipdeptree wheels (riscv64)
@@ -51,12 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # cp310 picks up pyproject.toml's own cp310-* cibuildwheel override, which turns on
-        # the limited API, so this one wheel is reused+tested on every GIL cp3.10+ interpreter.
-        # cp314t/cp315t can't use the limited API, so each takes a wheel of its own; the image
-        # has no cp313t (gotcha 11), but upstream doesn't publish a cp313t wheel either.
-        python: ["cp310", "cp314t", "cp315t"]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       PIPDEPTREE_VERSION: ${{ matrix.version }}
@@ -78,19 +73,27 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # 4.2.12 opts into the limited API through PIPDEPTREE_ABI3=1 (meson.build) instead of
+          # the cp315 cibuildwheel override earlier releases carried in pyproject.toml; the
+          # variable is simply ignored by those, whose override still applies.
           # The checkout carries no git history, so tools/version.py can't derive the version
           # from tags; PIPDEPTREE_VERSION is the override switch upstream's own CI uses for the
           # same reason (a container build over a checkout it doesn't own).
           CIBW_ENVIRONMENT_LINUX: >-
             PATH=$HOME/.cargo/bin:$PATH
             PIPDEPTREE_VERSION=${{ env.PIPDEPTREE_VERSION }}
+            PIPDEPTREE_ABI3=${{ matrix.python == 'cp315' && '1' || '0' }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # --graph-output/--output=graphviz-* shell out to the `dot` binary.
           CIBW_BEFORE_TEST_LINUX: dnf -y install graphviz
           # pytest-cov pulls in coverage: test_render_explicit_extras renders pluggy's
-          # "testing" extra, which lists coverage as a requirement.
-          CIBW_TEST_REQUIRES: pytest pytest-cov
-          CIBW_TEST_SOURCES: tests docs
+          # "testing" extra, which lists coverage as a requirement. pluggy 1.7.0 dropped
+          # its extras, so older pipdeptree tests need an earlier pluggy.
+          # pytest-mock supplies the `mocker` fixture tests/tools/test_release.py uses.
+          CIBW_TEST_REQUIRES: pytest pytest-cov pytest-mock pluggy<1.7
+          # tests/tools/ (new in 4.2.10) imports the tools package (tools/release.py,
+          # tools/check_release_wheels.py), which has to be staged next to the tests.
+          CIBW_TEST_SOURCES: tests docs tools
           # tests/test_build_version.py (new after 4.2.3) reads build.rs/tools/version.py off the
           # project root and a scratch git repo to check the version-derivation tooling itself;
           # CIBW_TEST_SOURCES stages only tests/docs, so it has no wheel behavior to verify here.
@@ -98,6 +101,17 @@ jobs:
             python -c "import pipdeptree._rust as m; assert m.__file__.endswith('.so'), m.__file__" &&
             pipdeptree --version &&
             python -m pytest tests --ignore=tests/test_build_version.py -v
+
+      - name: Set the stable ABI minimum
+        if: matrix.python == 'cp315'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q "wheel>=0.42"
+          # meson-python tags abi3 wheels with the build interpreter rather than the PyO3 ABI floor.
+          python3 -m wheel tags --python-tag cp311 --remove wheelhouse/*-abi3-*.whl
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
