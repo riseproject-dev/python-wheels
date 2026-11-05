@@ -76,12 +76,6 @@ jobs:
             cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
             cp313-manylinux_riscv64 cp314-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # _crypto links libcrypto; the riscv64 image ships only the runtime
-          # .so, not the headers. auditwheel then vendors libcrypto (Apache-2.0)
-          # into the wheel without a licence, so stage one.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install openssl-devel &&
-            cp /usr/share/licenses/openssl-libs/LICENSE.txt {project}/LICENSE.openssl
           # cryptography has no riscv64 wheel on public PyPI; PIP_ONLY_BINARY
           # stops pip from picking a newer PyPI-only sdist release (which
           # fails: its Rust backend has no riscv64 rustup target) over the
@@ -98,18 +92,17 @@ jobs:
           CIBW_TEST_REQUIRES: cryptography<50
           CIBW_TEST_COMMAND: python -m unittest discover -t {project} -s {project}/tests
 
-      - name: Check the wheel ships both extensions and both licences
+      - name: Check the wheel ships the extension and the licence
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
           for whl in sys.argv[1:]:
               names = zipfile.ZipFile(whl).namelist()
-              for mod in ("_buffer", "_crypto"):
-                  assert any(n.startswith(f"aioquic/{mod}.") and n.endswith(".so")
-                             for n in names), (whl, mod)
+              assert any(n.startswith("aioquic/_buffer.") and n.endswith(".so")
+                         for n in names), whl
               licences = {n.rsplit("/", 1)[1]
                           for n in names if ".dist-info/licenses/" in n} - {""}
-              assert licences == {"LICENSE", "LICENSE.openssl"}, (whl, licences)
+              assert licences == {"LICENSE"}, (whl, licences)
               print(whl, "ok")
           EOF
 

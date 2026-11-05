@@ -49,20 +49,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel
-        # per interpreter (matches PyPI's cp3xx-cp3xx tags).
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       MONTY_VERSION: ${{ matrix.version }}
 
     steps:
+      # Upstream tags older releases `vX.Y.Z` and newer ones plain `X.Y.Z`; use whichever exists.
+      - name: Resolve upstream tag
+        id: tag
+        run: |
+          for ref in "v$VERSION" "$VERSION"; do
+            if git ls-remote --exit-code --tags https://github.com/pydantic/monty "refs/tags/$ref" >/dev/null; then
+              echo "ref=$ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "no tag for $VERSION in pydantic/monty" >&2
+          exit 1
+        env:
+          VERSION: ${{ env.MONTY_VERSION }}
+
       - name: Checkout monty ${{ env.MONTY_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pydantic/monty
-          ref: v${{ env.MONTY_VERSION }}
+          ref: ${{ steps.tag.outputs.ref }}
           persist-credentials: false
 
       # `crates/monty-python`'s pyproject.toml has no `license-files`, so

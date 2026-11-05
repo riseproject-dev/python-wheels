@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH 5/6] setup: guard parasail_ssw_profile() against a NULL
+ profile
+
+Upstream-Status: To upstream [not yet submitted; the real fix is a NULL check at the top of parasail_ssw_profile() in jeffdaily/parasail's src/pssw.c]
+
+parasail's profile creators have no scalar fallback by design: with no
+SIMD ISA, parasail_profile_create_8/16() return NULL ("caller must check
+for non-NULL profile"), and so does parasail_ssw_init(). But
+parasail_ssw_profile() reads profile->s1 and profile->matrix before any
+check, and parasail_ssw() passes it parasail_ssw_init()'s result
+unchecked, so on riscv64 both parasail.ssw_profile() and plain
+parasail.ssw() die with SIGSEGV. That is the exit-139 crash in
+test_ssw (the 'blosum62' set_value message printed just before it
+comes from the previous test, test_matrix, which passes).
+
+It is not related to the cpuid stub: on riscv64 configure reports no
+SIMD ISA, so HAVE_SSE2/AVX2/NEON/ALTIVEC are all 0 and the dispatchers
+never call parasail_can_use_*() at all.
+
+Initialise s1/matrix only when profile is non-NULL and return NULL via
+the library's own PARASAIL_CHECK_NULL() otherwise, so ssw()/ssw_profile()
+return None in Python instead of crashing the interpreter.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index a2c6b40..7cf8f4e 100644
+--- a/setup.py
++++ b/setup.py
+@@ -362,6 +362,25 @@ def build_parasail(libname):
+         with open(dispatch_c, 'w') as f:
+             f.write(fallback_re.sub(scalar_fallback, dispatch_src))
+ 
++    # Profile creation has no scalar fallback, so with no SIMD ISA
++    # parasail_ssw_init() returns NULL; parasail_ssw_profile() (and so
++    # parasail_ssw()) then dereferences it and segfaults. Return NULL instead.
++    pssw_c = os.path.join(parasail_root, 'src', 'pssw.c')
++    with open(pssw_c) as f:
++        pssw_src = f.read()
++    pssw_deref = ('    const char *s1 = profile->s1;\n'
++                  '    const parasail_matrix_t *matrix = profile->matrix;\n')
++    pssw_anchor = ('    /* find the end loc first with the faster implementation */\n'
++                   '    has8 =')
++    if pssw_deref in pssw_src and pssw_anchor in pssw_src:
++        pssw_src = pssw_src.replace(pssw_deref,
++            '    const char *s1 = profile ? profile->s1 : NULL;\n'
++            '    const parasail_matrix_t *matrix = profile ? profile->matrix : NULL;\n', 1)
++        pssw_src = pssw_src.replace(pssw_anchor,
++            '    PARASAIL_CHECK_NULL(profile);\n\n' + pssw_anchor, 1)
++        with open(pssw_c, 'w') as f:
++            f.write(pssw_src)
++
+     root = find_file('configure', parasail_root)
+     if root is None:
+         print("Unable to find parasail configure script")

@@ -1,0 +1,46 @@
+From 080cada3dcde95c4d1b80087741e760d9e8db395 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 10:40:53 +0000
+Subject: [PATCH] Add riscv64 to the vmprof_eval frame register stash
+
+vmprof_eval pins the current frame into a callee-saved register so a
+native stack walk can recover it, and picks that register per
+architecture with a trailing `#error "platform not supported"`. riscv64
+has no branch, so the CPython extension does not compile there, although
+vmprof_config.h already knows how to read the riscv64 PC (#268).
+
+Use s1, the first callee-saved register that is not the frame pointer,
+and copy the frame into it with `mv`. As on aarch64, native profiling
+stays off on riscv64 (VMP_SUPPORTS_NATIVE_PROFILING covers only x86 and
+ppc64), so this only makes the Python-level profiler buildable.
+
+Upstream-Status: To upstream [not yet submitted; found porting vmprof to riscv64]
+---
+ src/_vmprof.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/_vmprof.c b/src/_vmprof.c
+index aa93232..3581eff 100644
+--- a/src/_vmprof.c
++++ b/src/_vmprof.c
+@@ -49,6 +49,8 @@ PY_EVAL_RETURN_T * vmprof_eval(PY_STACK_FRAME_T *f, int throwflag)
+     register PY_STACK_FRAME_T * callee_saved asm("x19");
+ #elif defined(__powerpc64__)
+     register PY_STACK_FRAME_T * callee_saved asm("r3");
++#elif defined(__riscv)
++    register PY_STACK_FRAME_T * callee_saved asm("s1");
+ #else
+ #    error "platform not supported"
+ #endif
+@@ -62,6 +64,8 @@ PY_EVAL_RETURN_T * vmprof_eval(PY_STACK_FRAME_T *f, int throwflag)
+ 	"mov %1, %0\t\n"
+ #elif defined(__powerpc64__)
+ 	"addi %1, %0, 0\t\n"
++#elif defined(__riscv)
++        "mv %0, %1\t\n"
+ #else
+ #    error "platform not supported"
+ #endif
+-- 
+2.43.0
+
