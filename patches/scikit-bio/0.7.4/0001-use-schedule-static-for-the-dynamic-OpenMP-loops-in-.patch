@@ -1,0 +1,55 @@
+From 7641767e67e2affd82ba59131e59e02be8435c74 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 23 Oct 2026 17:48:26 +0000
+Subject: [PATCH] use schedule(static) for the dynamic OpenMP loops in
+ _c_me.pyx
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+libgomp's dynamic and guided work-share schedules fault on the riscv64
+machines these wheels are built and tested on, while schedule(static)
+is clean (see the LightGBM and healpy patches in this repository).
+
+The cp312 job segfaulted in tree/tests/test_me.py::test_bme_real, with
+the Python stack ending at skbio/tree/_me.py's _bme calling
+_bal_avgdist_nest. That function's only parallel loop is a
+prange(..., schedule="dynamic"), which compiles to
+GOMP_loop_nonmonotonic_dynamic_start/next. The cp313 and cp314 jobs ran
+the same test green, as expected of this intermittent fault.
+
+_c_me.pyx has exactly two dynamic pranges, in _bal_avgdist_nest and
+_bal_min_branch_p; every other prange in scikit-bio leaves the schedule
+unset, which GCC compiles as static. Both loops do independent work per
+chunk of clades and write disjoint outputs, so the schedule only changes
+which thread takes which chunk, not the result. Moving both to static
+leaves the extension with no calls into libgomp's dynamic or guided
+iterators. Revert once the runners' toolchain is fixed.
+---
+ skbio/tree/_c_me.pyx | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/skbio/tree/_c_me.pyx b/skbio/tree/_c_me.pyx
+index 1a7b239..4b6096b 100644
+--- a/skbio/tree/_c_me.pyx
++++ b/skbio/tree/_c_me.pyx
+@@ -1031,7 +1031,7 @@ def _bal_min_branch_p(
+ 
+     # Parallel phase: Do calculations within chunks of clades.
+ 
+-    for ichu in prange(nchu, nogil=True, schedule="dynamic"):
++    for ichu in prange(nchu, nogil=True, schedule="static"):
+         for icla in range(chunks[ichu], chunks[ichu + 1]):
+             i = clades[icla]
+             min_i = roots[i]
+@@ -2256,7 +2256,7 @@ def _bal_avgdist_nest(
+     # number of branches from insertion point to any node
+     cdef Py_ssize_t deg
+ 
+-    for ichu in prange(nchu, nogil=True, schedule="dynamic"):
++    for ichu in prange(nchu, nogil=True, schedule="static"):
+         iseg = chusegs[ichu]  # next segment index
+         seg = segs[iseg]
+         lvl = lvls[iseg - 1] if iseg else -1  # current segment's level
+-- 
+2.43.0
+

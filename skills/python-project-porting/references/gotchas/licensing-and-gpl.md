@@ -44,6 +44,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
   fails the check even though it looks bracketed.
 - **637** — a nanobind extension's musllinux wheel vendors no GCC runtime, so gotcha 409's
   `gpl_sources` job is not needed; and gotcha 538's override takes subdirectory paths as-is.
+- **694** — a cgo build on the bare self-hosted riscv64 runner, with gcc from `apt` rather than
+  the manylinux image, needs no `gpl_sources` job at all.
 
 ---
 
@@ -790,3 +792,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       lands as `dist-info/licenses/src/nanobind/LICENSE` etc. (scikit-build-core 1.1.1 keeps the
       relative path), and a project with no `license-files` key at all (default PEP 639 glob,
       root `LICENSE` only) is the cheapest case: the env override, listing `LICENSE` first.
+
+694. **A cgo build on the bare self-hosted riscv64 runner, with gcc from `apt` rather than the
+    manylinux image, needs no `gpl_sources` job at all (the enola-cli case).** The Licensing
+    section's `gpl_sources` rule names "the gcc baked into the manylinux_riscv64 image" as the
+    usual trigger, and every current example (`build-austin-dist.yml`, `build-bitsandbytes.yml`,
+    `build-runai-model-streamer-gcs.yml`, ...) builds with `docker run ... "$MANYLINUX_RISCV64_IMAGE"`.
+    A plain `CGO_ENABLED=1` Go build needs a C toolchain too, but several ported packages
+    (`build-dbmate-bin.yml`'s sqlite cgo, this one's tree-sitter grammars) get it by running
+    `runs-on: ubuntu-24.04-riscv` directly and `apt-get install gcc libc6-dev` on the bare
+    runner — no `docker run`, no `MANYLINUX_RISCV64_IMAGE` anywhere in the job. Neither carries a
+    `gpl_sources` job, and that is correct, not an oversight: `apt`'s gcc is Ubuntu's own package,
+    already covered by Ubuntu's own source availability (`apt-get source gcc-14`/`dpkg --
+    source` on Launchpad), the same way nobody tracks GPL sources for the compiler a laptop's
+    own package manager installed. The manylinux image is different only because `quay.io/pypa`
+    builds its own gcc from a pinned source tree as part of assembling that image — a build
+    this repo's own CI reproduces by running inside it — so *that* gcc's source isn't already
+    sitting in a public distro archive the way Ubuntu's is. Before adding a `gpl_sources` job to
+    a cgo-using Go/C port, check which gcc is actually in the job: `apt`/the runner's own distro
+    package needs none; `docker run`/`podman run` against a pinned `MANYLINUX_RISCV64_IMAGE`
+    does.
