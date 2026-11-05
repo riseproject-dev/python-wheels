@@ -38,9 +38,14 @@ permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # oneTBB commit that introduced TCM at version 1.5.0 (git-subtree merge of TCM's own
-  # history, one day before the matching PyPI upload). Update alongside TCM_VERSION.
-  TCM_REF: 7bc8577403df32b69b25157caad45677a8552861
+  # oneTBB commit to build, which must report the TCM version being built (the smoke test
+  # below checks tcmGetVersion()). 1.5.0 was the commit that introduced TCM (git-subtree
+  # merge of TCM's own history, one day before the matching PyPI upload):
+  # 7bc8577403df32b69b25157caad45677a8552861. 1.6.0 (PyPI upload 2026-10-16) is the last
+  # commit touching thread_composability_manager before that upload; it sets
+  # TCM_VERSION 1.6.0 ("[TCM] Update version to 1.6.0", 171e5ead, is its ancestor) and
+  # carries the x86 guard around -fcf-protection itself. Update alongside TCM_VERSION.
+  TCM_REF: f1e7e5cbf0b77a94d27700141b9188580bd9c778
   HWLOC_VERSION: 2.14.0
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
@@ -79,11 +84,16 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
-      # TCM's own cmake/compilers/GNU.cmake applies -fcf-protection=full (x86 CET
-      # hardening) unconditionally, unlike oneTBB's own copy of the same file, which
-      # gates it to x86 - GCC rejects the flag outright on other architectures.
+      # TCM 1.5.0's own cmake/compilers/GNU.cmake applied -fcf-protection=full (x86 CET
+      # hardening) unconditionally, unlike oneTBB's own copy of the same file, which gated
+      # it to x86 - GCC rejects the flag outright on other architectures. 1.6.0 carries
+      # that guard upstream, so only versions that still need a patch have a patches dir.
       - name: Patch TCM source
-        run: git apply python-wheels/patches/tcmlib/${{ env.TCM_VERSION }}/*.patch
+        run: |
+          patches="python-wheels/patches/tcmlib/${TCM_VERSION}"
+          if [ -d "$patches" ]; then
+            git apply "$patches"/*.patch
+          fi
 
       - name: Pull manylinux_riscv64 image
         run: docker pull "${MANYLINUX_RISCV64_IMAGE}"

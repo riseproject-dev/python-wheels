@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `wheels` and `validate_linux_abi3_runtime` jobs of
+# https://github.com/rism-digital/verovio/blob/version-6.3.0/.github/workflows/python-ci-wheel.yml
+name: Build verovio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/verovio.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-verovio.yml'
+      - 'docs/packages/verovio.yaml'
+      - 'patches/verovio/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-verovio.yml'
+      - 'docs/packages/verovio.yaml'
+      - 'patches/verovio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: verovio
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build verovio ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      VEROVIO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout verovio version-${{ env.VEROVIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rism-digital/verovio
+          ref: version-${{ env.VEROVIO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch verovio source
+        run: git apply python-wheels/patches/verovio/${{ env.VEROVIO_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # Built once on the abi3 floor, then re-tested on every newer
+          # interpreter, as upstream's validate_linux_abi3_runtime job does.
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_COMMAND: >-
+            python {project}/doc/python-smoke-test.py &&
+            python -c "import importlib.metadata as m; got = sorted(p.name for p in m.files('verovio') if '.dist-info/licenses/' in str(p)); assert got == ['COPYING', 'COPYING.LESSER', 'LICENSE.fonts', 'LICENSE.humlib', 'LICENSE.jsonxx', 'LICENSE.midifile', 'LICENSE.miniz-cpp', 'LICENSE.pugixml', 'LICENSE.tuning-library'], got"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: verovio-${{ env.VEROVIO_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish verovio ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: verovio-${{ matrix.version }}-*-manylinux_riscv64
