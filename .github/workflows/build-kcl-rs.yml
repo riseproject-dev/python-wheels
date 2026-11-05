@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# kcl-rs has no public source repository and no public CI: its README points at
+# github.com/localstack/kcl-rs, which is not publicly visible. The PyPI sdist carries the
+# whole Cargo workspace (including Cargo.lock), so the sdist is the upstream tree and is
+# fetched here. Everything else mirrors upstream's packaging: maturin over
+# kcl-python/Cargo.toml with the `extension-module` feature, pyo3 abi3-py311, one abi3
+# wheel per platform, manylinux and musllinux.
+name: Build kcl-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/kcl-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kcl-rs.yml'
+      - 'docs/packages/kcl-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kcl-rs.yml'
+      - 'docs/packages/kcl-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: kcl-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build kcl-rs ${{ matrix.version }} cp311-abi3-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        platform: [manylinux, musllinux]
+        include:
+          # Upstream's e2e suite needs a Kinesis+DynamoDB endpoint (LocalStack upstream, which
+          # has no riscv64 build); moto serves it here, but moto needs cryptography, which has
+          # no musllinux_riscv64 wheel, so musllinux only imports and collects the suite.
+          - platform: manylinux
+            test-requires: pytest boto3 moto[dynamodb] flask flask-cors
+            test-environment: >-
+              AWS_ENDPOINT_URL=http://127.0.0.1:4566
+              AWS_REGION=us-east-1
+              AWS_ACCESS_KEY_ID=test
+              AWS_SECRET_ACCESS_KEY=test
+            test-command: >-
+              python -m moto.server -H 127.0.0.1 -p 4566 > moto.log 2>&1 & moto=$!;
+              for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:4566/moto-api/ && break; sleep 1; done;
+              python -m pytest pkg/kcl-python/tests -v -k "not FANOUT"; rc=$?;
+              [ $rc -eq 0 ] || tail -n 100 moto.log;
+              kill $moto; wait $moto; exit $rc
+          - platform: musllinux
+            test-requires: pytest boto3
+            test-command: python -m pytest pkg/kcl-python/tests -v
+
+    env:
+      KCL_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch kcl-rs ${{ env.KCL_RS_VERSION }} sdist
+        run: |
+          set -euo pipefail
+          url="$(curl -sSfL "https://pypi.org/pypi/kcl-rs/${KCL_RS_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          mv "kcl_rs-${KCL_RS_VERSION}" pkg
+          test -f pkg/pyproject.toml
+          test -f pkg/Cargo.lock
+
+      - name: Stage the Apache-2.0 licence beside kcl-rs's pyproject.toml
+        # The sdist ships no licence file, so upstream's wheels carry no licence text at all.
+        run: curl -sSfL -o pkg/LICENSE https://www.apache.org/licenses/LICENSE-2.0.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pkg
+          output-dir: wheelhouse/
+        env:
+          # Built on cp311, the abi3 floor, and re-tested on the newer interpreters.
+          CIBW_BUILD: >-
+            cp311-${{ matrix.platform }}_riscv64 cp312-${{ matrix.platform }}_riscv64
+            cp313-${{ matrix.platform }}_riscv64 cp314-${{ matrix.platform }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=cryptography,cffi,MarkupSafe,PyYAML
+          CIBW_TEST_REQUIRES: ${{ matrix.test-requires }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.test-environment }}
+          CIBW_TEST_SOURCES: pkg/kcl-python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md, kcl_rs._native as m;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('kcl-rs'))" || exit 1;
+            ${{ matrix.test-command }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kcl-rs-${{ env.KCL_RS_VERSION }}-cp311-abi3-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish kcl-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: kcl-rs-${{ matrix.version }}-*_riscv64
