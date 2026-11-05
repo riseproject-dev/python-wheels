@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000007 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Fri, 9 Oct 2026 00:00:00 +0000
+Subject: [PATCH 7/7] threadpool: fall back to the online CPU count when
+ cpuinfo fails
+
+get_threadpool() returns nullptr when cpuinfo_initialize() fails, but
+none of its callers handle that: get_pthreadpool() aborts with "Failed to
+acquire an instance of ThreadPool!" (reached from XNNCompiler.cpp when
+creating every XNNPACK runtime), and parallel_for(),
+_threadpool_get_thread_count() and the LLM sdpa op dereference the
+result directly. So on any host where cpuinfo cannot initialize - e.g. a
+riscv64 kernel that reports /sys/devices/system/cpu/cpuN/topology/core_id
+as -1 - running an XNNPACK-delegated or parallelised program crashes.
+
+cpuinfo is only used here to choose a thread count: pthreadpool itself is
+built with PTHREADPOOL_USE_CPUINFO=0 and starts its threads without it.
+Size the pool from std::thread::hardware_concurrency() (capped at the
+same tsan limit of 63) when cpuinfo is unavailable, instead of leaving
+every caller without a threadpool.
+
+Upstream-Status: To upstream [not yet submitted; unchanged on pytorch/executorch main, affects any host where cpuinfo_initialize() fails, independent of riscv64]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ extension/threadpool/threadpool.cpp | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/extension/threadpool/threadpool.cpp b/extension/threadpool/threadpool.cpp
+index 2845b4a..a3a8c60 100644
+--- a/extension/threadpool/threadpool.cpp
++++ b/extension/threadpool/threadpool.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <memory>
++#include <thread>
+ 
+ #include <executorch/extension/threadpool/threadpool_guard.h>
+ #include <executorch/runtime/platform/assert.h>
+@@ -127,12 +128,14 @@ void ThreadPool::run(
+ ThreadPool* get_threadpool() {
+   executorch::runtime::runtime_init();
+ 
+-  if (!cpuinfo_initialize()) {
+-    ET_LOG(Error, "cpuinfo initialization failed");
+-    return nullptr; // NOLINT(facebook-hte-NullableReturn)
+-  }
+-
+   static const int num_threads = ([]() {
++    if (!cpuinfo_initialize()) {
++      // pthreadpool does not need cpuinfo, so size the pool from the online
++      // CPU count instead of leaving every caller without a threadpool.
++      ET_LOG(Info, "cpuinfo initialization failed, using the online CPU count");
++      const uint32_t online = std::thread::hardware_concurrency();
++      return std::min(std::max(online, 1u), 63u);
++    }
+ #if defined(EXECUTORCH_THREADPOOL_USE_ALL_LOGICAL_CORES)
+     // Use threads=cores.
+     auto result = cpuinfo_get_processors_count();
+-- 
+2.43.0
+

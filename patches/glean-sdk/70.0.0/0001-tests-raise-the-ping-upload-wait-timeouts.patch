@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] tests: raise the ping upload wait timeouts
+
+The Python SDK uploads pings from a separate process: every upload batch
+spawns a fresh `sys.executable _process_dispatcher_helper.py`, which has to
+start an interpreter, import glean and load libglean_ffi.so before the test
+uploader writes its info.txt (or the test HTTP server sees a request).
+
+Helpers.wait_for_ping() and wait_for_requests() give that only 2 seconds.
+On the riscv64 runner that cold start alone regularly takes longer, so 12
+tests fail with "No ping appeared ... within 2 seconds" / "Expected 1
+requests within 2 seconds. Got 0" while tests exercising the very same
+upload path (test_sending_deletion_ping_if_disabled_outside_of_run,
+test_ping_collection_must_happen_after_currently_scheduled_metrics_recordings,
+...) pass in the same run.
+
+Raise both defaults to 30 seconds, matching wait_for_server() in the same
+conftest. Both helpers poll and return as soon as the ping/request lands, so
+faster hardware pays nothing. The one negative check that passes an
+explicit timeout=1 (test_uploader_capabilities_in_empty_ping) is untouched.
+
+Upstream-Status: To upstream [fixed timeout sized for fast hardware, not riscv64-specific; not yet submitted]
+---
+ glean-core/python/tests/conftest.py  | 2 +-
+ glean-core/python/tests/test_glean.py | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/glean-core/python/tests/conftest.py b/glean-core/python/tests/conftest.py
+--- a/glean-core/python/tests/conftest.py
++++ b/glean-core/python/tests/conftest.py
+@@ -93,7 +93,7 @@
+
+ class Helpers:
+     @staticmethod
+-    def wait_for_ping(path, timeout=2) -> (str, str):
++    def wait_for_ping(path, timeout=30) -> (str, str):
+         """
+         Wait for a ping to appear in `path` for at most `timeout` seconds.
+
+diff --git a/glean-core/python/tests/test_glean.py b/glean-core/python/tests/test_glean.py
+--- a/glean-core/python/tests/test_glean.py
++++ b/glean-core/python/tests/test_glean.py
+@@ -39,7 +39,7 @@
+ ROOT = Path(__file__).parent
+
+
+-def wait_for_requests(server, n=1, timeout=2):
++def wait_for_requests(server, n=1, timeout=30):
+     """
+     Wait for `n` requests to be received by the server.
+
