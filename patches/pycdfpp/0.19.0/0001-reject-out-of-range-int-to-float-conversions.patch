@@ -1,0 +1,28 @@
+Upstream-Status: To upstream [not yet submitted]
+
+_keeps_every_value() checks an integer -> float conversion by casting the floats back to
+the integer type and comparing. A float outside that integer's range (uint32 2**32 - 1
+rounds to float32 2**32) makes the back-cast undefined: x86-64 wraps it to 0, so the
+mismatch is caught, but riscv64 saturates it to 2**32 - 1, the comparison passes, and
+the changed value is stored instead of raising ValueError. Reject out-of-range floats
+before the back-cast; the bounds (info.min, info.max + 1) are 0 or powers of two, exact
+in every float type.
+diff --git a/pycdfpp/__init__.py b/pycdfpp/__init__.py
+index fac1cbb..9b4e302 100644
+--- a/pycdfpp/__init__.py
++++ b/pycdfpp/__init__.py
+@@ -94,6 +94,14 @@ def _keeps_every_value(values: np.ndarray, converted: np.ndarray) -> bool:
+     if values.dtype.kind in "iu" and converted.dtype.kind in "iu":
+         info = np.iinfo(converted.dtype)
+         return info.min <= int(values.min()) and int(values.max()) <= info.max
++    if values.dtype.kind in "iu" and converted.dtype.kind == "f":
++        # Casting a float outside the integer range back to it is undefined and differs by
++        # architecture: x86-64 wraps (2**32 as uint32 gives 0, caught below), riscv64 saturates
++        # (it gives 2**32 - 1, so uint32 2**32 - 1 as float32 looked exact). Out-of-range values
++        # changed, so refuse them first; info.min and info.max + 1 are exact in any float type.
++        info = np.iinfo(values.dtype)
++        if not (bool(np.all(converted >= float(info.min))) and bool(np.all(converted < float(info.max + 1)))):
++            return False
+     with np.errstate(all="ignore"):
+         back = converted.astype(values.dtype)
+     return np.array_equal(back, values, equal_nan=values.dtype.kind == "f")

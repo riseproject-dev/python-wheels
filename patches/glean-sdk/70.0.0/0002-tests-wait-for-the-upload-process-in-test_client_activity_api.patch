@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH] tests: wait for the upload process in test_client_activity_api
+
+test_client_activity_api submits a baseline ping, waits for the uploader
+to record it, sleeps 0.1 seconds and submits the next baseline ping.
+
+The upload process only uploads the pings it finds in pending_pings/ when
+it starts, and ProcessDispatcher.dispatch() does not start a new one while
+the previous one is still running. On the riscv64 runner the upload
+process is still winding down (interpreter teardown) 0.1 seconds after it
+uploaded the first ping, so the trigger for the "inactive" baseline ping is
+dropped, the ping is never uploaded and the test fails with "No ping
+appeared ... within 30 seconds" whatever the timeout.
+
+Wait for the upload process to exit instead, like test_network.py does
+with ProcessDispatcher._wait_for_last_process(), so the next trigger
+always starts a fresh upload process.
+
+Upstream-Status: To upstream [race in the test exposed by slow hardware, not riscv64-specific; not yet submitted]
+---
+ glean-core/python/tests/test_glean.py | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/glean-core/python/tests/test_glean.py b/glean-core/python/tests/test_glean.py
+--- a/glean-core/python/tests/test_glean.py
++++ b/glean-core/python/tests/test_glean.py
+@@ -32,6 +32,7 @@ from glean.metrics import (
+     StringMetricType,
+ )
+ from glean.net import PingUploadWorker
++from glean._process_dispatcher import ProcessDispatcher
+ from glean.testing import _RecordingUploader
+ from glean._uniffi import glean_set_test_mode
+
+@@ -850,9 +851,9 @@ def test_client_activity_api(tmpdir, monkeypatch, helpers):
+     # It's an empty ping.
+     assert "metrics" not in payload
+
+-    # The upload process is fast, but not fast enough to communicate its status.
+-    # We give it just a blink of an eye to wind down.
+-    time.sleep(0.1)
++    # The upload process only sees pings already on disk when it starts, and
++    # a new one isn't spawned while it is still running. Wait for it to exit.
++    ProcessDispatcher._wait_for_last_process()
+     # Making it inactive
+     Glean.handle_client_inactive()
+
+@@ -861,9 +862,9 @@ def test_client_activity_api(tmpdir, monkeypatch, helpers):
+     assert payload["ping_info"]["reason"] == "inactive"
+     assert "glean.baseline.duration" in payload["metrics"]["timespan"]
+
+-    # The upload process is fast, but not fast enough to communicate its status.
+-    # We give it just a blink of an eye to wind down.
+-    time.sleep(0.1)
++    # The upload process only sees pings already on disk when it starts, and
++    # a new one isn't spawned while it is still running. Wait for it to exit.
++    ProcessDispatcher._wait_for_last_process()
+     # Once more active
+     Glean.handle_client_active()
+
