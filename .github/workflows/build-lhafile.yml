@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/FrodeSolheim/python-lhafile/blob/v0.3.1/.github/workflows/wheels.yml
+name: Build lhafile wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lhafile.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lhafile.yml'
+      - 'docs/packages/lhafile.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lhafile.yml'
+      - 'docs/packages/lhafile.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: lhafile
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build lhafile ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's cibuildwheel 2.22.0 defaults build no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+        libc: ["manylinux", "musllinux"]
+
+    env:
+      LHAFILE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout lhafile v${{ env.LHAFILE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: FrodeSolheim/python-lhafile
+          ref: v${{ env.LHAFILE_VERSION }}
+          persist-credentials: false
+
+      # Upstream runs no tests and its Python 2 era test_lhafile.py no longer runs on Python 3.
+      - name: Stage the archive decode check
+        run: |
+          cat > lhafile/tests/check_lhafile.py <<'EOF'
+          import glob, os, sys
+          import lhafile, lzhlib
+
+          assert lzhlib.__file__.endswith(".so"), lzhlib.__file__
+          seen = {}
+          for name in sorted(glob.glob(os.path.join(sys.argv[1], "*.lzh"))):
+              lha = lhafile.Lhafile(name)
+              for info in lha.infolist():
+                  if info.compress_type == b"-lhd-":
+                      continue
+                  if "_simple" in info.filename or "_complex" in info.filename:
+                      data = lha.read(info.filename)
+                      assert len(data) == info.file_size, (name, info.filename)
+                      seen.setdefault(info.filename.replace("\\", "/"), set()).add(data)
+          assert len(seen) == 11, sorted(seen)
+          assert all(len(v) == 1 for v in seen.values()), [k for k, v in seen.items() if len(v) != 1]
+          assert seen["archive/01_simple/03_test.txt"] == {b"abbcccddddeeeeebccddd"}
+          print(len(seen), "members decode identically across lh0/lh5/lh6/lh7 archives")
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: lhafile/tests
+          CIBW_TEST_COMMAND: python lhafile/tests/check_lhafile.py lhafile/tests
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.startswith("lzhlib.") and n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"COPYING.txt"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lhafile-${{ env.LHAFILE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish lhafile ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: lhafile-${{ matrix.version }}-*riscv64
