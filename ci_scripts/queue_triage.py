@@ -30,8 +30,8 @@ downloaded or any YAML is written:
    calling a dependency available.
 
 This complements rather than overlaps the existing helpers:
-`check_versions.py` compares the registry against PyPI for packages we
-*already* build (`ci_scripts/packages.txt`), and `wheel_contents.py`
+`check_versions.py` compares the registry against PyPI for active packages in
+`docs/packages/*.yaml`, and `wheel_contents.py`
 inspects the bytes *inside* one chosen wheel. This one chooses which
 version and which wheel are worth looking at in the first place.
 
