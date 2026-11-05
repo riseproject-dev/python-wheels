@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH] compat: drop distutils for Python 3.12+
+
+activedirectory.util.compat imports distutils.version at module load
+time, only to compare python-ldap's version against 2.4.0 with
+StrictVersion. distutils was removed from the standard library in
+Python 3.12 (PEP 632), so `import activedirectory` fails with
+"ModuleNotFoundError: No module named 'distutils'" on every interpreter
+this registry builds for (cp312, cp313, cp314, cp314t), unless
+setuptools happens to be installed and injects its vendored copy.
+
+Replace the four StrictVersion comparisons with one module-level
+(major, minor) tuple comparison computed from ldap.__version__. The
+behaviour is unchanged: install_requires already pins python-ldap>=3.0,
+so the check is always true for a supported install.
+
+Upstream-Status: To upstream [not yet submitted; upstream's tox.ini only covers py37/py38]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ lib/activedirectory/util/compat.py | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/lib/activedirectory/util/compat.py b/lib/activedirectory/util/compat.py
+index eb6a68a..f4d3462 100644
+--- a/lib/activedirectory/util/compat.py
++++ b/lib/activedirectory/util/compat.py
+@@ -9,7 +9,9 @@
+ import ldap
+ import ldap.dn
+ 
+-from distutils import version
++# distutils was removed from the standard library in Python 3.12 (PEP 632);
++# all it was used for here is comparing python-ldap's version against 2.4.
++_LDAP_2_4 = tuple(int(x) for x in ldap.__version__.split('.')[:2]) >= (2, 4)
+ 
+ # ldap.str2dn has been removed in python-ldap >= 2.3.6. We now need to use
+ # the version in ldap.dn.
+@@ -22,7 +24,7 @@ def disable_reverse_dns():
+     # Possibly add in a Kerberos minimum version check as well...
+     return hasattr(ldap, 'OPT_X_SASL_NOCANON')
+ 
+-if version.StrictVersion('2.4.0') <= version.StrictVersion(ldap.__version__):
++if _LDAP_2_4:
+     LDAP_CONTROL_PAGED_RESULTS = ldap.CONTROL_PAGEDRESULTS
+ else:
+     LDAP_CONTROL_PAGED_RESULTS = ldap.LDAP_CONTROL_PAGE_OID
+@@ -36,7 +38,7 @@ class SimplePagedResultsControl(ldap.controls.SimplePagedResultsControl):
+     """
+ 
+     def __init__(self, page_size=0, cookie=''):
+-        if version.StrictVersion('2.4.0') <= version.StrictVersion(ldap.__version__):
++        if _LDAP_2_4:
+             ldap.controls.SimplePagedResultsControl.__init__(
+                     self,
+                     size=page_size,
+@@ -51,13 +53,13 @@ class SimplePagedResultsControl(ldap.controls.SimplePagedResultsControl):
+                 )
+ 
+     def cookie(self):
+-        if version.StrictVersion('2.4.0') <= version.StrictVersion(ldap.__version__):
++        if _LDAP_2_4:
+             return self.cookie
+         else:
+             return self.controlValue[1]
+ 
+     def size(self):
+-        if version.StrictVersion('2.4.0') <= version.StrictVersion(ldap.__version__):
++        if _LDAP_2_4:
+             return self.size
+         else:
+             return self.controlValue[0]

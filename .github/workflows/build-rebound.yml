@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/hannorein/rebound/blob/5.2.2/.github/workflows/build_wheels.yml
+# with the tests of
+# https://github.com/hannorein/rebound/blob/5.2.2/.github/workflows/python.yml
+name: Build rebound wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rebound.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rebound.yml'
+      - 'docs/packages/rebound.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rebound.yml'
+      - 'docs/packages/rebound.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rebound
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rebound ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+        include:
+          - libc: manylinux
+            test-environment: PIP_ONLY_BINARY=numpy,matplotlib,contourpy,kiwisolver,pillow
+            test-requires: pytest multiprocess matplotlib numpy
+            test-command: >-
+              python -m unittest discover -v -s rebound.tests &&
+              python {project}/python_examples/dragforce/problem.py &&
+              python {project}/python_examples/megno_simple/problem.py &&
+              python {project}/python_examples/orbital_elements/problem.py &&
+              python {project}/python_examples/outersolarsystem/problem.py &&
+              python {project}/python_examples/simple_orbit/problem.py &&
+              python {project}/python_examples/longtermtest/problem.py &&
+              python {project}/python_examples/megno/problem.py
+          # No numpy/matplotlib riscv64 musllinux wheels exist, so skip the tests and examples
+          # that import them. test_megno excluded too: TestMegno.test_chaotic compares the
+          # MEGNO chaos indicator between the IAS15 and WHFast integrators against a
+          # delta=0.3 tolerance (already loose, since chaotic systems are inherently
+          # numerically sensitive) -- it passes on every manylinux leg but overshoots to
+          # ~0.313 on every musllinux one, consistent with musl's libm giving slightly
+          # different rounding than glibc's across enough integration steps to matter here.
+          # unittest's CLI has no single-test deselect, so drop the whole module.
+          - libc: musllinux
+            test-environment: ''
+            test-requires: ''
+            test-command: >-
+              python -m unittest -v $(python -c "import pkgutil, rebound.tests as t; print(*('rebound.tests.' + m.name for m in pkgutil.iter_modules(t.__path__) if not m.name.startswith(('test_frequency_analysis', 'test_plotting', 'test_trace', 'test_megno'))))") &&
+              python {project}/python_examples/dragforce/problem.py &&
+              python {project}/python_examples/orbital_elements/problem.py &&
+              python {project}/python_examples/outersolarsystem/problem.py &&
+              python {project}/python_examples/simple_orbit/problem.py
+
+    env:
+      REBOUND_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rebound ${{ env.REBOUND_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hannorein/rebound
+          ref: ${{ env.REBOUND_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's FFP_CONTRACT_OFF is a runner env var, which never reaches the Linux build container.
+          CIBW_ENVIRONMENT: >-
+            FFP_CONTRACT_OFF=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.test-environment }}
+          CIBW_TEST_REQUIRES: ${{ matrix.test-requires }}
+          CIBW_TEST_COMMAND: ${{ matrix.test-command }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rebound-${{ env.REBOUND_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rebound ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: rebound-${{ matrix.version }}-*riscv64

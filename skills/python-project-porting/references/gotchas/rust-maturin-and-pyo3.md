@@ -30,6 +30,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
 - **608** — A tagged release's own committed `Cargo.lock` can be stale by one version bump in
   the crate's own self-entry, which only `--locked` turns into a build failure.
+- **713** — A `build.rs` that downloads and syncs its own external C++ source tree mid-build
+  can be fixed with no patch at all, by pre-syncing that tree ourselves and pointing the
+  crate's documented env var (`SKIA_SOURCE_DIR`) at it instead of patching the
+  unconditional, un-opt-outable step that would otherwise crash first.
 - **371** — pyo3 0.22's version ceiling (gotcha 306) is a hard ceiling for a non-abi3,
   per-interpreter build too, one minor above its own release-time latest — the
   `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` escape hatch works without turning abi3 on.
@@ -1621,3 +1625,87 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       every test leg fails at `uv pip install` with "no wheels with a matching platform tag".
       pip accepts it. The riscv64 counterpart of "lowest floor" is `manylinux_2_31_riscv64`.
       Check with a dummy wheel and `uv pip compile --python-platform riscv64-unknown-linux`.
+
+686. **Bumping a stale pyo3/numpy(-rust) pin on a pyo3 crate embedded inside a monorepo
+    Cargo workspace (not the detached `local_dependencies/` copy a maturin sdist makes) hits
+    two traps before the bump even reaches a compile, both found by `cargo metadata`/`cargo
+    generate-lockfile` alone, no build needed (DeepFilterLib's pyDF, a sibling of
+    `pyDF-data` under one root `[workspace]`).**
+    - **The sibling-binding "links" conflict.** cibuildwheel's `package-dir: pyDF` still
+      builds from a live checkout, not a repackaged sdist, so Cargo auto-joins the ambient
+      root workspace (it walks up from `pyDF/Cargo.toml` and finds `[workspace] members =
+      [..., "pyDF", "pyDF-data", ...]`). A sibling member's own pyo3 pin then blocks the
+      bump outright: `pyo3-ffi` sets `links = "python"`, and Cargo refuses two different
+      versions of a `links`-key crate anywhere in one workspace resolve, even though only
+      `pyDF` is actually being built (`error: failed to select a version for 'pyo3-ffi' ...
+      conflicts with a previous package which links to 'python' as well`). Add an empty
+      `[workspace]` table to the crate's own `Cargo.toml` (same mechanism maturin's sdist
+      packaging uses to detach it) to make it its own workspace root; the fix is a patch to
+      one file, not to every sibling's pin.
+    - **The silent ndarray-major-version split.** Once detached, raising `pyo3`/`numpy`
+      (the rust-numpy crate) resolves fine on its own, but the crate's *own* direct `ndarray`
+      dependency (used for the plain `Array3`/`ArrayView3` types it builds before handing
+      them to `IntoPyArray`/`PyReadonlyArray3`) does not automatically track numpy-rust's
+      internal one. `cargo tree -i ndarray@<old>` after the bump showed the crate's own
+      `path`-dependency sibling still pinned to the old major (`^0.15`) while `numpy` had
+      moved to a newer one (`0.17.2`) — two incompatible `ndarray` majors in one graph,
+      which is allowed (it is an ordinary crate, not a `links` one) but breaks the
+      PyArray/ndarray trait impls at every call site with a nominal type mismatch, since
+      they are implemented for numpy-rust's own `ndarray::Array`. Loosening just the
+      top-level binding crate's `ndarray` req is not enough either: if a second crate in the
+      path (here `libDF`, which the binding calls into directly with `&ArrayView3`) has its
+      *own* separate `ndarray` dependency, it has to move to the same major too, or the
+      split just relocates one hop down. Check with `cargo tree -i ndarray@<version>` for
+      every version `cargo metadata`'s resolve shows, not by reading either Cargo.toml in
+      isolation — and if the called-into crate's own API used ndarray methods that moved
+      between the two majors (`into_shape` was renamed/removed around 0.16), the version
+      bump needs a source patch there too, not just a `Cargo.toml` edit, which this port's
+      sandbox had no way to verify (compiling external code was blocked), so it was left
+      for whoever picks up the follow-up with a real compiler to confirm against.
+
+713. **A `build.rs` that downloads and syncs its own external C++ source tree mid-build
+    (not a vendored git submodule we can patch) can still be fixed with no patch at all,
+    by pre-populating that source tree ourselves and pointing the crate's own documented
+    env var at it — read the build script before assuming `patches/<pkg>/` is the only
+    lever (the dxpdf/skia-bindings case; see `build-dxpdf.yml`).** `skia-bindings` 0.99.0
+    (skia-safe/skia-python's binding crate) downloads Google's Skia from
+    `rust-skia/skia` and runs its `tools/git-sync-deps` unconditionally inside `cargo
+    build`'s build script, well before `gn gen`/`ninja` ever run. `git-sync-deps` then
+    unconditionally execs `bin/fetch-gn` as its last step, with no opt-out flag (unlike
+    its own `--skip-emsdk`), and `fetch-gn`'s CPU map (gotcha 423) has no `riscv64`
+    entry — `KeyError: 'riscv64'` aborts the whole build before our own
+    `SKIA_GN_COMMAND`/`SKIA_NINJA_COMMAND` overrides are ever consulted, because those
+    only gate the later `gn gen`/`ninja` calls, not `git-sync-deps` itself. Unlike
+    skia-python (gotcha 423's other case), there is no git checkout of Skia in *this*
+    package's own repo to patch — it is fetched fresh inside the registry crate's build
+    script run, so a `patches/dxpdf/<version>/*.patch` `git apply` step can never reach
+    it.
+    - **Read the build script for an already-wired escape hatch before reaching for
+      `[patch.crates-io]`.** `skia-bindings`' `build.rs` branches on `SKIA_SOURCE_DIR`:
+      set, and it takes a wholly different "offline" path straight to `gn gen`/`ninja`
+      that never calls `git-sync-deps`/`fetch-gn` at all; unset, it downloads Skia itself
+      and always calls them. The crate already does the hard part (an alternate code
+      path that avoids the broken call) — it only needs a complete, already-synced Skia
+      tree to point at.
+    - **Replicate the exact steps the build script would have run, just earlier, in
+      `CIBW_BEFORE_ALL_LINUX`.** The pinned Skia tag lives in the crate's own
+      `Cargo.toml` (`[package.metadata] skia = "<tag>"`, confirmed from the failed job's
+      own `DOWNLOADING: https://codeload.github.com/rust-skia/skia/tar.gz/<tag>` line) —
+      `curl`+`tar --strip-components=1` that same tarball, then run
+      `GIT_SYNC_DEPS_SKIP_EMSDK=1 python3 tools/git-sync-deps` on it and let that single
+      command fail (`|| true`): by the time it reaches the now-irrelevant `fetch-gn`
+      call, `git_sync_deps()` has already cloned every `third_party/externals/*` pin
+      declared in `DEPS` — the failure happens strictly after the part we need
+      succeeds, confirmed from the same job log that showed every dependency synced
+      *before* the `fetch-gn` traceback. Sanity-check with a non-empty-directory test on
+      one externally-synced path (e.g. `third_party/externals/freetype`) rather than
+      trusting the ignored exit code blindly.
+    - **A GN action can still hardcode `rebase_path("//bin/gn")`** (gotcha 423's
+      skia-python precedent) independent of whatever `gn` resolves to on `PATH` or via
+      `SKIA_GN_COMMAND` — copy the same built `gn` binary to `<SKIA_SOURCE_DIR>/bin/gn`
+      too, defensively, even though `SKIA_SOURCE_DIR`'s offline path never runs the
+      script that would normally have put it there.
+    - **GitHub's `codeload.github.com` can 403 a plain default-UA `curl`** the same way
+      gotcha 300 found for `crates.io`'s download endpoint — add `-A
+      "<anything descriptive>"` rather than debugging it as a network/availability
+      problem.
