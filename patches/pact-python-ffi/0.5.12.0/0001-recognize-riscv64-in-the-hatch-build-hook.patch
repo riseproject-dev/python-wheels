@@ -1,0 +1,50 @@
+From 86323048497bdfc8b5219ce9ef844da4c527d715 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 10 Sep 2026 00:00:00 +0000
+Subject: [PATCH] recognize riscv64 in the hatch build hook
+
+hatch_build.py downloads a prebuilt libpact_ffi archive from
+pact-foundation/pact-reference's GitHub releases and compiles the CFFI
+extension against it. `_target` maps the wheel platform tag from
+`_sys_tag_platform()` to the Rust target triple of that archive and only
+recognizes the `_aarch64`/`_x86_64` suffixes, so on riscv64 the build
+dies with `UnsupportedPlatformError: Unsupported platform
+manylinux_2_39_riscv64` before anything is fetched.
+
+pact-reference publishes no riscv64 libpact_ffi asset (there is no
+prebuilt binary to download), so recognizing the platform alone does
+not make the download succeed. Paired with this patch, the riscv64 CI
+job builds libpact_ffi from the pact-reference source at the matching
+tag and stages a `pact_ffi-riscv64gc-unknown-linux-gnu.tar.xz` archive
+(and its .sha256) at the exact `src/pact_ffi/data/` path `_download()`
+already caches to, so it is picked up without a network request.
+
+This is the 0.5.12.0 form of the 0.5.8.0 patch: the hook no longer
+builds a download URL per platform (`_lib_url`) but derives a target
+triple (`_target`), and `_sys_tag_platform()` already prefers the
+manylinux tag over the generic linux_<arch> one, so only the riscv64
+arch case is left to add.
+
+Upstream-Status: To upstream [blocked: pact-reference publishes no riscv64 libpact_ffi release asset yet]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ pact-python-ffi/hatch_build.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/pact-python-ffi/hatch_build.py b/pact-python-ffi/hatch_build.py
+index 95597c3..26675dd 100644
+--- a/pact-python-ffi/hatch_build.py
++++ b/pact-python-ffi/hatch_build.py
+@@ -238,6 +238,8 @@ class PactBuildHook(BuildHookInterface[Any]):
+             arch = "aarch64"
+         elif wheel_platform.endswith(("_x86_64", "_amd64")):
+             arch = "x86_64"
++        elif wheel_platform.endswith("_riscv64"):
++            arch = "riscv64gc"
+         else:
+             raise UnsupportedPlatformError(wheel_platform)
+ 
+-- 
+2.43.0
+

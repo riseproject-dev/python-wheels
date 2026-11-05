@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 10:56:11 +0000
+Subject: [PATCH] Accept the non-x86_64 SoC-aware schedule count in
+ test_soc_aware
+
+test_soc_aware hardcodes 142 schedules for the first graph, a value
+only x86_64 produces. hopcroft-karp drives its DFS by iterating an
+FxHashSet (std HashMap), whose iteration order depends on hashbrown's
+SIMD group width: 16 with SSE2 on x86_64, 8 on aarch64 (NEON) and on
+the generic backend (riscv64). The heuristic then picks a different
+maximum matching and ends with 141 schedules on the first graph, every
+one within max_delta_soc. Reproduced with the same source, Cargo.lock
+and rustc 1.99.1 under qemu-user for riscv64gc and aarch64 (both 141;
+x86_64 142, independent of RAYON_NUM_THREADS); upstream's own cargo
+tests, including validate_sum_of_node_weights, pass on riscv64.
+Upstream's Python tests only run on x86_64, so its released aarch64
+wheels fail this assertion too. Branch the expected value on the
+machine instead of skipping the test.
+
+Upstream-Status: To upstream [not submitted from this automated port run]
+---
+ test/test_eflips_schedule_rust.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/test/test_eflips_schedule_rust.py b/test/test_eflips_schedule_rust.py
+index 5aed547..3fb702a 100644
+--- a/test/test_eflips_schedule_rust.py
++++ b/test/test_eflips_schedule_rust.py
+@@ -1,5 +1,6 @@
+ import json
+ import os.path
++import platform
+ import unittest
+ from eflips_schedule_rust import solve
+ import networkx as nx
+@@ -57,7 +58,11 @@ class TheTestCase(unittest.TestCase):
+             number_of_schedules.append(nx.number_connected_components(G))
+ 
+         # Print the number of connected components
+-        self.assertEqual(number_of_schedules, [142, 64, 21, 11, 9, 5, 5, 2, 1, 1, 1, 1])
++        # hopcroft-karp walks an FxHashSet, whose iteration order follows
++        # hashbrown's SIMD group width (16 on x86_64, 8 on aarch64/riscv64),
++        # so the heuristic finds an equally valid plan one schedule shorter.
++        first = 142 if platform.machine() in ("x86_64", "AMD64") else 141
++        self.assertEqual(number_of_schedules, [first, 64, 21, 11, 9, 5, 5, 2, 1, 1, 1, 1])
+ 
+ 
+ if __name__ == "__main__":
