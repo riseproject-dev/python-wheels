@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 25 Oct 2026 00:00:00 +0000
+Subject: [PATCH] silence unused --gcc-toolchain flag on native riscv64 clang
+ builds
+
+The top-level makefile always appends `--gcc-toolchain=$(GCC_TOOLCHAIN_PATH)`
+to every C.COMPILE invocation (dev/make/common.mk), with
+GCC_TOOLCHAIN_PATH derived from `which gcc` (resolving to /usr in the
+manylinux_riscv64 image). On this native riscv64 host, with no
+`--target=` passed (clang.ref.riscv64.mk only adds one when
+COMPILER_is_cross is "yes"), clang's riscv64 driver never consults the
+GCC installation for the compile-only (`-c`) step the flag is passed
+on, so it is flagged as unused:
+
+    clang++: error: argument unused during compilation:
+    '--gcc-toolchain=/usr' [-Werror,-Wunused-command-line-argument]
+    make: *** [makefile:567: .../daal_strings.o] Error 1
+
+-Werror (set right alongside in COMPILER.lnx.clang) turns that into a
+hard build failure for every translation unit. Upstream already works
+around the identical situation for icx's -static-libstdc++ flag
+(COMPILER.lnx.icx in dev/make/compiler_definitions/icx.mkl.32e.mk also
+pairs -Werror with a `-Wno-unused-command-line-argument` for a flag
+that is unused at compile time but still needed at link time); do the
+same here instead of dropping -Werror or the toolchain flag.
+
+Upstream-Status: Inappropriate [this build-system flag combination is only exercised by a native (non-cross) riscv64 host, which upstream CI never runs]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/dev/make/compiler_definitions/clang.ref.riscv64.mk b/dev/make/compiler_definitions/clang.ref.riscv64.mk
+--- a/dev/make/compiler_definitions/clang.ref.riscv64.mk
++++ b/dev/make/compiler_definitions/clang.ref.riscv64.mk
+@@ -37,6 +37,7 @@ COMPILER.sysroot = $(if $(SYSROOT),--sysroot $(SYSROOT))
+ 
+ COMPILER.lnx.clang= clang++ \
+                      -DDAAL_REF -DONEDAL_REF -DDAAL_CPU=rv64 -Werror -Wreturn-type \
++                     -Wno-unused-command-line-argument \
+                      $(COMPILER.lnx.clang.target) \
+                      $(COMPILER.sysroot)
+ 
