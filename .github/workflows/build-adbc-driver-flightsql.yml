@@ -113,7 +113,12 @@ jobs:
             -DADBC_DRIVER_FLIGHTSQL=ON
           cmake --build build --target install -j"$(nproc)"
 
-          (cd go/adbc && go build -o /workspace/testserver ./driver/flightsql/cmd/testserver)
+          # The Go module moved from go/adbc to go/driver/flightsql in 1.13.0.
+          if [ -d go/driver/flightsql ]; then
+            (cd go/driver/flightsql && go build -o /workspace/testserver ./cmd/testserver)
+          else
+            (cd go/adbc && go build -o /workspace/testserver ./driver/flightsql/cmd/testserver)
+          fi
           # Set the executable bit while still root: the host step below runs as
           # the unprivileged runner user, which can't chmod a file this container
           # (running as root) wrote to the bind-mounted checkout.
@@ -175,8 +180,10 @@ jobs:
           pip install -q --upgrade pip
           # adbc-driver-manager/pandas/pyarrow riscv64 wheels only exist on our
           # own registry. protobuf is upstream's own [test] extra (test_errors.py/
-          # test_incremental.py import google.protobuf directly).
-          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ pip install -q \
+          # test_incremental.py import google.protobuf directly). PyPI's newest
+          # pandas has no riscv64 wheel and its sdist fails to build (meson/xsimd),
+          # so install pandas wheel-only and let pip back off to a registry release.
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas pip install -q \
             wheelhouse/*.whl adbc-driver-manager numpy pandas protobuf "pyarrow>=14.0.1" "pytest>=9"
 
           export ADBC_TEST_FLIGHTSQL_URI="grpc://localhost:41414"

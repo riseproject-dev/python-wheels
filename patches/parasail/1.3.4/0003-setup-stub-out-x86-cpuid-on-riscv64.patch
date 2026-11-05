@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH] setup: stub out x86 CPUID in parasail's cpuid.c on riscv64
+
+Upstream-Status: To upstream [not yet submitted; the real fix is adding __riscv to the non-x86 stub guard of jeffdaily/parasail's src/cpuid.c, which this setup.py downloads from master at build time]
+
+jeffdaily/parasail's src/cpuid.c only compiles its parasail_can_use_*()
+stubs for arm/aarch64/powerpc; every other architecture falls through
+to the x86 branch and its inline `__asm__("cpuid" : "+b" ...)`, which
+GCC rejects on riscv64 with "impossible constraint in 'asm'", so make
+dies on src/libparasail_la-cpuid.lo. configure already reports every
+SIMD ISA as unsupported on riscv64, so the stubs (all returning 0) are
+exactly right: the dispatchers then pick the portable implementations.
+
+Rewrite that guard to include __riscv after the archive is unzipped and
+before configure/make run. riscv64-only in effect.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index c3e4213..32594de 100644
+--- a/setup.py
++++ b/setup.py
+@@ -335,6 +335,18 @@ def build_parasail(libname):
+         if found:
+             shutil.copy(found[0], os.path.join(parasail_root, config_aux))
+ 
++    # src/cpuid.c stubs out its x86 CPUID asm only for arm/aarch64/ppc;
++    # add riscv64 to that list so it doesn't try to assemble x86 cpuid.
++    cpuid_c = os.path.join(parasail_root, 'src', 'cpuid.c')
++    with open(cpuid_c) as f:
++        cpuid_src = f.read()
++    cpuid_src = cpuid_src.replace(
++        '#if defined(__arm__) || defined(__aarch64__) || defined(__powerpc__)',
++        '#if defined(__riscv) || defined(__arm__) || defined(__aarch64__) || defined(__powerpc__)',
++        1)
++    with open(cpuid_c, 'w') as f:
++        f.write(cpuid_src)
++
+     root = find_file('configure', parasail_root)
+     if root is None:
+         print("Unable to find parasail configure script")
+-- 
+2.50.1
