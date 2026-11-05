@@ -47,9 +47,8 @@ A new package contribution contains at least:
 - `docs/packages/<pkg>.yaml`.
 
 It may also contain versioned patches under `patches/<pkg>/<version>/`. A patch
-must contain a valid `Upstream-Status:` header. Do not add the package manually
-to `ci_scripts/packages.txt`; `ci_scripts/update_doc.py` does that after the
-first successful publication.
+must contain a valid `Upstream-Status:` header. The package YAML itself registers
+the package for publication and maintenance.
 
 The package YAML is the source of truth for versions:
 
@@ -242,8 +241,8 @@ The publication commit fills the declared version entry with:
 - a per-version license only when wheel metadata identifies a meaningful change
   from the package's top-level license.
 
-On a package's first publication, the same commit adds it to
-`ci_scripts/packages.txt`, which makes it eligible for nightly checks.
+On a package's first publication, the package YAML makes it eligible for nightly
+checks without a separate package list.
 
 ### Serialization
 
@@ -298,9 +297,8 @@ and the site deploy succeeds.
 ## 4. Nightly upgrades and maintenance
 
 `nightly.yml` runs on a schedule (Mondays and Thursdays at 02:00 UTC), by manual dispatch, and for PRs that modify
-its version-checking logic. Its `check_versions` job reads the tracked package
-set from `ci_scripts/packages.txt` and compares package YAML/release state with
-PyPI.
+its version-checking logic. Its `check_versions` job lists active package YAML
+files under `docs/packages/` and compares their release state with PyPI.
 
 The detection phase leaves the checkout clean and writes reports. For each
 package it can detect:
@@ -332,8 +330,7 @@ For every actionable result, the workflow re-runs
 2. rebase existing package work onto the current `main` and push that rebase
    even if the requested declaration is already present;
 3. declare new pending versions, mark yanked versions, or apply deprecation;
-4. commit only `docs/packages/<pkg>.yaml` and, for deprecation, the relevant
-   package/deprecated lists;
+4. commit only `docs/packages/<pkg>.yaml` and any carried patches;
 5. push with a lease when updating an existing branch;
 6. open or update a draft PR titled `<normalized-pkg>: update packages`.
 
@@ -353,10 +350,9 @@ performing those operations simultaneously.
 
 When upstream supplies riscv64 wheels (including a compatible `abi3` wheel) or
 only universal pure-Python wheels, nightly can propose deprecation. The package
-YAML is marked deprecated, the package is removed from
-`ci_scripts/packages.txt`, and it is added to `ci_scripts/deprecated.txt`.
-`check_deprecated_packages` continues checking that deprecated upstream support
-has not disappeared.
+YAML is marked with `deprecated:`. `check_deprecated_packages` discovers those
+YAML files directly and continues checking that deprecated upstream support has
+not disappeared.
 
 Versions yanked on PyPI are marked `yanked: true` in the package YAML. The
 Simple API renders this using the corresponding package-index yank metadata.
@@ -366,8 +362,6 @@ The other nightly jobs are independent of package-branch mutation:
 
 - `check_deprecated_packages` verifies that deprecated packages still provide a
   riscv64 or universal wheel upstream;
-- `check_installation` performs a basic install of the tracked package set on a
-  riscv64 runner;
 - `pip_audit` scans the installed packages and reports vulnerabilities.
 
 ## 5. Manual rebuilds and failure recovery
