@@ -19,6 +19,9 @@ other state, including queued/running workflows, failures, and no workflows.
 With ``--merge``, passing PRs are marked ready and squash-merged.  GitHub still
 enforces branch protection, required reviews, and mergeability.
 
+With ``--author``, PRs from any other author are left untouched (never marked
+ready, converted to draft, or merged).
+
 The token needs pull-request write and actions read access; merging also needs
 contents write access.  Example:
 
@@ -30,17 +33,21 @@ In GitHub Actions, GITHUB_TOKEN is used by default.
 import argparse
 import os
 import sys
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 import requests
-from github import Auth, Github
+from github import Auth, Github, GithubException
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 from github.WorkflowRun import WorkflowRun
 
 REPOSITORY = "riseproject-dev/python-wheels"
 PASSING_CONCLUSIONS = {"success", "skipped"}
+MERGE_REJECTED_STATUSES = {403, 405, 409, 422}
+MERGEABLE_WAIT_SECONDS = 30
+MERGEABLE_POLL_SECONDS = 1
 
 
 def convert_to_draft(token: str, pr: PullRequest) -> None:
@@ -48,8 +55,10 @@ def convert_to_draft(token: str, pr: PullRequest) -> None:
 
     PyGithub's PullRequest.convert_to_draft() calls GitHub's GraphQL API,
     which Claude Code sessions cannot reach (the REST API has no classic
-    endpoint for this direction either). Use the CCR REST route the
-    platform provides instead; it works the same everywhere else too.
+    endpoint for this direction either), so try the CCR REST route the
+    platform provides first.  That route only exists inside those sessions;
+    anywhere else (e.g. GitHub Actions) it answers 404 and the GraphQL call
+    is used instead.
     """
     response = requests.post(
         f"https://api.github.com/repos/{REPOSITORY}/pulls/{pr.number}/ccr/convert_to_draft",
@@ -59,6 +68,9 @@ def convert_to_draft(token: str, pr: PullRequest) -> None:
         },
         timeout=30,
     )
+    if response.status_code == 404:
+        pr.convert_to_draft()
+        return
     response.raise_for_status()
 
 
@@ -102,6 +114,25 @@ def workflow_state(runs: Iterable[WorkflowRun]) -> WorkflowState:
     return WorkflowState("passing", latest)
 
 
+def wait_for_mergeable(pr: PullRequest) -> bool | None:
+    """Wait for GitHub's asynchronous mergeability computation.
+
+    GitHub returns ``null`` for ``mergeable`` until its background merge test
+    completes.  Refresh the PR until GitHub returns a boolean or the bounded
+    wait expires.
+    """
+    mergeable = pr.mergeable
+    deadline = time.monotonic() + MERGEABLE_WAIT_SECONDS
+    while mergeable is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(MERGEABLE_POLL_SECONDS, remaining))
+        pr.update()
+        mergeable = pr.mergeable
+    return mergeable
+
+
 def sync_pull_request(
     repo: Repository, pr: PullRequest, dry_run: bool, merge: bool, token: str
 ) -> str:
@@ -110,7 +141,8 @@ def sync_pull_request(
     # SHA to GitHub and also check every returned run locally so workflows for
     # an older PR commit can never affect the result.
     runs = (
-        run for run in repo.get_workflow_runs(head_sha=head_sha)
+        run
+        for run in repo.get_workflow_runs(head_sha=head_sha)
         if run.head_sha == head_sha
     )
     state = workflow_state(runs)
@@ -122,11 +154,32 @@ def sync_pull_request(
             if not dry_run:
                 pr.mark_ready_for_review()
         if merge:
-            actions.append("squash merge")
-            if not dry_run:
-                result = pr.merge(merge_method="squash", sha=pr.head.sha)
-                if not result.merged:
-                    actions[-1] = f"merge rejected: {result.message}"
+            mergeable = wait_for_mergeable(pr)
+            if mergeable is None:
+                actions.append("merge deferred: mergeability still being computed")
+            elif not mergeable:
+                actions.append("merge rejected: Pull Request has merge conflicts")
+            else:
+                actions.append("squash merge")
+                if not dry_run:
+                    try:
+                        result = pr.merge(merge_method="squash", sha=head_sha)
+                    except GithubException as exc:
+                        # GitHub answers 405 when the PR cannot be merged (e.g. merge
+                        # conflicts), 409 when its head moved since we looked, 422 for
+                        # other validation failures and 403 when the token may not merge
+                        # it.  These affect only this PR, so report them and carry on.
+                        if exc.status not in MERGE_REJECTED_STATUSES:
+                            raise
+                        message = (
+                            exc.data.get("message")
+                            if isinstance(exc.data, dict)
+                            else None
+                        )
+                        actions[-1] = f"merge rejected: {message or exc.status}"
+                    else:
+                        if not result.merged:
+                            actions[-1] = f"merge rejected: {result.message}"
     elif not pr.draft:
         actions.append("convert to draft")
         if not dry_run:
@@ -143,6 +196,20 @@ def sync_pull_request(
     return action
 
 
+def is_author(pr: PullRequest, author: str) -> bool:
+    """Whether the PR was opened by ``author``.
+
+    Accepts ``gh``-style app names (``app/riseproject-dev``), which the REST API
+    reports as the bot login ``riseproject-dev[bot]``, as well as plain user
+    logins.  Logins are case-insensitive.
+    """
+    wanted = author.lower()
+    login = pr.user.login.lower()
+    if wanted.startswith("app/"):
+        return login == f"{wanted.removeprefix('app/')}[bot]"
+    return login == wanted
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -157,6 +224,11 @@ def parse_args():
         dest="prs",
         metavar="NUMBER",
         help="process only this PR (repeatable; default: every open PR)",
+    )
+    parser.add_argument(
+        "--author",
+        help="only modify and merge PRs opened by this author, e.g. "
+        "app/riseproject-dev or a user login (default: any author)",
     )
     parser.add_argument(
         "--merge",
@@ -189,6 +261,9 @@ def main() -> int:
         for pr in pull_requests:
             if pr.state != "open":
                 print(f"PR #{pr.number}: closed; unchanged")
+                continue
+            if args.author and not is_author(pr, args.author):
+                print(f"PR #{pr.number}: author {pr.user.login}; skipped")
                 continue
             sync_pull_request(repo, pr, args.dry_run, args.merge, args.token)
     finally:

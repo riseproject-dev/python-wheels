@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 00:00:00 +0000
+Subject: [PATCH] test: tolerate a host with no /var/log/syslog
+
+collect_logs() is called from Variant.prepare_result() after every single
+austin invocation, and on Linux it opens /var/log/syslog unconditionally. That
+file is an rsyslog artefact: a journald-only host (Fedora, RHEL, Rocky, Arch,
+or a minimal Ubuntu image like the self-hosted riscv64 runners) has none, so
+the helper raises before the test under it can assert anything:
+
+    test/utils.py:154: in collect_logs
+        with Path("/var/log/syslog").open(errors="replace") as logfile:
+    E   FileNotFoundError: [Errno 2] No such file or directory: '/var/log/syslog'
+
+    ================== 40 failed, 27 skipped in 512.75s (0:08:32) ==================
+
+Every failure in that run was this line; nothing about austin was exercised.
+Return no logs when the file is absent, which is what the macOS branch below
+already does, and leave the diagnostics untouched where rsyslog is installed.
+
+Upstream-Status: To upstream [not yet submitted]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/test/utils.py b/test/utils.py
+--- a/test/utils.py
++++ b/test/utils.py
+@@ -151,7 +151,12 @@ def collect_logs(variant: str, pid: int) -> List[str]:
+     needles: tuple[str, ...]
+     match platform.system():
+         case "Linux":
+-            with Path("/var/log/syslog").open(errors="replace") as logfile:
++            syslog = Path("/var/log/syslog")
++            if not syslog.is_file():
++                # Not every Linux host has rsyslog; on a journald-only system
++                # there is no file to grep for austin's messages.
++                return []
++            with syslog.open(errors="replace") as logfile:
+                 needles = (f"{variant}[{pid}]", f"systemd-coredump[{pid}]")
+                 return [
+                     f" logs for {variant}[{pid}] ".center(80, "="),
