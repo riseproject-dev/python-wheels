@@ -41,6 +41,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
   `egg-info` instead of the installed wheel, not just `import <pkg>` (extends gotcha 25).
 - **667** — A src-layout project's pytest `pythonpath = ["src"]` ini option shadows the
   wheel from `{project}/tests` even though the package is not at the checkout root.
+- **680** — `--doctest-modules --pyargs <pkg>` can crash at collection on a cffi project's own
+  build helper, even though the package's real doctests are fine.
 
 ---
 
@@ -693,7 +695,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       into `{project}` for cibuildwheel to carry into the container (gotcha 7) therefore finds
       `{project}/<pkg>.egg-info`, the in-tree build's leftover, even though cibuildwheel's
       test cwd is a fresh temp dir (the sqlcipher3 case). `cd` doesn't help there. Run it as
-      `python -P {project}/<script>.py` (3.11+, which the default matrix always is): `-P`
+      `python -P {project}/<script>.py` (3.11+; with cp39/cp310 in the matrix use `python -I`): `-P`
       skips that `sys.path[0]` entry, and the script itself still runs.
 
 618. **`--import-mode=importlib` does not immunize a package-nested test suite against
@@ -771,3 +773,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       one-line test that prints `<pkg>.__file__`, and run it once from the checkout (shows
       `.../src/<pkg>/__init__.py`) and once from a dir holding only `tests/` +
       `pyproject.toml` (shows site-packages).
+
+680. **`--doctest-modules --pyargs <pkg>` can crash at collection on a cffi project's own
+    build helper, even though the package's real doctests are fine (the imagequant case).**
+    A `cffi_modules` project's `*_build.py` script (e.g. `libimagequant_build.py`, which calls
+    `ffibuilder.set_source()`/`ffibuilder.cdef()`) ships inside the installed package alongside
+    `__init__.py` — `setup.py` never excludes it, and `--pyargs <pkg>` collects every `.py`
+    file under the resolved package, not just the one with doctests. The script's own
+    top-level `ffibuilder.cdef(open("<pkg>/<header>.h").read())` call then raises
+    `FileNotFoundError`: the header it reads is build-time-only (consumed by `set_source()`
+    into the compiled extension) and is not itself shipped in the wheel, only alongside the
+    helper in the checkout. Upstream's own test session (`pytest --doctest-modules <pkg>`,
+    run from a nox/tox session) never hits this, because it collects from the **source
+    checkout**, where the header sits right next to the helper — a cibuildwheel test step
+    collects the **installed wheel** instead, a different layout upstream's own CI never
+    exercises.
+    - **Fix by not collecting the whole package** — target the real module file directly,
+      resolved off the *installed* location rather than the checkout, so the build helper
+      never enters collection:
+      `pytest --doctest-modules "$(python -c "import <pkg>, os; print(os.path.join(os.path.dirname(<pkg>.__file__), '__init__.py'))")"`.
+    - **The tell**: a collection-time `FileNotFoundError` naming a `.h`/build-script path
+      under the package's own `site-packages` directory, with the doctests you actually
+      wrote never getting a chance to run.

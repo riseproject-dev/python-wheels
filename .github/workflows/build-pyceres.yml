@@ -1,0 +1,311 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cvg/pyceres/blob/v2.6/.github/workflows/build.yml
+# Upstream vcpkg-installs ceres[lapack,schur,suitesparse], gflags and glog in
+# ci/install-ceres-almalinux.sh (cibuildwheel's before-all). vcpkg has no riscv64
+# binary cache, so those libraries are built once here from the versions upstream's
+# vcpkg commit pins, and the per-interpreter wheel jobs build only the bindings.
+name: Build pyceres wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyceres.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyceres.yml'
+      - 'docs/packages/pyceres.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyceres.yml'
+      - 'docs/packages/pyceres.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  DNF_PACKAGES: ninja-build eigen3-devel openblas-devel
+  GFLAGS_VERSION: 2.2.2
+  GLOG_VERSION: 0.7.1
+  SUITESPARSE_VERSION: 7.8.3
+  CERES_VERSION: 2.2.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyceres
+      version: ${{ inputs.version }}
+
+  ceres:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build Ceres Solver manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      - name: Restore the Ceres Solver SDK
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sdk
+          key: pyceres-deps-manylinux_riscv64-gflags${{ env.GFLAGS_VERSION }}-glog${{ env.GLOG_VERSION }}-suitesparse${{ env.SUITESPARSE_VERSION }}-ceres${{ env.CERES_VERSION }}
+
+      - name: Build the Ceres Solver SDK
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p sdk
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}/sdk:/opt/ceres" \
+            -e DNF_PACKAGES \
+            -e GFLAGS_VERSION -e GLOG_VERSION -e SUITESPARSE_VERSION -e CERES_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False ${DNF_PACKAGES}
+
+          # gflags 2.2.2 declares a cmake_minimum_required CMake 4 rejects.
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          common=(-GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/ceres
+                  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH=/opt/ceres -DBLA_VENDOR=OpenBLAS)
+          licenses=/opt/ceres/share/licenses
+          mkdir -p "${licenses}"
+          cd /tmp
+
+          git clone --depth 1 --branch "v${GFLAGS_VERSION}" https://github.com/gflags/gflags
+          cmake -S gflags -B gflags/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=OFF -DBUILD_TESTING=OFF \
+            -DBUILD_gflags_nothreads_LIB=OFF \
+            -DGFLAGS_REGISTER_BUILD_DIR=OFF -DGFLAGS_REGISTER_INSTALL_PREFIX=OFF
+          cmake --build gflags/build --target install --parallel "$(nproc)"
+          cp gflags/COPYING.txt "${licenses}/gflags-COPYING.txt"
+
+          git clone --depth 1 --branch "v${GLOG_VERSION}" https://github.com/google/glog
+          cmake -S glog -B glog/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DWITH_GFLAGS=ON -DWITH_GTEST=OFF
+          cmake --build glog/build --target install --parallel "$(nproc)"
+          cp glog/COPYING "${licenses}/glog-COPYING"
+
+          # upstream's vcpkg ceres[suitesparse] pulls CHOLMOD's GPL modules and SPQR in.
+          git clone --depth 1 --branch "v${SUITESPARSE_VERSION}" https://github.com/DrTimothyAldenDavis/SuiteSparse
+          cmake -S SuiteSparse -B SuiteSparse/build "${common[@]}" \
+            -DSUITESPARSE_ENABLE_PROJECTS="suitesparse_config;amd;camd;colamd;ccolamd;cholmod;spqr" \
+            -DBUILD_STATIC_LIBS=OFF -DBUILD_TESTING=OFF -DSUITESPARSE_DEMOS=OFF \
+            -DSUITESPARSE_USE_FORTRAN=OFF -DSUITESPARSE_USE_CUDA=OFF -DSUITESPARSE_USE_OPENMP=OFF \
+            -DSUITESPARSE_USE_STRICT=ON
+          cmake --build SuiteSparse/build --target install --parallel "$(nproc)"
+          cp SuiteSparse/LICENSE.txt "${licenses}/SuiteSparse-LICENSE.txt"
+          cp SuiteSparse/SPQR/Doc/gpl.txt "${licenses}/SuiteSparse-gpl.txt"
+
+          git clone --depth 1 --branch "${CERES_VERSION}" https://github.com/ceres-solver/ceres-solver
+          cmake -S ceres-solver -B ceres-solver/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
+            -DGFLAGS=OFF -DUSE_CUDA=OFF -DEIGENSPARSE=OFF -DSUITESPARSE=ON -DLAPACK=ON \
+            -DSCHUR_SPECIALIZATIONS=ON -DPROVIDE_UNINSTALL_TARGET=OFF
+          cmake --build ceres-solver/build --target install --parallel "$(nproc)"
+          cp ceres-solver/LICENSE "${licenses}/ceres-solver-LICENSE"
+
+          dnf reinstall -y --setopt=tsflags= eigen3-devel
+          for file in $(rpm -qL eigen3-devel | grep -v '^(contains no files)$'); do
+            cp "${file}" "${licenses}/eigen3-$(basename "${file}")"
+          done
+          ls "${licenses}"
+          SCRIPT
+
+      - name: Save the Ceres Solver SDK
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sdk
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Pack the Ceres Solver SDK
+        run: tar -C sdk -czf ceres-sdk.tar.gz .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyceres-ceres-sdk
+          path: ceres-sdk.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, ceres]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyceres ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      PYCERES_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyceres ${{ env.PYCERES_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cvg/pyceres
+          ref: v${{ env.PYCERES_VERSION }}
+          persist-credentials: false
+
+      - name: Download the Ceres Solver SDK
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyceres-ceres-sdk
+
+      # auditwheel vendors the from-source libraries of the SDK and the image libraries
+      # they pull in; ship the licence of each alongside pyceres' own.
+      - name: Write the wheel repair script
+        run: |
+          cat > riscv64-repair-wheel.sh <<'EOF'
+          set -euxo pipefail
+          wheel="$1"
+          dest="$2"
+          work="$(mktemp -d)"
+          mkdir -p "${work}/core" "${work}/licenses" "${work}/repaired"
+          auditwheel repair -w "${work}/repaired" "${wheel}"
+          cp /opt/ceres/share/licenses/* "${work}/licenses/"
+          python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2], [n for n in z.namelist() if n.startswith("pyceres.cpython")])' "${wheel}" "${work}/core"
+          mapfile -t grafted < <(python3 -c 'import re, sys, zipfile; print("\n".join(re.sub(r"-[0-9a-f]{8}(\.so)", r"\1", n.split("/")[-1]) for n in zipfile.ZipFile(sys.argv[1]).namelist() if n.startswith("pyceres.libs/") and n != "pyceres.libs/"))' "${work}"/repaired/*.whl)
+          mapfile -t libs < <(ldd "${work}"/core/pyceres.cpython*.so | tr ' ' '\n' | grep '^/' | grep -v '^/opt/ceres/' | sort -u \
+            | xargs readlink -f | while read -r lib; do if printf '%s\n' "${grafted[@]}" | grep -qxF "$(basename "${lib}")"; then echo "${lib}"; fi; done)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null | grep -E '^[A-Za-z0-9._+-]+$' | sort -u)
+          dnf reinstall -y --setopt=tsflags= "${pkgs[@]}" >/dev/null || true
+          for pkg in "${pkgs[@]}"; do
+            files=$(rpm -qL "${pkg}" | grep -v '^(contains no files)$' || true)
+            if [ -n "${files}" ]; then
+              for file in ${files}; do cp "${file}" "${work}/licenses/${pkg}-$(basename "${file}")"; done
+            else
+              rpm -q --qf '%{NAME} %{VERSION}: %{LICENSE}\n' "${pkg}" >> "${work}/licenses/third-party.txt"
+            fi
+          done
+          python3 - "${work}"/repaired/*.whl "${work}/licenses" "${dest}" <<'PY'
+          import base64, hashlib, os, sys, zipfile
+
+          wheel, licenses, dest = sys.argv[1:]
+          with zipfile.ZipFile(wheel) as src:
+              entries = [(info, src.read(info)) for info in src.infolist()]
+          record_name = next(info.filename for info, _ in entries if info.filename.endswith(".dist-info/RECORD"))
+          dist_info = record_name.split("/")[0]
+          with zipfile.ZipFile(os.path.join(dest, os.path.basename(wheel)), "w", zipfile.ZIP_DEFLATED) as out:
+              for info, data in entries:
+                  if info.filename == record_name:
+                      record = data.decode()
+                  else:
+                      out.writestr(info, data)
+              record = record if record.endswith("\n") else record + "\n"
+              for name in sorted(os.listdir(licenses)):
+                  path = f"{dist_info}/licenses/{name}"
+                  with open(os.path.join(licenses, name), "rb") as f:
+                      data = f.read()
+                  out.writestr(path, data)
+                  digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                  record += f"{path},sha256={digest},{len(data)}\n"
+              out.writestr(record_name, record)
+          PY
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y --setopt=install_weak_deps=False ${{ env.DNF_PACKAGES }} &&
+            mkdir -p /opt/ceres &&
+            tar -C /opt/ceres -xzf {project}/ceres-sdk.tar.gz
+          # Upstream's vcpkg build links every dependency statically, so only what the
+          # module uses ends up in it; --as-needed keeps the shared equivalents to that set.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            CMAKE_PREFIX_PATH=/opt/ceres
+            LD_LIBRARY_PATH=/opt/ceres/lib
+            LDFLAGS=-Wl,--as-needed
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: bash {project}/riscv64-repair-wheel.sh {wheel} {dest_dir}
+          # Upstream's test-command only imports the module; its own example test also solves a problem.
+          CIBW_TEST_SOURCES: examples/test_python_cost.py
+          CIBW_TEST_COMMAND: >-
+            python -c "import pyceres; print(pyceres.__version__)" &&
+            python examples/test_python_cost.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyceres-${{ env.PYCERES_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for pyceres ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYCERES_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libgfortran, vendored out of the build image with OpenBLAS.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      # CHOLMOD's GPL modules and SPQR are built from source into the wheel.
+      - name: Add the SuiteSparse sources
+        run: |
+          curl -fsSLo "SuiteSparse-${SUITESPARSE_VERSION}.tar.gz" \
+            "https://github.com/DrTimothyAldenDavis/SuiteSparse/archive/refs/tags/v${SUITESPARSE_VERSION}.tar.gz"
+          tar -rf gpl-sources.tar "SuiteSparse-${SUITESPARSE_VERSION}.tar.gz"
+          tar -tf gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyceres-${{ env.PYCERES_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyceres ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyceres-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyceres-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
