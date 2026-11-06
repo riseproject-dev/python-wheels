@@ -1,0 +1,32 @@
+Upstream-Status: Inappropriate [riscv64/our-infra only, generic64 keeps every other arch's own auto-detected target unchanged]
+
+setup.py's build_ext statically builds OpenSSL (for LIBCZI_BUILD_CURL_BASED_STREAM)
+with `./config` left to auto-detect the Configure target. On riscv64 that resolves
+to `linux64-riscv64`, whose `crypto/aes/asm/aes-riscv64.pl` calls the exported
+`AES_set_encrypt_key` with a plain `jal`. Once linked into this extension's large
+`.so`, the PLT it goes through is beyond `jal`'s +/-1 MiB reach and the final link
+fails with:
+
+    libcrypto.a(libcrypto-lib-aes-riscv64.o): in function `.L33':
+    relocation truncated to fit: R_RISCV_JAL against symbol `AES_set_encrypt_key'
+    collect2: error: ld returned 1 exit status
+
+This is the same root cause already documented for the Conan-built OpenSSL case
+in sqlcipher3 (CLAUDE.md gotcha 625) -- nothing about the extension is riscv64
+specific, only the asm is. Force the 64-bit no-asm `linux-generic64` target on
+riscv64 only; every other architecture keeps `./config`'s own auto-detection.
+--- a/setup.py
++++ b/setup.py
+@@ -172,7 +172,11 @@ class CMakeBuild(build_ext):
+                 "git clone --branch openssl-3.2.0 https://github.com/openssl/openssl.git && "
+                 "cd openssl && "
+                 "mkdir build && "
+-                "./config no-shared -static zlib -fPIC -L/usr/lib no-docs no-tests && "
++                # riscv64's AES asm overflows R_RISCV_JAL once linked into this
++                # large .so (CLAUDE.md gotcha 625); force the no-asm
++                # linux-generic64 target there, leave other arches auto-detected.
++                "OPENSSL_TARGET=$(uname -m | grep -q riscv64 && echo linux-generic64 || true) && "
++                "./config $OPENSSL_TARGET no-shared -static zlib -fPIC -L/usr/lib no-docs no-tests && "
+                 "make -j2",
+                 shell=True,  # nosec
+                 check=False,
