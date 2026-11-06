@@ -9,8 +9,8 @@
 Print, as a JSON list, the versions of a package that a build workflow should
 build, read from docs/packages/<package>.yaml.
 
-A version entry without `tag`/`files` has not been released yet and is
-pending; with no --glob, those are the versions returned. With --glob, every
+A version entry is pending when it has no release tag or any `files` item
+lacks `filename`; with no --glob, those are the versions returned. With --glob, every
 version matching the glob is returned, released or not, so a workflow_dispatch
 can force a rebuild.
 
@@ -19,11 +19,12 @@ YAML already declares are left out, so a pull request only builds the versions
 it adds.  An empty or missing base file means every version is new.
 
 With --python-matrix, print instead a matrix `include:` list of
-{"version", "python", "python-version"} entries, where each version gets the interpreters of its
-`python-versions` (the ones upstream builds for, recorded by
+{"version", "python", "python-version", "platform"} entries, where each version gets the interpreters of its
+`files[].python-version` targets (the ones upstream builds, recorded by
 check_versions.py) that riscv64 can build, minus --python-exclude. An entry
-like `3.8-abi3` records the wheel's ABI floor; its matrix leg uses the oldest
-available, non-free-threaded build interpreter at or above that floor.
+like `3.8-abi3:manylinux` records the wheel's ABI floor and Linux platform;
+its matrix leg uses the oldest available, non-free-threaded build interpreter
+at or above that floor.
 """
 
 import argparse
@@ -65,34 +66,37 @@ def load_versions(package):
         if version in seen:
             raise SystemExit(f"{path}: version {version} is listed twice")
         seen.add(version)
-        if ("tag" in entry) != ("files" in entry):
-            raise SystemExit(
-                f"{path}: version {version} has one of tag/files but not both"
-            )
-        if "python-versions" not in entry:
-            raise SystemExit(
-                f"{path}: version {version} has no python-versions; run "
-                f"`check_versions.py --python-versions {package}` or add it by hand"
-            )
-        pythons = entry["python-versions"]
-        if not isinstance(pythons, list) or not pythons or not all(
-            isinstance(v, str) and re.fullmatch(r"3\.\d+(?:t|-abi3)?", v)
+        files = entry.get("files")
+        if not isinstance(files, list) or not files:
+            raise SystemExit(f"{path}: version {version} files must be a non-empty list")
+        pythons = [item.get("python") for item in files]
+        if not all(
+            isinstance(v, str)
+            and re.fullmatch(r"3\.\d+(?:t|-abi3)?:(?:manylinux|musllinux)", v)
             for v in pythons
         ):
             raise SystemExit(
-                f"{path}: version {version} python-versions must be a non-empty "
-                "list of quoted strings like '3.10', '3.14t', or '3.8-abi3', "
-                f"got {pythons!r}"
+                f"{path}: version {version} every files item needs python "
+                "like '3.10:manylinux', '3.14t:musllinux', or "
+                f"'3.8-abi3:manylinux', got {pythons!r}"
             )
-        if len(pythons) != len(set(pythons)):
-            raise SystemExit(
-                f"{path}: version {version} python-versions contains duplicates: {pythons!r}"
-            )
+        for item in files:
+            publication_keys = ("filename", "sha256", "requires-python")
+            if ("filename" in item) != ("sha256" in item):
+                raise SystemExit(
+                    f"{path}: version {version} {item['python']} has one of "
+                    "filename/sha256 but not both"
+                )
+            if "filename" not in item and any(key in item for key in publication_keys[1:]):
+                raise SystemExit(
+                    f"{path}: version {version} {item['python']} has publication "
+                    "metadata without filename"
+                )
     return versions
 
 
 def is_pending(entry):
-    return "tag" not in entry and "files" not in entry
+    return "tag" not in entry or any("filename" not in item for item in entry.get("files") or [])
 
 
 def select_versions(versions, glob=None):
@@ -134,6 +138,28 @@ def adjust(tags, exclude=()):
     return [t for t in tags if not any(fnmatch.fnmatchcase(t, g) for g in exclude)]
 
 
+def canonicalize_targets(values, exclude):
+    """Collapse ABI3 floors selecting the same build interpreter per platform."""
+    regular = [value for value in values if "-abi3:" not in value]
+    abi3 = {}
+    for value in (value for value in values if "-abi3:" in value):
+        target, platform = value.rsplit(":", 1)
+        floor = target.removesuffix("-abi3")
+        candidates = adjust([
+            tag for tag in RISCV64_PYTHONS
+            if not tag.endswith("t") and version_key(python_version(tag)) >= version_key(floor)
+        ], exclude)
+        if not candidates:
+            regular.append(value)
+            continue
+        key = (platform, candidates[0])
+        if key not in abi3 or version_key(floor) > version_key(abi3[key]):
+            abi3[key] = floor
+    return regular + [
+        f"{floor}-abi3:{platform}" for (platform, _), floor in abi3.items()
+    ]
+
+
 def python_matrix(package, entries, selected, exclude=()):
     """
     Return the matrix entries of the selected versions, and a warning for each
@@ -144,18 +170,22 @@ def python_matrix(package, entries, selected, exclude=()):
         version = str(entry["version"])
         if version not in selected:
             continue
-        values = entry["python-versions"]
-        regular = {cp_tag(v) for v in values if not v.endswith("-abi3")}
-        tags = adjust([t for t in RISCV64_PYTHONS if t in regular], exclude)
-        for tag in tags:
+        values = list(dict.fromkeys(item["python"] for item in entry["files"]))
+        targets = [(value.rsplit(":", 1)[0], value.rsplit(":", 1)[1]) for value in values]
+        for target, platform in (item for item in targets if not item[0].endswith("-abi3")):
+            tag = cp_tag(target)
+            if tag not in adjust(RISCV64_PYTHONS, exclude):
+                continue
             matrix.append({
                 "version": version,
                 "python": tag,
                 "python-version": python_version(tag),
                 "wheel-tag": tag,
+                "platform": platform,
             })
 
-        for value in (v for v in values if v.endswith("-abi3")):
+        abi3 = {}
+        for value, platform in (item for item in targets if item[0].endswith("-abi3")):
             floor = value.removesuffix("-abi3")
             candidates = adjust([
                 tag for tag in RISCV64_PYTHONS
@@ -168,12 +198,20 @@ def python_matrix(package, entries, selected, exclude=()):
                 )
                 continue
             tag = candidates[0]
+            # Several ABI floors can collapse onto the same available build
+            # interpreter. Build that interpreter once and keep the highest
+            # floor in the group; distinct build interpreters remain distinct.
+            key = (platform, tag)
+            if key not in abi3 or version_key(floor) > version_key(abi3[key]):
+                abi3[key] = floor
+        for (platform, tag), floor in abi3.items():
             matrix.append({
                 "version": version,
                 "python": tag,
                 "python-version": python_version(tag),
                 "wheel-tag": cp_tag(floor) + "-abi3",
                 "abi3-floor": floor,
+                "platform": platform,
             })
 
         if not any(item["version"] == version for item in matrix):
@@ -186,24 +224,44 @@ def python_matrix(package, entries, selected, exclude=()):
 
 def _self_test():
     entries = [
-        {"version": "1.0", "python-versions": ["3.8-abi3", "3.14t"]},
-        {"version": "2.0", "python-versions": ["3.13"]},
+        {"version": "1.0", "files": [
+            {"python": "3.8-abi3:manylinux"},
+            {"python": "3.14t:musllinux"},
+        ]},
+        {"version": "2.0", "files": [{"python": "3.13:manylinux"}]},
+        {"version": "3.0", "files": [
+            {"python": "3.8-abi3:manylinux"},
+            {"python": "3.12-abi3:manylinux"},
+            {"python": "3.14-abi3:manylinux"},
+        ]},
     ]
     # Upstream's list in RISCV64_PYTHONS order, minus what riscv64 can't build.
     assert python_matrix("pkg", entries, ["1.0"], ["cp39", "cp310", "cp311", "cp314t"]) == ([
         {
             "version": "1.0", "python": "cp312", "python-version": "3.12",
-            "wheel-tag": "cp38-abi3", "abi3-floor": "3.8",
+            "wheel-tag": "cp38-abi3", "abi3-floor": "3.8", "platform": "manylinux",
         },
     ], [])
     assert python_matrix("pkg", entries, ["2.0"]) == ([
         {
             "version": "2.0", "python": "cp313", "python-version": "3.13",
-            "wheel-tag": "cp313",
+            "wheel-tag": "cp313", "platform": "manylinux",
         }
     ], [])
     matrix, warnings = python_matrix("pkg", entries, ["2.0"], ["cp31?"])
     assert matrix == [] and len(warnings) == 1, warnings
+    # 3.8 and 3.12 both select cp312 after exclusions, so keep the higher
+    # cp312 ABI floor; 3.14 selects a distinct build interpreter and remains.
+    assert python_matrix("pkg", entries, ["3.0"], ["cp39", "cp310", "cp311"]) == ([
+        {
+            "version": "3.0", "python": "cp312", "python-version": "3.12",
+            "wheel-tag": "cp312-abi3", "abi3-floor": "3.12", "platform": "manylinux",
+        },
+        {
+            "version": "3.0", "python": "cp314", "python-version": "3.14",
+            "wheel-tag": "cp314-abi3", "abi3-floor": "3.14", "platform": "manylinux",
+        },
+    ], [])
     print("[+] self-test passed")
 
 
@@ -227,7 +285,7 @@ def main():
     parser.add_argument(
         "--python-matrix",
         action="store_true",
-        help="print {version, python, python-version} matrix entries instead of versions",
+        help="print {version, python, python-version, platform} matrix entries instead of versions",
     )
     parser.add_argument(
         "--python-exclude",
