@@ -69,11 +69,13 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   `_setup.yml` turns the pending set
   into the `matrix.version` every job iterates over, and the publish fills the entry in. The
   workflow derives the git tag from `matrix.version`, not the other way round.
-- **The interpreters come from upstream, never from a fixed list.** Build from
+- **The interpreters come from upstream, never from a fixed list.** Keep every upstream
+  target in package metadata even when the current riscv64 toolchain cannot build it; matrix
+  generation omits unsupported targets without deleting that upstream coverage record. Build from
   `include: ${{ fromJSON(needs.setup.outputs.matrix) }}`:
   each version gets the interpreters in its `files[].python` targets in the package
   YAML, which `check_versions.py` fills from upstream's PyPI wheels. Adjust by editing those targets
-  or with `python-exclude` (default `"cp39 cp310 cp311"`), with a "why" comment. Hard-code `python:` only when extra matrix
+  or with `python-exclude` (default `"cp39"`), with a "why" comment. Hard-code `python:` only when extra matrix
   axes don't fit (see workflow-anatomy.md).
 - **Default to NO comments in workflows** — they are read as reference. One "why" line only for
   a genuine non-obvious deviation; never narrate standard steps.
