@@ -137,17 +137,18 @@ the nightly job adds it to every version it declares; for a version you add by h
 
 Values must be quoted strings (`'3.10'`, not `3.10`, which YAML reads as 3.1);
 `pending_versions.py --check` (run by pr-checks) rejects anything else. When building the
-matrix, versions riscv64 can't build are dropped: the matrix is limited to `RISCV64_PYTHONS`,
+matrix, targets riscv64 can't build are dropped: the matrix is limited to `RISCV64_PYTHONS`,
 the `*-manylinux_riscv64` identifiers of the pinned cibuildwheel (cp39…cp315t, no cp313t).
-Update that list when bumping cibuildwheel; it is a technical limit, not a policy.
+Do not remove those targets from package metadata: `files` records everything upstream
+publishes, including experimental or otherwise unsupported targets such as 3.13t. Update
+`RISCV64_PYTHONS` when bumping cibuildwheel; it is a technical build limit, not a metadata policy.
 
 Override in two ways, each with a comment saying why. Edit a version's `files[].python` targets to
 build more or fewer interpreter/platform targets than upstream for that version (e.g. add
 `'3.14t:manylinux'`). Use the
 `python-exclude` input to drop cibuildwheel tags (globs) for every version. It defaults to
-`"cp39 cp310 cp311"`, since numpy ≥ 2.5 (which much of the registry depends on) has no
-wheel below cp312; setting it replaces that default, so `python-exclude: ""` builds
-everything upstream does and `"cp39 cp31[01] cp315*"` also drops 3.15.
+`"cp39"`; setting it replaces that default, so `python-exclude: ""` also builds Python 3.9,
+and `"cp39 cp31[01] cp315*"` drops 3.10, 3.11, and 3.15.
 
 **Converting old workflows is gradual.** Most `build-<pkg>.yml` still hard-code `python:
 [...]` next to `version:`. When a workflow is touched to build a new release, switch it:

@@ -150,16 +150,18 @@ entry also has `abi3-floor`. For example, `3.8-abi3:manylinux` with the default 
 `python: cp312`, `python-version: 3.12`, `wheel-tag: cp38-abi3`,
 `abi3-floor: 3.8`, and `platform: manylinux`
 (`RISCV64_PYTHONS` in `ci_scripts/pending_versions.py`: currently 3.9 to 3.15
-and 3.14t/3.15t, but not 3.13t). That list is a technical limit, updated
-when cibuildwheel is bumped, not a policy choice.
+and 3.14t/3.15t, but not 3.13t). Package metadata records every target upstream
+publishes, including targets this repository cannot currently build. Matrix
+generation omits unsupported targets such as experimental 3.13t without
+removing them from `files`. `RISCV64_PYTHONS` is a technical build limit,
+updated when cibuildwheel is bumped, not a metadata policy.
 
 To build more or fewer interpreter/platform targets than upstream for one
 version, edit its `files[].python` targets. To drop interpreters for every version of a package, use
 the `python-exclude` input of `setup`, which takes shell-style globs on
-cibuildwheel tags. It defaults to `"cp39 cp310 cp311"`: NumPy 2.5.0 and later
-only support Python 3.12+, and enough of the registry depends on NumPy that
-3.12 is the floor unless a package opts out. Setting it replaces the
-default: `python-exclude: ""` builds everything upstream does, and
+cibuildwheel tags. It defaults to `"cp39"`, so Python 3.10 and newer targets
+are built when upstream publishes them. Setting it replaces the default:
+`python-exclude: ""` also builds Python 3.9, and
 `python-exclude: "cp39 cp31[01] cp315*"` also drops 3.15, for example when a
 dependency has no riscv64 wheel for it.
 
