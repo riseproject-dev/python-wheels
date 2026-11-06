@@ -112,14 +112,19 @@ that release for, rather than for a fixed list. Each version entry of
 ```yaml
 versions:
 - version: 1.2.3
-  python-versions: ['3.10', '3.11', '3.14', '3.14t']
+  files:
+  - python: 3.10:manylinux
+  - python: 3.11:manylinux
+  - python: 3.14:manylinux
+  - python: 3.14t:manylinux
 ```
 
 `ci_scripts/check_versions.py` fills this in from the wheels upstream
 published on PyPI for that version:
 
-- a `cpXY-cpXY` or `cpXY-cpXYt` wheel adds `3.X` or `3.Xt` (free-threaded);
-- a `cpXY-abi3` wheel adds `3.X-abi3`, which records its ABI floor. The
+- a `cpXY-cpXY` or `cpXY-cpXYt` Linux wheel adds `3.X:PLATFORM` or
+  `3.Xt:PLATFORM` (free-threaded);
+- a `cpXY-abi3` Linux wheel adds `3.X-abi3:PLATFORM`, which records its ABI floor. The
   matrix selects the oldest available non-free-threaded interpreter at or
   above that floor to build the one wheel;
 - with no version-specific wheels at all (sdist-only or pure-Python
@@ -129,38 +134,40 @@ The nightly job writes it for every version it declares. For a version added
 by hand (a new port, or a manual upgrade), run:
 
 ```
-uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>
+uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-targets <pkg>
 ```
 
-which adds `python-versions` to every entry of the YAML that lacks it. The
-field is required and non-empty, and the packages YAML validation fails if
-it is missing. The accepted forms are `3.X`, `3.Xt`, and `3.X-abi3`. Values
+which adds target slots under `files` to every version. Every slot has a `python` target; publishing fills `filename`, `sha256`, and optional
+`requires-python` into each slot. An empty slot means the whole version remains
+pending and must be rebuilt as one complete release. The accepted forms are `3.X:PLATFORM`, `3.Xt:PLATFORM`, and `3.X-abi3:PLATFORM`, where `PLATFORM` is `manylinux` or `musllinux`. Values
 must be quoted: unquoted, YAML reads `3.10` as the number 3.1.
 
 The `setup` job of every build workflow outputs a `matrix` with one entry
 per listed version that cibuildwheel can build for riscv64. Each entry has a
 cibuildwheel build-interpreter `python` tag such as `cp314t`, its
-`python-version` form such as `3.14t`, and `wheel-tag`. An abi3 entry also has
-`abi3-floor`. For example, `3.8-abi3` with the default exclusions produces
-`python: cp312`, `python-version: 3.12`, `wheel-tag: cp38-abi3`, and
-`abi3-floor: 3.8`
+`python-version` form such as `3.14t`, `wheel-tag`, and `platform`. An abi3
+entry also has `abi3-floor`. For example, `3.8-abi3:manylinux` with the default exclusions produces
+`python: cp312`, `python-version: 3.12`, `wheel-tag: cp38-abi3`,
+`abi3-floor: 3.8`, and `platform: manylinux`
 (`RISCV64_PYTHONS` in `ci_scripts/pending_versions.py`: currently 3.9 to 3.15
-and 3.14t/3.15t, but not 3.13t). That list is a technical limit, updated
-when cibuildwheel is bumped, not a policy choice.
+and 3.14t/3.15t, but not 3.13t). Package metadata records every target upstream
+publishes, including targets this repository cannot currently build. Matrix
+generation omits unsupported targets such as experimental 3.13t without
+removing them from `files`. `RISCV64_PYTHONS` is a technical build limit,
+updated when cibuildwheel is bumped, not a metadata policy.
 
-To build more or fewer interpreters than upstream for one version, edit its
-`python-versions`. To drop interpreters for every version of a package, use
+To build more or fewer interpreter/platform targets than upstream for one
+version, edit its `files[].python` targets. To drop interpreters for every version of a package, use
 the `python-exclude` input of `setup`, which takes shell-style globs on
-cibuildwheel tags. It defaults to `"cp39 cp310 cp311"`: NumPy 2.5.0 and later
-only support Python 3.12+, and enough of the registry depends on NumPy that
-3.12 is the floor unless a package opts out. Setting it replaces the
-default: `python-exclude: ""` builds everything upstream does, and
+cibuildwheel tags. It defaults to `"cp39"`, so Python 3.10 and newer targets
+are built when upstream publishes them. Setting it replaces the default:
+`python-exclude: ""` also builds Python 3.9, and
 `python-exclude: "cp39 cp31[01] cp315*"` also drops 3.15, for example when a
 dependency has no riscv64 wheel for it.
 
 Explain any override in a comment next to it. Most workflows still carry a
 hard-coded `python: [...]` list from before this scheme (the former default
-was `['3.12', '3.13', '3.14', '3.14t']`); each is converted when it is next
+was `['3.12:manylinux', '3.13:manylinux', '3.14:manylinux', '3.14t:manylinux']`); each is converted when it is next
 updated to build a new release.
 
 ### uv
@@ -257,7 +264,7 @@ jobs:
 The `if:` guard is required: GitHub Actions rejects a job whose matrix vector is
 empty, and `versions` is `[]` whenever nothing is pending. `_setup.yml`
 also outputs `matrix`: one
-`{version, python}` entry per interpreter in the version's `python-versions`
+`{version, python}` entry per interpreter in the version's `files[].python` targets
 (see [Target Python Versions](#target-python-versions)) that cibuildwheel
 can build for riscv64. The `python-exclude` input drops interpreters for a
 package. Workflows that still hard-code `python: [...]` switch to it when
