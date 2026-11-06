@@ -1,0 +1,277 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/openturns/build-wheels/blob/main/build-wheels-linux.sh
+# (the script the openturns/manylinux_2_28_* images run to produce the published PyPI
+# wheels), adapted to drive the generic manylinux_riscv64 image directly since no such
+# prebuilt OpenTURNS image exists for riscv64. USE_IPOPT/USE_BONMIN/USE_CERES/USE_PAGMO/
+# USE_CUBA/USE_DLIB and a few smaller options are left OFF: their native deps (the COIN-OR
+# suite with its Fortran Mumps solver, Ceres+glog, Pagmo, dlib) have no riscv64 precedent
+# anywhere and OpenTURNS falls back to its own bundled implementations when they're absent,
+# same as upstream's own "mindeps" CI leg (.ci_support/run_docker_mindeps.sh) already
+# validates. NLopt/TBB/HiGHS/CMinpack are kept: TBB and HiGHS already have other riscv64
+# wheels in this repo at the exact pinned versions upstream's image uses, and NLopt/CMinpack
+# are small, portable, header-light C libraries.
+name: Build openturns wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openturns.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openturns.yml'
+      - 'docs/packages/openturns.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openturns.yml'
+      - 'docs/packages/openturns.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PYDIR: cp310-cp310
+  WHEEL_TAG: cp310-abi3-manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: openturns
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openturns ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      OT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout openturns v${{ env.OT_VERSION }}
+        run: git clone --depth 1 --branch "v$OT_VERSION" https://github.com/openturns/openturns.git openturns
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "$MANYLINUX_RISCV64_IMAGE"
+
+      - name: Build wheel
+        run: |
+          mkdir -p wheelhouse wheelhouse-raw
+          docker run -i --rm -v "$PWD/openturns:/openturns" -v "$PWD/wheelhouse:/wheelhouse" \
+            -v "$PWD/wheelhouse-raw:/wheelhouse-raw" -w /openturns \
+            -e PYDIR="$PYDIR" -e WHEEL_TAG="$WHEEL_TAG" \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'EOF'
+          set -euxo pipefail
+
+          dnf -y install gcc-c++ cmake swig zip git lapack-devel libxml2-devel boost-devel
+
+          PYBIN="/opt/python/$PYDIR/bin"
+
+          # oneTBB (Apache-2.0): same pinned version as upstream's own wheel image and as
+          # this repo's own tbb.yaml port (TBB_STRICT=OFF avoids upstream's warnings-as-errors
+          # on a newer GCC than they test against).
+          curl -fsSL https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v2023.1.0.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/oneTBB-2023.1.0 -B /tmp/tbb-build -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF -DTBB_EXAMPLES=OFF -DTBB_STRICT=OFF -DCMAKE_INSTALL_LIBDIR=lib
+          cmake --build /tmp/tbb-build -j"$(nproc)"
+          cmake --install /tmp/tbb-build
+          rm -rf /tmp/oneTBB-2023.1.0 /tmp/tbb-build
+
+          # NLopt (LGPL-2.1-or-later): same pinned version as upstream's own wheel image.
+          curl -fsSL https://github.com/stevengj/nlopt/archive/v2.11.0.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/nlopt-2.11.0 -B /tmp/nlopt-build
+          cmake --build /tmp/nlopt-build -j"$(nproc)"
+          cmake --install /tmp/nlopt-build
+          rm -rf /tmp/nlopt-2.11.0 /tmp/nlopt-build
+
+          # HiGHS (MIT): same pinned version as upstream's own wheel image.
+          curl -fsSL https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.15.1.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/HiGHS-1.15.1 -B /tmp/highs-build -DBUILD_CXX_EXE=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DCMAKE_UNITY_BUILD=ON
+          cmake --build /tmp/highs-build -j"$(nproc)"
+          cmake --install /tmp/highs-build
+          rm -rf /tmp/HiGHS-1.15.1 /tmp/highs-build
+
+          # CMinpack (BSD-3-Clause): same pinned version as upstream's own wheel image.
+          curl -fsSL https://github.com/devernay/cminpack/archive/v1.3.14.tar.gz | tar xz -C /tmp
+          cmake -S /tmp/cminpack-1.3.14 -B /tmp/cminpack-build -DBUILD_SHARED_LIBS=ON -DBUILD_EXAMPLES=OFF -DCMINPACK_PRECISION=d
+          cmake --build /tmp/cminpack-build -j"$(nproc)"
+          cmake --install /tmp/cminpack-build
+          rm -rf /tmp/cminpack-1.3.14 /tmp/cminpack-build
+
+          ldconfig
+
+          cmake -DCMAKE_INSTALL_PREFIX=/openturns/build/install \
+                -DBLA_VENDOR=Generic \
+                -DPython_EXECUTABLE="$PYBIN/python" \
+                -DCMAKE_UNITY_BUILD=ON -DCMAKE_UNITY_BUILD_BATCH_SIZE=32 \
+                -DSWIG_COMPILE_FLAGS="-O1 -DPy_LIMITED_API=0x030a0000" \
+                -DUSE_PYTHON_SABI=ON \
+                -DUSE_NLOPT=ON -DUSE_TBB=ON -DUSE_HIGHS=ON -DUSE_CMINPACK=ON \
+                -DUSE_IPOPT=OFF -DUSE_BONMIN=OFF -DUSE_CERES=OFF -DUSE_PAGMO=OFF -DUSE_CUBA=OFF \
+                -DUSE_DLIB=OFF -DUSE_HDF5=OFF -DUSE_MPFR=OFF -DUSE_MPC=OFF -DUSE_SPECTRA=OFF \
+                -DUSE_PRIMESIEVE=OFF -DUSE_NANOFLANN=OFF -DUSE_HMAT=OFF -DUSE_MUPARSER=OFF \
+                -B build .
+          cd build
+          make install "-j$(nproc)"
+
+          OPENTURNS_NUM_THREADS=1 ctest -R "NLopt|CMinpack|HiGHS|TBB|Study|SymbolicFunction|SquareMatrix|Sequence|Mesh_std|KDTree" \
+            -E cppcheck --output-on-failure --timeout 200 "-j$(nproc)" --repeat after-timeout:2 --schedule-random
+
+          VERSION=$(cat /openturns/VERSION)
+          DISTINFO="openturns-${VERSION}.dist-info"
+          cd install/lib*/python*/site-packages
+          rm -rf openturns/__pycache__
+
+          mkdir -p openturns.libs
+          cp -v ../../../etc/openturns/openturns.conf openturns.libs/
+
+          mkdir -p "$DISTINFO/LICENSES"
+          cp /openturns/COPYING /openturns/COPYING.LESSER "$DISTINFO/LICENSES/"
+          for f in /openturns/COPYING.*; do
+            cp "$f" "$DISTINFO/LICENSES/$(basename "$f")"
+          done
+
+          cat > "$DISTINFO/WHEEL" <<EOW
+          Wheel-Version: 1.0
+          Generator: build-openturns-riscv64
+          Root-Is-Purelib: false
+          Tag: ${WHEEL_TAG}
+          EOW
+
+          "$PYBIN/python" - "$DISTINFO" <<'PYEOF'
+          import hashlib
+          import sys
+          from base64 import urlsafe_b64encode
+          from pathlib import Path
+
+          dist_info = Path(sys.argv[1])
+          root = Path(".")
+          record_path = dist_info / "RECORD"
+          with record_path.open("w") as record:
+              for path in sorted(root.rglob("*")):
+                  if not path.is_file():
+                      continue
+                  rel = path.relative_to(root).as_posix()
+                  if path == record_path:
+                      record.write(f"{rel},,\n")
+                      continue
+                  data = path.read_bytes()
+                  digest = urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                  record.write(f"{rel},sha256={digest},{len(data)}\n")
+          PYEOF
+
+          WHEEL_NAME="openturns-${VERSION}-${WHEEL_TAG}.whl"
+          zip -r -X "/wheelhouse-raw/$WHEEL_NAME" openturns openturns.libs "$DISTINFO"
+
+          cd /openturns
+          LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}" \
+            auditwheel repair -w /wheelhouse --only-plat "/wheelhouse-raw/$WHEEL_NAME"
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openturns-${{ env.OT_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    name: Test openturns ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      OT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openturns-${{ env.OT_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheels
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "$MANYLINUX_RISCV64_IMAGE"
+
+      - name: Test wheel
+        run: |
+          docker run -i --rm -v "$PWD/wheels:/wheels" -w /tmp \
+            -e PYDIR="${{ matrix.python }}-${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'EOF'
+          set -euxo pipefail
+          "/opt/python/$PYDIR/bin/python" -m venv /venv
+          source /venv/bin/activate
+          pip install dill psutil
+          pip install /wheels/*.whl
+          python -c "import openturns as ot; print(ot.__version__); print(ot.Normal(2))"
+          EOF
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OpenTURNS builds with -fopenmp, so auditwheel vendors the image's libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openturns-${{ matrix.version }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish openturns ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: openturns-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: openturns-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
