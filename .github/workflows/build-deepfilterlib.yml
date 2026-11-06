@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` leg upstream builds for its PyPI releases
+# (DeepFilterNet's pyDF, a PyO3/maturin binding over the pure-Rust deep_filter DSP
+# crate -- STFT/ERB transforms only, no model inference/ONNX), narrowed to riscv64.
+name: Build DeepFilterLib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/deepfilterlib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-deepfilterlib.yml'
+      - 'docs/packages/deepfilterlib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-deepfilterlib.yml'
+      - 'docs/packages/deepfilterlib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: deepfilterlib
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build DeepFilterLib ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      DEEPFILTERLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout DeepFilterNet v${{ env.DEEPFILTERLIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Rikorose/DeepFilterNet
+          ref: v${{ env.DEEPFILTERLIB_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pyDF
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyDF ships no [tool.cibuildwheel]; install the Rust toolchain its
+          # maturin backend needs.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # pyproject.toml pins maturin>=0.11,<0.12 (2021), which has no riscv64
+          # wheel on PyPI and predates riscv64 cross-compile/target support
+          # entirely. A current maturin builds this tree unmodified, so install
+          # one and skip isolation to bypass the pin (same as build-anchorpy-core.yml).
+          CIBW_BEFORE_BUILD: pip install maturin
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_REQUIRES: numpy
+          CIBW_TEST_COMMAND: >-
+            python -c "import libdf, numpy as np, sys;
+            assert sys.modules['libdf.libdf'].__file__.endswith('.so'), sys.modules['libdf.libdf'].__file__;
+            state = libdf.DF(sr=48000, fft_size=960, hop_size=480, nb_bands=32);
+            assert state.sr() == 48000 and state.fft_size() == 960 and state.hop_size() == 480;
+            x = np.random.default_rng(0).standard_normal((1, 48000)).astype(np.float32);
+            spec = state.analysis(x);
+            assert spec.ndim == 3 and spec.shape[0] == 1 and spec.shape[2] == 960, spec.shape;
+            out = state.synthesis(spec);
+            assert out.ndim == 2 and out.shape[0] == 1 and out.shape[1] == x.shape[1], out.shape;
+            print('DeepFilterLib analysis/synthesis round-trip OK')
+            "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: deepfilterlib-${{ env.DEEPFILTERLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish DeepFilterLib ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: deepfilterlib-${{ matrix.version }}-*-manylinux_riscv64
