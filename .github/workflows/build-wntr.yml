@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` and `test_wheels` jobs of
+# https://github.com/USEPA/WNTR/blob/1.5.0/.github/workflows/build_test_wheels.yml
+name: Build wntr wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/wntr.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wntr.yml'
+      - 'docs/packages/wntr.yaml'
+      - 'patches/wntr/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wntr.yml'
+      - 'docs/packages/wntr.yaml'
+      - 'patches/wntr/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: wntr
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build wntr ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      WNTR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout WNTR ${{ env.WNTR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: USEPA/WNTR
+          ref: ${{ env.WNTR_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/wntr/${{ env.WNTR_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            BUILD_WNTR_EXTENSIONS='true'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,matplotlib,contourpy,kiwisolver,pillow,shapely,pyproj,pyogrio,rasterio,rtree,pyzmq,rpds-py
+          # Upstream commits x86_64-only EPANET binaries under libepanet/linux-x64; this
+          # compiles the same sources they were built from into libepanet/linux-riscv64.
+          CIBW_BEFORE_ALL: |
+            set -e
+            dest={project}/wntr/epanet/libepanet/linux-riscv64
+            mkdir -p $dest /tmp/epanet && cd /tmp/epanet
+
+            curl -fsSL --retry 5 https://github.com/OpenWaterAnalytics/EPANET/archive/refs/tags/v2.1.tar.gz | tar xz
+            # gotcha 226/525: GCC14 treats missing-prototype as an error under
+            # strict -std=c99, and mkstemp() needs _DEFAULT_SOURCE to be visible;
+            # reproduce the Makefile's own CFLAGS and add the macro (command-line
+            # CFLAGS= replaces the Makefile's, it doesn't append to it; CPPFLAGS,
+            # which supplies -I../../include, is untouched here).
+            make -C EPANET-2.1/build/Linux libepanet2.so LDFLAGS="-L . -lm" CFLAGS="-g -O3 -fPIC -std=c99 -D_DEFAULT_SOURCE"
+            cp EPANET-2.1/build/Linux/libepanet2.so $dest/libepanet20.so
+
+            curl -fsSL --retry 5 https://github.com/OpenWaterAnalytics/EPANET/archive/refs/tags/v2.2.tar.gz | tar xz
+            cmake -S EPANET-2.2 -B epanet22-build -DCMAKE_BUILD_TYPE=Release
+            cmake --build epanet22-build --target epanet2
+            cp epanet22-build/lib/libepanet2.so $dest/libepanet22.so
+            cp EPANET-2.2/LICENSE {project}/LICENSE.EPANET
+
+            curl -fsSL --retry 5 https://github.com/USEPA/EPANETMSX/archive/85a303dca05859389eced63fabd5ea145c096333.tar.gz | tar xz
+            curl -fsSL --retry 5 https://github.com/USEPA/EPANET2.2/archive/1e2fc3d909c0df654ead95e6e98c3307ce1375b1.tar.gz | tar xz --wildcards '*/SRC_engines/*'
+            rm -rf EPANETMSX-85a303dca05859389eced63fabd5ea145c096333/EPANET2.2
+            mv EPANET2.2-1e2fc3d909c0df654ead95e6e98c3307ce1375b1 EPANETMSX-85a303dca05859389eced63fabd5ea145c096333/EPANET2.2
+            cmake -S EPANETMSX-85a303dca05859389eced63fabd5ea145c096333 -B msx-build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_INSTALL_RPATH=$ORIGIN'
+            cmake --build msx-build
+            cmake --install msx-build --prefix /tmp/epanet/msx-install
+            cp msx-install/lib/libepanet2.so msx-install/lib/libepanetmsx.so $dest/
+            cp EPANETMSX-85a303dca05859389eced63fabd5ea145c096333/license.txt {project}/LICENSE.EPANETMSX
+          CIBW_TEST_EXTRAS: optional,test
+          CIBW_TEST_SOURCES: pyproject.toml wntr/tests examples
+          CIBW_TEST_COMMAND: pytest wntr/tests/ --ignore=wntr/tests/test_demos.py --ignore=wntr/tests/test_examples.py
+
+      - name: Verify the wheel ships the extensions, riscv64 EPANET libraries and licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for ext in ("wntr/sim/aml/_evaluator.", "wntr/sim/network_isolation/_network_isolation."):
+              assert any(n.startswith(ext) and n.endswith(".so") for n in names), ext
+          for lib in ("libepanet20.so", "libepanet22.so", "libepanet2.so", "libepanetmsx.so"):
+              assert f"wntr/epanet/libepanet/linux-riscv64/{lib}" in names, lib
+          for lic in ("LICENSE.md", "LICENSE.EPANET", "LICENSE.EPANETMSX"):
+              assert any(n.endswith(f".dist-info/licenses/{lic}") for n in names), lic
+          print(sys.argv[1], "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wntr-${{ env.WNTR_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      WNTR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libepanetmsx links OpenMP, so auditwheel vendors the image's libgomp into wntr.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wntr-${{ env.WNTR_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish wntr ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: wntr-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: wntr-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
