@@ -165,9 +165,19 @@ def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
     return has_wheels
 
 
+def linux_platform_families(platform_tag: str) -> Set[str]:
+    """Collapse a compressed wheel platform tag to its Linux policy families."""
+    return {
+        "manylinux" if part.startswith("manylinux") else "musllinux"
+        for part in platform_tag.split(".")
+        if part.startswith(("manylinux", "musllinux"))
+    }
+
+
 def upstream_python_versions(package_info: Dict, target_version: str) -> Optional[List[str]]:
     """
-    The Python versions ("3.10", "3.14t") upstream builds target_version for,
+    The Python/Linux targets ("3.10:manylinux", "3.14t:musllinux") upstream
+    builds target_version for,
     from its wheels on PyPI, or None if PyPI doesn't have that version.
 
     A cpXY-cpXY or cpXY-cpXYt wheel means that interpreter, and a cpXY-abi3
@@ -180,46 +190,75 @@ def upstream_python_versions(package_info: Dict, target_version: str) -> Optiona
     files = package_info.get("releases", {}).get(target_version)
     if not files:
         return None
-    built = set()
-    abi3_floors = set()
+    built = {"manylinux": set(), "musllinux": set()}
+    abi3_floors = {"manylinux": set(), "musllinux": set()}
     for f in files:
         tags = _parse_wheel_tags(f.get("filename", ""))
         if not tags:
             continue
-        for py in tags[0].split("."):
-            if not re.fullmatch(r"cp3\d+", py):
-                continue
-            for abi in tags[1].split("."):
-                if abi in (py, py + "t"):
-                    built.add(abi)
-                elif abi.startswith("abi3"):
-                    abi3_floors.add(py)
-    if abi3_floors:
-        floor = min(abi3_floors, key=lambda tag: int(tag[2:]))
+        platforms = linux_platform_families(tags[2])
+        for platform in platforms:
+            for py in tags[0].split("."):
+                if not re.fullmatch(r"cp3\d+", py):
+                    continue
+                for abi in tags[1].split("."):
+                    if abi in (py, py + "t"):
+                        built[platform].add(abi)
+                    elif abi.startswith("abi3"):
+                        abi3_floors[platform].add(py)
+    for platform, floors in abi3_floors.items():
+        if not floors:
+            continue
+        floor = min(floors, key=lambda tag: int(tag[2:]))
         floor_minor = int(floor[3:])
-        built = {
-            tag for tag in built
+        built[platform] = {
+            tag for tag in built[platform]
             if tag.endswith("t") or int(tag[3:].removesuffix("t")) < floor_minor
         }
-        built.add(floor + "-abi3")
-    if not built:
+        built[platform].add(floor + "-abi3")
+    if not any(built.values()):
         spec = SpecifierSet(next((f["requires_python"] for f in files if f.get("requires_python")), ""))
-        built = {t for t in RISCV64_PYTHONS if not t.endswith("t") and spec.contains(f"3.{t[3:]}")}
+        built["manylinux"] = {
+            t for t in RISCV64_PYTHONS
+            if not t.endswith("t") and spec.contains(f"3.{t[3:]}")
+        }
     def display(tag):
         abi3 = tag.endswith("-abi3")
         tag = tag.removesuffix("-abi3")
         value = f"3.{tag[3:]}"
         return value + ("-abi3" if abi3 else "")
 
+    targets = sorted(
+        (f"{display(tag)}:{platform}" for platform, tags in built.items() for tag in tags),
+        key=lambda v: (
+            int(v[2:].split(":", 1)[0].removesuffix("t").removesuffix("-abi3")),
+            v.split(":", 1)[0].endswith("t"),
+            v.split(":", 1)[0].endswith("-abi3"),
+            v.split(":", 1)[1],
+        ),
+    )
     return sorted(
-        (display(t) for t in built),
-        key=lambda v: (int(v[2:].removesuffix("t").removesuffix("-abi3")), v.endswith("t"), v.endswith("-abi3")),
+        targets,
+        key=lambda v: (
+            int(v[2:].split(":", 1)[0].removesuffix("t").removesuffix("-abi3")),
+            v.split(":", 1)[0].endswith("t"),
+            v.split(":", 1)[0].endswith("-abi3"),
+            v.split(":", 1)[1],
+        ),
     )
 
 
-def python_versions_line(pythons: List[str]) -> str:
-    """Quoted, so YAML can't read '3.10' as the float 3.1."""
-    return "  python-versions: [" + ", ".join(f"'{v}'" for v in pythons) + "]"
+def target_files(pythons: List[str]) -> List[Dict[str, str]]:
+    """Unpublished file slots for the upstream Python/Linux targets."""
+    return [{"python": python} for python in pythons]
+
+
+def target_files_lines(pythons: List[str]) -> List[str]:
+    """Render a version entry's target file slots."""
+    dumped = yaml.safe_dump(
+        {"files": target_files(pythons)}, sort_keys=False, allow_unicode=True
+    ).rstrip("\n")
+    return [f"  {line}" for line in dumped.splitlines()]
 
 
 def find_upstream_issue(package: str) -> Optional[str]:
@@ -339,7 +378,7 @@ def get_versions_since(package_info: Dict, declared: Set[str], since: datetime) 
 
 def declare_versions(yaml_file: Path, new_versions: List[str], package_info: Dict) -> List[str]:
     """
-    Append a `- version:` entry, with the `python-versions` upstream builds it
+    Append a `- version:` entry, with empty file slots for the Python/Linux targets upstream builds it
     for, for each version not yet listed in the package YAML, and return the
     versions that were added.
 
@@ -356,7 +395,7 @@ def declare_versions(yaml_file: Path, new_versions: List[str], package_info: Dic
         lines.append(yaml.safe_dump([{"version": v}], default_flow_style=False).rstrip("\n"))
         pythons = upstream_python_versions(package_info, v)
         if pythons is not None:
-            lines.append(python_versions_line(pythons))
+            lines.extend(target_files_lines(pythons))
     yaml_file.write_text("\n".join(lines) + "\n")
     return added
 
@@ -412,9 +451,8 @@ def carry_over_patches(
 
 def fill_python_versions(yaml_file: Path, package_info: Dict) -> List[str]:
     """
-    Add or update `python-versions` for every entry whose version PyPI has,
-    preserving the rest of the file byte-for-byte, and return the versions
-    that changed.
+    Add or update empty target entries under `files` for every version PyPI has,
+    preserving published file metadata and return the versions that changed.
     """
     lines = yaml_file.read_text().splitlines()
     changed = []
@@ -424,17 +462,19 @@ def fill_python_versions(yaml_file: Path, package_info: Dict) -> List[str]:
         pythons = upstream_python_versions(package_info, raw)
         if pythons is None:
             continue
-        new_line = python_versions_line(pythons)
-        existing = next(
-            (i for i in range(start, end) if lines[i].startswith("  python-versions:")),
-            None,
-        )
-        if existing is None:
-            lines.insert(start + 1, new_line)
-        elif lines[existing] == new_line:
+        block = yaml.safe_load("\n".join(lines[start:end]))[0]
+        existing_files = block.get("files") or []
+        by_target = {
+            item.get("python"): item
+            for item in existing_files
+            if item.get("python")
+        }
+        new_files = [by_target.get(target, {"python": target}) for target in pythons]
+        if existing_files == new_files:
             continue
-        else:
-            lines[existing] = new_line
+        block["files"] = new_files
+        replacement = yaml.safe_dump([block], sort_keys=False, allow_unicode=True).splitlines()
+        lines[start:end] = replacement
         changed.append(raw)
     if changed:
         yaml_file.write_text("\n".join(lines) + "\n")
@@ -449,7 +489,7 @@ def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
     releases = package_info.get("releases") or {}
     yanked = []
     for entry in package_data.get("versions") or []:
-        if "files" not in entry:
+        if not any("filename" in item for item in entry.get("files") or []):
             continue
         raw = str(entry["version"])
         files = releases.get(raw) or []
@@ -606,7 +646,11 @@ def check_upgrade(
 
     # Only retire the package once every declared version has been built, so
     # the registry really does reach up to upstream's first riscv64 release.
-    pending = [str(e["version"]) for e in package_data.get("versions") or [] if "files" not in e]
+    pending = [
+        str(e["version"])
+        for e in package_data.get("versions") or []
+        if "tag" not in e or any("filename" not in item for item in e.get("files") or [])
+    ]
     if pending:
         print(f"[+] {package}: {', '.join(f'v{v}' for v in pending)} already declared, waiting for the build")
         return up_to_date
@@ -839,8 +883,13 @@ def _self_test():
     assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
 
     def files(requires_python, *wheels):
-        return [{"filename": f"pkg-1.0-{w}-manylinux_2_28_x86_64.whl", "requires_python": requires_python}
-                for w in wheels] + [{"filename": "pkg-1.0.tar.gz", "requires_python": requires_python}]
+        return [{
+            "filename": (
+                f"pkg-1.0-{wheel}.whl" if "linux_" in wheel
+                else f"pkg-1.0-{wheel}-manylinux_2_28_x86_64.whl"
+            ),
+            "requires_python": requires_python,
+        } for wheel in wheels] + [{"filename": "pkg-1.0.tar.gz", "requires_python": requires_python}]
 
     def pythons(*args):
         return upstream_python_versions({"releases": {"1.0": files(*args)}}, "1.0")
@@ -848,36 +897,51 @@ def _self_test():
     assert upstream_python_versions({"releases": {}}, "1.0") is None
     # Upstream's own list, cp313t included; ancient cp37m and pp wheels say nothing.
     assert pythons(">=3.7", "cp37-cp37m", "pp310-pypy310_pp73", "cp310-cp310", "cp313-cp313",
-                   "cp313-cp313t", "cp315-cp315t") == ["3.10", "3.13", "3.13t", "3.15t"]
+                   "cp313-cp313t", "cp315-cp315t") == [
+        "3.10:manylinux", "3.13:manylinux", "3.13t:manylinux", "3.15t:manylinux"
+    ]
     # Compressed tag sets count; abi3 is one build, pure wheels say nothing.
-    assert pythons(None, "cp313.cp314-cp313") == ["3.13"]
-    assert pythons(None, "cp310-abi3", "cp314-cp314t", "py3-none") == ["3.10-abi3", "3.14t"]
+    assert pythons(None, "cp313.cp314-cp313") == ["3.13:manylinux"]
+    assert pythons(None, "cp312-cp312-musllinux_1_2_x86_64") == ["3.12:musllinux"]
+    assert pythons(None, "cp310-abi3", "cp314-cp314t", "py3-none") == [
+        "3.10-abi3:manylinux", "3.14t:manylinux"
+    ]
     # Platform-specific abi3 floors collapse to the oldest floor, and regular
     # builds it covers do not create redundant matrix legs.
     assert pythons(None, "cp38-abi3", "cp311-abi3", "cp311-cp311", "cp314-cp314t") == [
-        "3.8-abi3", "3.14t"
+        "3.8-abi3:manylinux", "3.14t:manylinux"
     ]
-    assert pythons(">=3.12,<3.14", "py3-none") == ["3.12", "3.13"]
-    assert python_versions_line(["3.10-abi3", "3.14t"]) == "  python-versions: ['3.10-abi3', '3.14t']"
-    assert yaml.safe_load(python_versions_line(["3.10"]).strip()) == {"python-versions": ["3.10"]}
+    assert pythons(">=3.12,<3.14", "py3-none") == ["3.12:manylinux", "3.13:manylinux"]
+    assert target_files(["3.10-abi3:manylinux", "3.14t:musllinux"]) == [
+        {"python": "3.10-abi3:manylinux"},
+        {"python": "3.14t:musllinux"},
+    ]
 
-    # Existing python-versions are refreshed, while current values remain untouched.
+    # Existing target files are refreshed, while published metadata remains untouched.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         package_file = Path(tmp) / "pkg.yaml"
         package_file.write_text(
             "versions:\n"
             "- version: '1.0'\n"
-            "  python-versions: ['3.10']\n"
+            "  files:\n"
+            "  - python: 3.10:manylinux\n"
+            "    filename: pkg.whl\n"
+            "    sha256: abc\n"
             "- version: '2.0'\n"
-            "  python-versions: ['3.12']\n"
+            "  files:\n"
+            "  - python: 3.12:manylinux\n"
         )
         info = {"releases": {
             "1.0": files(">=3.11", "cp311-cp311", "cp312-cp312"),
             "2.0": files(">=3.12", "cp312-cp312"),
         }}
         assert fill_python_versions(package_file, info) == ["1.0"]
-        assert "  python-versions: ['3.11', '3.12']\n" in package_file.read_text()
+        updated = yaml.safe_load(package_file.read_text())["versions"]
+        assert updated[0]["files"] == [
+            {"python": "3.11:manylinux"},
+            {"python": "3.12:manylinux"},
+        ]
 
     # Per-package PR titles, one PR per package.
     upgrade = {"status": "need_upgrade", "package": "PyYAML", "registry_version": "6.0",
@@ -927,9 +991,9 @@ def main():
     parser.add_argument("--base-file", type=Path, metavar="FILE",
                         help="Base branch copy of the package YAML (as for pending_versions.py): with --declare, "
                              "only versions it does not declare get the previous version's patches")
-    parser.add_argument("--python-versions", action="store_true",
-                        help="Add or update every docs/packages/<pkg>.yaml entry with the "
-                             "python-versions that upstream builds (e.g. a new port's pending version)")
+    parser.add_argument("--python-targets", action="store_true",
+                        help="Add or update each version's target entries under files "
+                             "from the wheels upstream builds")
     parser.add_argument("--report", type=Path, metavar="FILE", help="Write a Markdown summary of the whole run")
     parser.add_argument("--report-dir", type=Path, metavar="DIR",
                         help="Write one Markdown PR body per changed package, plus a packages.json manifest, "
@@ -943,9 +1007,9 @@ def main():
         _self_test()
         return
 
-    if args.python_versions:
+    if args.python_targets:
         if not args.packages:
-            parser.error("--python-versions needs the packages to fill in")
+            parser.error("--python-targets needs the packages to fill in")
         for package in args.packages:
             package_data = load_package_yaml(package)
             if package_data is None:
@@ -954,7 +1018,7 @@ def main():
             if pypi_info is None:
                 sys.exit(f"[X] Could not get PyPI info for {package}")
             changed = fill_python_versions(package_yaml(package), pypi_info)
-            print(f"[+] {package}: python-versions updated for "
+            print(f"[+] {package}: python targets updated for "
                   f"{', '.join(f'v{v}' for v in changed) or 'nothing'}")
         return
 
