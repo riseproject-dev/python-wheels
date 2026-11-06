@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Thu, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Add a riscv64 CPU arch
+
+Quadrants' CPU-arch enum (quadrants/inc/archs.inc.h) only lists x64 and
+arm64; cmake/QuadrantsCXXFlags.cmake FATAL_ERRORs on any other
+CMAKE_SYSTEM_PROCESSOR, and rhi/arch.cpp's host_arch()/
+default_simd_width()/arch_is_cpu()/arch_uses_llvm() hit
+RHI_NOT_IMPLEMENTED or silently exclude riscv64 from the CPU-backend
+checks scattered through the LLVM codegen (program/extension.cpp,
+runtime/llvm/llvm_context.cpp, runtime/llvm/adstack_lazy_claim/
+bound_eval.cpp, transforms/make_mesh_block_local.cpp). Add a riscv64
+case everywhere x64/arm64 are handled as CPU archs, so the LLVM CPU
+JIT backend (orc::RTDyldObjectLinkingLayer on Linux) is reachable on
+riscv64. default_simd_width() uses 4, matching arm64's conservative
+choice since RV64GC has no fixed-width SIMD without RVV. The nanobind
+enum binding in quadrants/python/export_lang.cpp regenerates from
+archs.inc.h via the same PER_ARCH macro, so quadrants.riscv64 needs no
+separate binding.
+
+Upstream-Status: To upstream
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ cmake/QuadrantsCXXFlags.cmake                         |  5 ++++-
+ quadrants/inc/archs.inc.h                             |  1 +
+ quadrants/program/extension.cpp                       |  3 +++
+ quadrants/rhi/arch.cpp                                | 11 +++++++++--
+ .../runtime/llvm/adstack_lazy_claim/bound_eval.cpp    |  2 +-
+ quadrants/runtime/llvm/llvm_context.cpp               |  2 +-
+ quadrants/transforms/make_mesh_block_local.cpp        |  6 +++---
+ 7 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/cmake/QuadrantsCXXFlags.cmake b/cmake/QuadrantsCXXFlags.cmake
+index e4eb937..c78fbab 100644
+--- a/cmake/QuadrantsCXXFlags.cmake
++++ b/cmake/QuadrantsCXXFlags.cmake
+@@ -132,12 +132,15 @@ elseif ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR "${CMAKE_SYSTEM_PROCES
+ elseif ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86")
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DQD_ARCH_x86")
+     set(ARCH "x86")
++elseif ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "riscv64")
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DQD_ARCH_riscv64")
++    set(ARCH "riscv64")
+ else()
+     message(FATAL_ERROR "Unknown processor type ${CMAKE_SYSTEM_PROCESSOR}")
+ endif()
+ set(HOST_ARCH ${ARCH} CACHE INTERNAL "Host arch")
+ 
+-if (LINUX AND CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
++if (LINUX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|riscv64)$")
+     set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS} -latomic")
+     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -latomic")
+ endif()
+diff --git a/quadrants/inc/archs.inc.h b/quadrants/inc/archs.inc.h
+index 919673a..7b60fa6 100644
+--- a/quadrants/inc/archs.inc.h
++++ b/quadrants/inc/archs.inc.h
+@@ -3,6 +3,7 @@
+ // CPU archs
+ PER_ARCH(x64)     // a.k.a. AMD64/x86_64
+ PER_ARCH(arm64)   // a.k.a. Aarch64, WIP
++PER_ARCH(riscv64) // RV64GC
+ PER_ARCH(js)      // Javascript, N/A
+ PER_ARCH(python)  // Python
+ 
+diff --git a/quadrants/program/extension.cpp b/quadrants/program/extension.cpp
+index 9a51bc2..90cf6cc 100644
+--- a/quadrants/program/extension.cpp
++++ b/quadrants/program/extension.cpp
+@@ -13,6 +13,9 @@ bool is_extension_supported(Arch arch, Extension ext) {
+       {Arch::arm64,
+        {Extension::sparse, Extension::quant, Extension::quant_basic, Extension::data64, Extension::adstack,
+         Extension::assertion, Extension::mesh}},
++      {Arch::riscv64,
++       {Extension::sparse, Extension::quant, Extension::quant_basic, Extension::data64, Extension::adstack,
++        Extension::assertion, Extension::mesh}},
+       {Arch::cuda,
+        {Extension::sparse, Extension::quant, Extension::quant_basic, Extension::data64, Extension::adstack,
+         Extension::bls, Extension::assertion, Extension::mesh}},
+diff --git a/quadrants/rhi/arch.cpp b/quadrants/rhi/arch.cpp
+index b9a4822..db48549 100644
+--- a/quadrants/rhi/arch.cpp
++++ b/quadrants/rhi/arch.cpp
+@@ -39,7 +39,8 @@ Arch arch_from_name(const std::string &arch_name) {
+ 
+ // Assuming a processor is either a CPU or a GPU. DSP/TPUs not considered.
+ bool arch_is_cpu(Arch arch) {
+-  if (arch == Arch::x64 || arch == Arch::arm64 || arch == Arch::js || arch == Arch::python) {
++  if (arch == Arch::x64 || arch == Arch::arm64 || arch == Arch::riscv64 || arch == Arch::js ||
++      arch == Arch::python) {
+     return true;
+   } else {
+     return false;
+@@ -59,7 +60,8 @@ bool arch_is_metal(Arch arch) {
+ }
+ 
+ bool arch_uses_llvm(Arch arch) {
+-  return (arch == Arch::x64 || arch == Arch::arm64 || arch == Arch::cuda || arch == Arch::amdgpu);
++  return (arch == Arch::x64 || arch == Arch::arm64 || arch == Arch::riscv64 || arch == Arch::cuda ||
++          arch == Arch::amdgpu);
+ }
+ 
+ bool arch_is_gpu(Arch arch) {
+@@ -76,6 +78,9 @@ Arch host_arch() {
+ #endif
+ #if defined(QD_ARCH_ARM)
+   return Arch::arm64;
++#endif
++#if defined(QD_ARCH_riscv64)
++  return Arch::riscv64;
+ #endif
+   RHI_NOT_IMPLEMENTED
+ }
+@@ -91,6 +96,8 @@ int default_simd_width(Arch arch) {
+     return 32;
+   } else if (arch == Arch::arm64) {
+     return 4;
++  } else if (arch == Arch::riscv64) {
++    return 4;
+   } else {
+     RHI_NOT_IMPLEMENTED;
+     return -1;
+diff --git a/quadrants/runtime/llvm/adstack_lazy_claim/bound_eval.cpp b/quadrants/runtime/llvm/adstack_lazy_claim/bound_eval.cpp
+index 0b62054..4849e62 100644
+--- a/quadrants/runtime/llvm/adstack_lazy_claim/bound_eval.cpp
++++ b/quadrants/runtime/llvm/adstack_lazy_claim/bound_eval.cpp
+@@ -38,7 +38,7 @@ uint32_t LlvmRuntimeExecutor::publish_per_task_bound_count_cpu(std::size_t task_
+   // Default to UINT32_MAX (no clamp); only override on a successful host evaluation. The codegen-emitted bounds clamp
+   // at the float LCA-block claim site stays inert when the slot holds UINT32_MAX, so this fall-through is a no-op that
+   // preserves the existing behaviour.
+-  if (config_.arch != Arch::x64 && config_.arch != Arch::arm64) {
++  if (config_.arch != Arch::x64 && config_.arch != Arch::arm64 && config_.arch != Arch::riscv64) {
+     return std::numeric_limits<uint32_t>::max();
+   }
+   if (!ad_stack.bound_expr.has_value()) {
+diff --git a/quadrants/runtime/llvm/llvm_context.cpp b/quadrants/runtime/llvm/llvm_context.cpp
+index d116503..ef7070c 100644
+--- a/quadrants/runtime/llvm/llvm_context.cpp
++++ b/quadrants/runtime/llvm/llvm_context.cpp
+@@ -725,7 +725,7 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
+   }
+ 
+   // CPU-specific intrinsics
+-  if (arch_ == Arch::x64 || arch_ == Arch::arm64) {
++  if (arch_ == Arch::x64 || arch_ == Arch::arm64 || arch_ == Arch::riscv64) {
+     auto func = module->getFunction("cpu_clock_i64");
+     if (func) {
+       func->deleteBody();
+diff --git a/quadrants/transforms/make_mesh_block_local.cpp b/quadrants/transforms/make_mesh_block_local.cpp
+index 69d713f..60724b0 100644
+--- a/quadrants/transforms/make_mesh_block_local.cpp
++++ b/quadrants/transforms/make_mesh_block_local.cpp
+@@ -110,7 +110,7 @@ void MakeMeshBlockLocal::replace_global_ptrs(SNode *snode) {
+   }
+ 
+   // in the cpu backend, atomic op in body block could be demoted to non-atomic
+-  if (config_.arch != Arch::x64 && config_.arch != Arch::arm64) {
++  if (config_.arch != Arch::x64 && config_.arch != Arch::arm64 && config_.arch != Arch::riscv64) {
+     return;
+   }
+   std::vector<AtomicOpStmt *> atomic_ops;
+@@ -144,7 +144,7 @@ Stmt *MakeMeshBlockLocal::create_xlogue(Stmt *start_val,
+   Stmt *idx = block_->push_back<AllocaStmt>(mapping_data_type_);
+   [[maybe_unused]] Stmt *init_val = block_->push_back<LocalStoreStmt>(idx, start_val);
+   Stmt *block_dim_val;
+-  if (config_.arch == Arch::x64 || config_.arch == Arch::arm64) {
++  if (config_.arch == Arch::x64 || config_.arch == Arch::arm64 || config_.arch == Arch::riscv64) {
+     block_dim_val = block_->push_back<ConstStmt>(TypedConstant(1));
+   } else {
+     block_dim_val = block_->push_back<ConstStmt>(TypedConstant{offload_->block_dim});
+@@ -272,7 +272,7 @@ void MakeMeshBlockLocal::fetch_mapping(
+                          std::function<Stmt *(Block * /*block*/, Stmt * /*idx_val*/)>)> mapping_callback_handler,
+     std::function<void(Block *body, Stmt *idx_val, Stmt *mapping_val)> attr_callback_handler) {
+   Stmt *thread_idx_stmt;
+-  if (config_.arch == Arch::x64 || config_.arch == Arch::arm64) {
++  if (config_.arch == Arch::x64 || config_.arch == Arch::arm64 || config_.arch == Arch::riscv64) {
+     thread_idx_stmt = block_->push_back<ConstStmt>(TypedConstant(0));
+   } else {
+     thread_idx_stmt = block_->push_back<LoopLinearIndexStmt>(offload_);  // Equivalent to CUDA threadIdx
