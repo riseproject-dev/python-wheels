@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build` job of
+# https://github.com/AnswerDotAI/basedpl/blob/v0.1.82/.github/workflows/ci.yml
+name: Build basedpl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/basedpl.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-basedpl.yml'
+      - 'docs/packages/basedpl.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-basedpl.yml'
+      - 'docs/packages/basedpl.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: basedpl
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build basedpl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      BASEDPL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout basedpl ${{ env.BASEDPL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: AnswerDotAI/basedpl
+          ref: v${{ env.BASEDPL_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream gitignores Cargo.lock, so a fresh build re-resolves crates to
+          # today's latest semver-compatible versions (CLAUDE.md gotcha 10's
+          # "Floating deps in a locally-built sdist"). rustymath 0.1.54 changed the
+          # table shape its `facts!` macro expands to (added a trailing `identities`
+          # section), which breaks basedpl's own locally-defined consumer macros in
+          # src/pervasive.rs (`comparison_arms!`/`primitive_facts!`) that still match
+          # the pre-0.1.54 shape: "no rules expected `identities`". Pin to 0.1.53, the
+          # version upstream actually built v0.1.82 against.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            . "$HOME/.cargo/env" &&
+            cargo update --manifest-path {project}/Cargo.toml -p rustymath --precise 0.1.53
+          # numpy (a test requirement) has a riscv64 wheel only on our registry.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest numpy fastws-cli
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest tests/test_basic.py -q
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: basedpl-${{ env.BASEDPL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish basedpl ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: basedpl-${{ matrix.version }}-*-manylinux_riscv64
