@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 25 Oct 2026 00:00:00 +0000
+Subject: [PATCH] clang.ref.riscv64: silence benign --gcc-toolchain warning
+
+The build failed while compiling cpp/daal/src/services/*.cpp (the
+first objects make -j reaches):
+
+    clang++: error: argument unused during compilation:
+    '--gcc-toolchain=/usr' [-Werror,-Wunused-command-line-argument]
+
+dev/make/common.mk always derives --gcc-toolchain from `which gcc`
+and passes it to every clang compile (C.COMPILE), and
+clang.ref.riscv64.mk's COMPILER.lnx.clang turns on -Werror. On this
+riscv64 manylinux image, clang's GCCInstallation probe does not
+treat that hint as applicable to every translation unit (notably
+ones that pull in no libstdc++ headers, like these services/*.cpp
+files), so clang reports the otherwise-harmless, driver-level
+"unused" notice for them and -Werror turns it into a hard stop. The
+same --gcc-toolchain mechanism is exercised unconditionally for
+every clang platform (x86_64, arm, ...); only riscv64 hits this,
+consistent with clang's RISC-V GCCInstallation detection being a
+newer, less-trodden path than the other architectures'.
+
+Add -Wno-unused-command-line-argument next to the existing -Werror
+in COMPILER.lnx.clang so this one diagnostic stays non-fatal; it does
+not change which headers/libraries get searched or used, only
+whether the driver's "unused argument" notice can fail the build.
+
+Upstream-Status: Inappropriate [riscv64/our-infra: clang's GCCInstallation detection quirk on this manylinux image, irrelevant to upstream's x86_64-host cross-compile CI]
+---
+ dev/make/compiler_definitions/clang.ref.riscv64.mk | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dev/make/compiler_definitions/clang.ref.riscv64.mk b/dev/make/compiler_definitions/clang.ref.riscv64.mk
+index 5f81627..a942888 100644
+--- a/dev/make/compiler_definitions/clang.ref.riscv64.mk
++++ b/dev/make/compiler_definitions/clang.ref.riscv64.mk
+@@ -37,6 +37,7 @@ COMPILER.sysroot = $(if $(SYSROOT),--sysroot $(SYSROOT))
+ 
+ COMPILER.lnx.clang= clang++ \
+                      -DDAAL_REF -DONEDAL_REF -DDAAL_CPU=rv64 -Werror -Wreturn-type \
++                     -Wno-unused-command-line-argument \
+                      $(COMPILER.lnx.clang.target) \
+                      $(COMPILER.sysroot)
+ 
+--
+2.43.0
