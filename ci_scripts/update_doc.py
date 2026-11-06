@@ -9,7 +9,8 @@ with the change.
 
 The version entry must already be declared (the porter or the nightly upgrade
 adds a bare `- version:` line, which is what the build workflow builds); this
-script only fills in `tag`/`files`, or replaces them on a rebuild.
+script fills every declared target slot under `files` and replaces the complete
+release on a rebuild.
 
 generate_packages_doc.py renders this YAML into the published
 Markdown pages under docs/project/<name>/, so this script only needs to
@@ -96,6 +97,31 @@ VAGUE_LICENSES = frozenset(
 )
 
 
+def python_version_from_wheel(filename):
+    """Return (target, platform) encoded by a Linux wheel filename."""
+    parts = filename.removesuffix(".whl").split("-")
+    if len(parts) < 5:
+        raise SystemExit(f"cannot parse wheel tags from {filename}")
+    python_tag, abi_tag, platform_tag = parts[-3:]
+    platforms = {
+        "manylinux" if tag.startswith("manylinux") else "musllinux"
+        for tag in platform_tag.split(".")
+        if tag.startswith(("manylinux", "musllinux"))
+    }
+    if len(platforms) != 1:
+        raise SystemExit(f"{filename} does not identify one Linux platform family")
+    platform = platforms.pop()
+    if abi_tag == "abi3" and re.fullmatch(r"cp3\d+", python_tag):
+        target = f"3.{python_tag[3:]}-abi3"
+    elif re.fullmatch(r"cp3\d+", python_tag) and abi_tag in (python_tag, python_tag + "t"):
+        target = f"3.{abi_tag[3:]}"
+    elif python_tag in ("py3", "py2.py3") and abi_tag == "none":
+        target = None
+    else:
+        raise SystemExit(f"cannot map {filename} to a python target")
+    return (f"{target}:{platform}" if target else None), platform
+
+
 def extract_metadata_from_whl(whl_path):
     """
     Extract metadata according to https://packaging.python.org/en/latest/specifications/core-metadata/
@@ -104,10 +130,13 @@ def extract_metadata_from_whl(whl_path):
         metadata_file = next(f for f in z.namelist() if f.endswith("METADATA"))
         content = z.read(metadata_file).decode()
         message: Message = Parser().parsestr(content)
+        python_version, platform = python_version_from_wheel(whl_path.name)
         return {
             "name": message.get("Name"),
             "version": message.get("Version"),
             "license": extract_license(message),
+            "python": python_version,
+            "platform": platform,
             "filename": whl_path.name,
             "sha256": hashlib.sha256(whl_path.read_bytes()).hexdigest(),
             "requires-python": message.get("Requires-Python"),
@@ -121,6 +150,10 @@ def publication_metadata(release_tag, wheel_metadata, gpl_sources_description=""
             "filename": metadata["filename"],
             "sha256": metadata["sha256"],
         }
+        if metadata["python"]:
+            file_data["python"] = metadata["python"]
+        else:
+            file_data["platform"] = metadata["platform"]
         if metadata["requires-python"]:
             file_data["requires-python"] = metadata["requires-python"]
         files.append(file_data)
@@ -164,6 +197,35 @@ def version_blocks(lines):
         yield start, len(lines)
 
 
+def merge_publication_files(declared_files, published_files):
+    """Fill declared target slots from a complete freshly built wheel set."""
+    published_by_target = {
+        item["python"]: item
+        for item in published_files
+        if item.get("python")
+    }
+    pure_by_platform = {
+        item["platform"]: item for item in published_files if item.get("platform")
+    }
+    merged = []
+    for slot in declared_files:
+        target = slot["python"]
+        platform = target.rsplit(":", 1)[1]
+        published = published_by_target.get(target) or pure_by_platform.get(platform)
+        merged.append({"python": target, **(published or {})})
+    unknown = set(published_by_target) - {item["python"] for item in declared_files}
+    if unknown:
+        raise SystemExit(
+            "built wheels have undeclared python targets: " + ", ".join(sorted(unknown))
+        )
+    missing = [item["python"] for item in merged if "filename" not in item]
+    if missing:
+        raise SystemExit(
+            "release is incomplete; no wheel was built for: " + ", ".join(missing)
+        )
+    return merged
+
+
 def append_version(
     content, package_data, version, license, patch_dir, publication, comment=None
 ):
@@ -171,8 +233,8 @@ def append_version(
     Fill in the publication metadata of the declared `versions:` entry for
     this version, preserving the rest of the file byte-for-byte.
 
-    A pending entry (no tag/files yet) gets the publication block spliced in
-    right after its own lines. An already-released entry has its publication
+    A pending entry has one or more target slots without `filename`; publishing
+    requires and fills every slot. An already-released entry has its publication
     metadata replaced by the latest tag: older immutable GitHub Releases remain
     available for tracking, but only the latest release is exposed through the
     package YAML and Simple API.
@@ -190,6 +252,11 @@ def append_version(
             f"version {version} is not declared in the package YAML; add a "
             f"`- version: {version}` entry under `versions:` and rebuild"
         )
+
+    declared_files = existing_version.get("files") or []
+    if not declared_files:
+        raise SystemExit(f"version {version} has no declared target files")
+    publication["files"] = merge_publication_files(declared_files, publication["files"])
 
     publication_keys = ("tag", "files", "gpl-sources")
     if any(key in existing_version for key in publication_keys):
