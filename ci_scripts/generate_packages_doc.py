@@ -37,7 +37,7 @@ def released_versions(package_data):
     return [
         version
         for version in package_data.get("versions") or []
-        if "tag" in version and "files" in version
+        if "tag" in version and any("filename" in item for item in version.get("files") or [])
     ]
 
 
@@ -88,7 +88,9 @@ def generate_simple_page(yaml_file, output_html):
         tag = version["tag"]
         yanked = version.get("yanked")
         for file_data in version["files"]:
-            filename = file_data["filename"]
+            filename = file_data.get("filename")
+            if not filename:
+                continue
             href = (
                 "https://github.com/riseproject-dev/python-wheels/releases/"
                 f"download/{quote(tag, safe='')}/{quote(filename, safe='')}"
