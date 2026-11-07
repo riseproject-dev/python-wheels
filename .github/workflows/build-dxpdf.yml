@@ -1,0 +1,176 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels`/`build-sdist` jobs of:
+# https://github.com/nerdy-pro/dxpdf/blob/v0.8.1/.github/workflows/python.yml
+# and the equivalent pre-merge dry run in:
+# https://github.com/nerdy-pro/dxpdf/blob/v0.8.1/.github/workflows/ci.yml
+name: Build dxpdf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dxpdf.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dxpdf.yml'
+      - 'docs/packages/dxpdf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dxpdf.yml'
+      - 'docs/packages/dxpdf.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Any recent gn.googlesource.com/gn revision works -- we only run `gn gen` +
+  # `ninja`, never `bin/fetch-gn` (no riscv64 CIPD gn). Same revision already
+  # proven on this image by build-skia-python.yml.
+  GN_REVISION: 0625da07ece7b1a374ec0719b6f40ebe3d0950c1
+  # Must match skia-bindings 0.99.0's own pin (its Cargo.toml
+  # [package.metadata] "skia" key) -- it's what skia-bindings' build.rs would
+  # download itself if SKIA_SOURCE_DIR weren't set below.
+  SKIA_TAG: m150-0.98.1
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dxpdf
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    # `pyo3`'s `abi3-py38` feature collapses the interpreter matrix to one
+    # build (gotcha 11): a single cp312-built wheel is tagged cp38-abi3 and
+    # loads on every newer CPython. Upstream ships no free-threaded wheel
+    # either, so there is no second leg to add.
+    name: Build dxpdf ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600  # full Skia (CPU raster + PDF + text shaping only) compile from source
+
+    env:
+      DXPDF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dxpdf v${{ env.DXPDF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nerdy-pro/dxpdf
+          ref: v${{ env.DXPDF_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # dxpdf ships no [tool.cibuildwheel]; install the pinned Rust
+          # toolchain (rust-toolchain.toml) the same way every other Rust
+          # port here does. skia-bindings (skia-safe's build backend)
+          # defaults CC/CXX to clang/clang++ and unconditionally injects a
+          # clang-only `--target=<triple>` into Skia's GN cflags on Linux --
+          # upstream's own workflow sets CC/CXX=clang for this exact reason,
+          # so GCC is not an option here. clang is on this image at 21.1.8
+          # (CLAUDE.md gotcha 454: `dnf --enablerepo=crb install clang`).
+          # bin/fetch-gn has no riscv64 CIPD gn (CLAUDE.md gotcha 423), so gn
+          # is bootstrapped from source with the host's GCC, same as
+          # build-skia-python.yml/build-skia-pathops.yml on this image.
+          # pip's ninja lands in python3's scripts dir, off PATH inside
+          # build.rs's run, so pin it via ninja.BIN_DIR like gn (gotcha 345).
+          # Rocky 10's clang finds its GCC (and so libstdc++'s headers) only
+          # through /etc/clang/riscv64-redhat-linux-gnu-clang{,++}.cfg
+          # (--gcc-triple/--gcc-install-dir into gcc-toolset-15), and
+          # riscv64-redhat-linux is not in clang's built-in riscv64 triple
+          # list. cc-rs passes --target=riscv64-unknown-linux-gnu and
+          # skia-bindings --target=riscv64-linux-gnu, so clang loads no config
+          # and C++ fails with "'cstdint' file not found" (woofwoof); alias
+          # the config files to those triples.
+          #
+          # Unlike skia-python's own skia checkout (patched directly, see
+          # patches/skia-python), skia-bindings fetches and syncs Skia itself
+          # inside its `cargo build` build-script run, with no git checkout of
+          # ours to patch. That script's un-opt-outable `skia/tools/git-sync-deps`
+          # call (gotcha 423) unconditionally runs `skia/bin/fetch-gn` next,
+          # which KeyErrors on riscv64 and aborts the whole build before `gn
+          # gen`/`ninja` are ever reached, regardless of SKIA_GN_COMMAND/
+          # SKIA_NINJA_COMMAND below. Presync the exact Skia checkout
+          # ourselves and point SKIA_SOURCE_DIR at it instead: build.rs takes
+          # a different, offline path whenever SKIA_SOURCE_DIR is set, which
+          # skips git-sync-deps (and so fetch-gn) entirely and goes straight
+          # to `gn gen`/`ninja`.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eo pipefail
+            dnf --enablerepo=crb install -y fontconfig-devel clang libstdc++-static
+            for t in riscv64-unknown-linux-gnu riscv64-linux-gnu; do
+              for d in clang clang++; do
+                ln -sf riscv64-redhat-linux-gnu-$d.cfg /etc/clang/$t-$d.cfg
+              done
+            done
+            python3 -m pip install ninja
+            install -D -m 0755 "$(python3 -c 'import ninja; print(ninja.BIN_DIR)')/ninja" /usr/local/bin/ninja
+            git clone https://gn.googlesource.com/gn /tmp/gn
+            git -C /tmp/gn checkout ${{ env.GN_REVISION }}
+            (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
+            install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
+            mkdir -p /tmp/skia-src
+            curl --proto '=https' --tlsv1.2 -sSfL -A "python-wheels/dxpdf-build" \
+              https://codeload.github.com/rust-skia/skia/tar.gz/${{ env.SKIA_TAG }} \
+              | tar xz -C /tmp/skia-src --strip-components=1
+            (cd /tmp/skia-src && GIT_SYNC_DEPS_SKIP_EMSDK=1 python3 tools/git-sync-deps) || true
+            [ -n "$(ls -A /tmp/skia-src/third_party/externals/freetype 2>/dev/null)" ]
+            install -D -m 0755 /usr/local/bin/gn /tmp/skia-src/bin/gn
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            CC=clang
+            CXX=clang++
+            SKIA_GN_COMMAND=/usr/local/bin/gn
+            SKIA_NINJA_COMMAND=/usr/local/bin/ninja
+            SKIA_SOURCE_DIR=/tmp/skia-src
+          # Upstream's own wheel check: skia-safe's `embed-freetype` must
+          # statically link FreeType, not dynamically -- a regression brings
+          # back "undefined symbol: FT_Palette_Data_Get" on older system
+          # FreeType. No CIBW_TEST_REQUIRES: the script is stdlib-only.
+          CIBW_TEST_COMMAND: python3 {project}/scripts/verify_wheel.py {wheel}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dxpdf-${{ env.DXPDF_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dxpdf ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dxpdf-${{ matrix.version }}-cp38-abi3-manylinux_riscv64
