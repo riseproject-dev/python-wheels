@@ -50,7 +50,14 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # `tag` must be a matrix vector: with only `include:` legs adding it,
+        # the second leg overwrites the first and only cp314t is built
+        # (gotcha 402).
+        tag: [cp310-abi3, cp314t]
         include:
+          # docs/packages/pgtask.yaml adds a 3.14t:manylinux slot to upstream's
+          # single 3.10-abi3:manylinux target for the free-threaded wheel below.
+          #
           # sdks/python/Cargo.toml carries pyo3/abi3-py310 unconditionally, so
           # one abi3 wheel serves every GIL-ful interpreter; pyo3 disables
           # abi3 under Py_GIL_DISABLED, giving the free-threaded build its
@@ -81,6 +88,21 @@ jobs:
           repository: Kludex/pgtask
           ref: v${{ env.PGTASK_VERSION }}
           persist-credentials: false
+
+      - name: Set the release version
+        # The tagged Cargo.toml still says 0.1.0; upstream's release.yml runs
+        # scripts/set-release-version.sh before building. Only its workspace
+        # and path-dependency version edits matter for the wheel (the rest
+        # needs cargo/jq on the host and touches npm/helm files), so they are
+        # repeated here. No --locked build, so Cargo.lock is refreshed in-build.
+        run: |
+          set -eux
+          export PGTASK_RELEASE_VERSION="$PGTASK_VERSION"
+          perl -0pi -e 's/(\[workspace\.package\].*?\nversion = ")[^"]*(")/$1$ENV{PGTASK_RELEASE_VERSION}$2/s' Cargo.toml
+          for manifest in crates/*/Cargo.toml sdks/python/Cargo.toml; do
+            perl -pi -e 's/^(pgtask[a-z-]* = \{ path = "[^"]*", version = ")[^"]*(")/$1$ENV{PGTASK_RELEASE_VERSION}$2/' "$manifest"
+          done
+          grep -q "^version = \"$PGTASK_VERSION\"" Cargo.toml
 
       - name: Stage the licence beside pgtask's pyproject.toml
         # maturin globs LICEN[CS]E* relative to the pyproject directory,
@@ -132,7 +154,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
