@@ -19,11 +19,13 @@ on:
     paths:
       - '.github/workflows/build-onnxruntime-genai.yml'
       - 'docs/packages/onnxruntime-genai.yaml'
+      - 'patches/onnxruntime-genai/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-onnxruntime-genai.yml'
       - 'docs/packages/onnxruntime-genai.yaml'
+      - 'patches/onnxruntime-genai/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -38,7 +40,7 @@ env:
   # just the Python package; this reuses our own published riscv64 onnxruntime wheel as
   # that native dependency (gotcha 17's dep-wheel pattern, same shape as
   # build-sherpa-onnx-core.yml / gotcha 463). genai declares onnxruntime>=1.28.0, and
-  # 1.31.0 is the published version that covers every interpreter this build targets.
+  # 1.31.0 is the newest published version (cp312+ only, hence the cp311 exclude below).
   ONNXRUNTIME_VERSION: 1.31.0
 
 jobs:
@@ -47,6 +49,8 @@ jobs:
     with:
       package: onnxruntime-genai
       version: ${{ inputs.version }}
+      # No riscv64 onnxruntime wheel exists for cp311 to stage ORT_HOME from.
+      python-exclude: 'cp39 cp311'
 
   build_wheels:
     needs: [setup]
@@ -69,6 +73,15 @@ jobs:
           ref: v${{ env.ONNXRUNTIME_GENAI_VERSION }}
           submodules: none
           persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/onnxruntime-genai/${{ env.ONNXRUNTIME_GENAI_VERSION }}/*.patch
 
       - name: Write container script
         run: |
