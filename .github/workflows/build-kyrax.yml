@@ -53,19 +53,20 @@ jobs:
         # build its own wheel, same shape as build-pgpq.yml.
         tag: [cp310-abi3, cp314t]
         include:
-          # Our registry's pandas has no cp314t riscv64 wheel yet, so the
-          # abi3 wheel is tested with the full pandas/pyarrow/polars extra
-          # set on cp312 (our pyarrow/pandas floor), and the free-threaded
-          # leg falls back to the extras that do have a cp314t riscv64
-          # wheel on our registry (pyarrow, Pillow).
+          # Every test module imports pandas or polars, directly or through
+          # the shared python/tests/utils.py, and our registry has neither
+          # for cp314t riscv64 yet (polars-runtime-32 is abi3-only), so the
+          # free-threaded wheel only gets the import smoke test, same as
+          # build-fastexcel.yml's CIBW_TEST_SKIP. The abi3 wheel runs the
+          # suite on cp312, our pyarrow/pandas floor.
           - tag: cp310-abi3
             interp: python3.10
             test-interp: python3.12
-            test-deps: "'pandas>=1.4.4' 'pyarrow>=8.0.0' 'polars>=1' 'openpyxl>=3.1.2,<4' 'xlrd>=2.0.1,<3' 'pillow>=9.0'"
+            run-tests: true
           - tag: cp314t
             interp: python3.14t
             test-interp: python3.14t
-            test-deps: "'pyarrow>=8.0.0' 'openpyxl>=3.1.2,<4' 'xlrd>=2.0.1,<3' 'pillow>=9.0'"
+            run-tests: false
 
     env:
       KYRAX_VERSION: ${{ matrix.version }}
@@ -111,13 +112,17 @@ jobs:
         run: |
           uv pip install dist/*.whl
           python3 -c "import kyrax._kyrax as m; assert m.__file__.endswith('.so'), m.__file__"
+
+      - name: Run tests
+        if: matrix.run-tests
+        run: |
           # `uv pip install` doesn't read UV_ONLY_BINARY (unlike UV_EXTRA_INDEX_URL/
           # UV_INDEX_STRATEGY, it has no [env:] binding), so the env-only setting
           # above is a no-op here: pillow's unbounded ">=9.0" resolved to PyPI's
           # newest sdist-only release and tried to build from source. Pass
           # --only-binary on the CLI, which does work, so it backtracks to our
           # registry's latest wheel-backed release instead.
-          uv pip install --only-binary pandas,pyarrow,pillow,numpy 'pytest>=7.1.3' 'pytest-mock>=3.1' ${{ matrix.test-deps }}
+          uv pip install --only-binary pandas,pyarrow,pillow,numpy 'pytest>=7.1.3' 'pytest-mock>=3.1' 'pandas>=1.4.4' 'pyarrow>=8.0.0' 'polars>=1' 'openpyxl>=3.1.2,<4' 'xlrd>=2.0.1,<3' 'pillow>=9.0'
           # python/tests/__init__.py (but no python/__init__.py) makes pytest's default
           # prepend import mode put `python/` on sys.path[0] (gotcha 25): `import kyrax`
           # then resolves to the checkout's uncompiled python/kyrax source tree instead
