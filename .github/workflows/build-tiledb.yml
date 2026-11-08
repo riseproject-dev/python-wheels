@@ -205,6 +205,23 @@ jobs:
           # __init__.py interferes with the tests and is included as local file instead of
           # used from wheels. To be honest, tests should not be in the source folder at all.
           CIBW_BEFORE_TEST: rm {project}/tiledb/__init__.py
+          # numpy<2.5: tiledb 0.36.1 still assigns arr.dtype in place and subtracts datetime64
+          # bounds unchecked; numpy 2.5 deprecation-warns/raises on both, and upstream's
+          # filterwarnings=error turned that into ~550 test failures on every Python.
+          # cp310/cp311: our registry has no riscv64 pyarrow there, and tiledb's .df[] path
+          # imports pyarrow whenever pandas is present, so those test without both (upstream's
+          # has_pandas() gates then skip); test_pandas_dataframe.py hard-imports pyarrow, and
+          # test_py1078's skipif still runs without pandas.
+          CIBW_TEST_EXTRAS: ${{ (matrix.python != 'cp310' && matrix.python != 'cp311') && 'test' || '' }}
+          CIBW_TEST_REQUIRES: >-
+            numpy<2.5
+            ${{ (matrix.python == 'cp310' || matrix.python == 'cp311')
+              && 'pytest pytest-rerunfailures hypothesis psutil dask[distributed]' || '' }}
+          CIBW_TEST_COMMAND: >-
+            pytest {project}
+            ${{ (matrix.python == 'cp310' || matrix.python == 'cp311')
+              && '--ignore={project}/tiledb/tests/test_pandas_dataframe.py -k "not test_py1078_df_all_empty_strings"'
+              || '' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
