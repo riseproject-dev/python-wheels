@@ -40,7 +40,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build kyrax ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    name: Build kyrax ${{ matrix.version }} ${{ matrix.tag }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
@@ -52,13 +52,15 @@ jobs:
         # pyo3 disables abi3 under Py_GIL_DISABLED, giving the free-threaded
         # build its own wheel, same shape as build-pgpq.yml.
         tag: [cp310-abi3, cp314t]
+        platform: [manylinux, musllinux]
         include:
           # Every test module imports pandas or polars, directly or through
           # the shared python/tests/utils.py, and our registry has neither
           # for cp314t riscv64 yet (polars-runtime-32 is abi3-only), so the
           # free-threaded wheel only gets the import smoke test, same as
           # build-fastexcel.yml's CIBW_TEST_SKIP. The abi3 wheel runs the
-          # suite on cp312, our pyarrow/pandas floor.
+          # suite on cp312, our pyarrow/pandas floor. Neither exists for
+          # musllinux riscv64 at all, so musl wheels get the smoke test only.
           - tag: cp310-abi3
             interp: python3.10
             test-interp: python3.12
@@ -70,6 +72,7 @@ jobs:
 
     env:
       KYRAX_VERSION: ${{ matrix.version }}
+      IMAGE: ${{ matrix.platform == 'manylinux' && 'quay.io/pypa/manylinux_2_39_riscv64' || 'quay.io/pypa/musllinux_1_2_riscv64' }}
       UV_PYTHON_PREFERENCE: only-managed
       UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
       UV_INDEX_STRATEGY: unsafe-best-match
@@ -86,9 +89,11 @@ jobs:
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
-          target: riscv64gc-unknown-linux-gnu
+          target: riscv64gc-unknown-linux-${{ matrix.platform == 'manylinux' && 'gnu' || 'musl' }}
           args: --release --strip -i ${{ matrix.interp }} --out dist
-          manylinux: '2_39'
+          manylinux: ${{ matrix.platform == 'manylinux' && '2_39' || 'musllinux_1_2' }}
+          # The action maps no musllinux image for a riscv64 host.
+          container: ${{ env.IMAGE }}
 
       - name: Check the wheel ships the extension
         run: |
@@ -103,18 +108,28 @@ jobs:
           EOF
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        if: matrix.platform == 'manylinux'
         with:
           python-version: ${{ matrix.test-interp }}
           activate-environment: true
           enable-cache: false
 
       - name: Test wheel
+        if: matrix.platform == 'manylinux'
         run: |
           uv pip install dist/*.whl
           python3 -c "import kyrax._kyrax as m; assert m.__file__.endswith('.so'), m.__file__"
 
+      - name: Test wheel
+        if: matrix.platform == 'musllinux'
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" -w / "$IMAGE" sh -ec "
+            ${{ matrix.test-interp }} -m venv /venv
+            /venv/bin/python -m pip install --no-index --find-links /dist kyrax
+            /venv/bin/python -c \"import kyrax._kyrax as m; assert m.__file__.endswith('.so'), m.__file__\""
+
       - name: Run tests
-        if: matrix.run-tests
+        if: matrix.run-tests && matrix.platform == 'manylinux'
         run: |
           # `uv pip install` doesn't read UV_ONLY_BINARY (unlike UV_EXTRA_INDEX_URL/
           # UV_INDEX_STRATEGY, it has no [env:] binding), so the env-only setting
@@ -133,18 +148,51 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: kyrax-${{ env.KYRAX_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          name: kyrax-${{ env.KYRAX_VERSION }}-${{ matrix.tag }}-${{ matrix.platform }}_riscv64
           path: dist/*.whl
           if-no-files-found: error
 
-  publish:
-    name: Publish kyrax ${{ matrix.version }}
-    needs: [setup, build_wheels]
+  gpl_sources:
+    needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      KYRAX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The musllinux wheels vendor libgcc_s, which rustc links for unwinding
+      # and auditwheel's musllinux policy does not allowlist (gotcha 409).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: quay.io/pypa/manylinux_2_39_riscv64
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kyrax-${{ env.KYRAX_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish kyrax ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
@@ -152,4 +200,6 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: kyrax-${{ matrix.version }}-*-manylinux_riscv64
+      artifact-pattern: kyrax-${{ matrix.version }}-*_riscv64
+      gpl-sources-artifact: kyrax-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
