@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# Based on the `linux-release` job of
-# https://github.com/duckdb/duckdb/blob/v1.5.6/.github/workflows/Main.yml (`make release`
-# builds build/release/duckdb; `tools/shell/tests` is upstream's own CLI test suite, run here
-# the same way as Main.yml's "ARM64 tools tests" step). The duckdb-cli PyPI wheel is cut by
+# Based on the `linux-release-cli` job of
+# https://github.com/duckdb/duckdb/blob/v1.5.6/.github/workflows/LinuxRelease.yml (its "Build"
+# step builds build/release/duckdb with bundled_extensions.cmake, and its "Tools Tests" step runs
+# upstream's own `tools/shell/tests` against that binary). The duckdb-cli PyPI wheel is cut by
 # DuckDB's own release tooling, not from anything in this repo, so the riscv64 binary here is
 # repackaged straight into the real duckdb_cli/ wrapper downloaded unmodified from the
 # matching PyPI release.
@@ -70,12 +70,13 @@ jobs:
       - name: Pull manylinux_riscv64 image
         run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
 
-      # No EXTENSION_CONFIGS/vcpkg: the default `make release` already statically links
-      # core_functions/parquet/json/icu (extension/extension_config.cmake), the same set the
-      # published duckdb wheel builds for riscv64, and nothing else needs an external package.
       - name: Build the duckdb binary and package the wheel
         run: |
-          docker run --rm -v "$(pwd):/work" -w /work -e DUCKDB_CLI_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+          docker run --rm -v "$(pwd):/work" -w /work -e DUCKDB_CLI_VERSION \
+            -e EXTENSION_CONFIGS=/work/.github/config/bundled_extensions.cmake \
+            -e ENABLE_EXTENSION_AUTOLOADING=1 \
+            -e ENABLE_EXTENSION_AUTOINSTALL=1 \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -c '
             set -euxo pipefail
             make release
             ./build/release/duckdb -c "PRAGMA platform; PRAGMA version;"
@@ -142,6 +143,7 @@ jobs:
         with:
           repository: duckdb/duckdb
           ref: v${{ env.DUCKDB_CLI_VERSION }}
+          path: duckdb
           persist-credentials: false
 
       - name: Download wheel
@@ -161,10 +163,13 @@ jobs:
           uv pip install --reinstall --no-index --find-links . duckdb-cli
           uv pip install pytest
 
-      # Mirrors upstream's own "ARM64 tools tests" step in Main.yml
-      # (`python -m pytest tools/shell/tests --shell-binary build/release/duckdb`).
+      # The `duckdb` console script prepends `-cmd "SET extension_directories = ..."`, which
+      # -safe mode rejects, so upstream's suite runs on the bundled binary as it does upstream.
       - name: Test wheel
-        run: python -m pytest tools/shell/tests --shell-binary "$(command -v duckdb)"
+        working-directory: duckdb
+        run: |
+          duckdb -c "PRAGMA platform; PRAGMA version;"
+          python -m pytest tools/shell/tests --shell-binary "$(python -c 'import duckdb_cli, os; print(os.path.join(os.path.dirname(duckdb_cli.__file__), "duckdb"))')"
 
   publish:
     name: Publish duckdb-cli ${{ matrix.version }}
