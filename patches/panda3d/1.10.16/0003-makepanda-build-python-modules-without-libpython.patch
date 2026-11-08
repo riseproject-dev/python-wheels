@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 8 Nov 2026 00:00:00 +0000
+Subject: [PATCH] makepanda: build Python modules without libpython on manylinux
+
+makepanda's PYTHON probe requires both Python.h and libpython3.X. The
+manylinux images' interpreters ship no libpython at all (PEP 513: a
+manylinux wheel must not link it; LIBDIR/LDLIBRARY names a libpython3.X.a
+that does not exist), so the probe silently disables PYTHON and --wheel
+produces a wheel with no panda3d.core.
+
+Extension modules never link libpython anyway (makepanda drops PYTHON from
+every non-.exe link); only the deploy-stub executable embeds it. On Linux
+--wheel builds whose interpreter has no libpython, probe PYTHON by its
+headers alone and skip deploy-stub. tests/dist/test_FreezeTool.py already
+skips when deploy-stub is absent.
+
+Upstream-Status: Inappropriate [manylinux-image specific; upstream builds its wheels in images that keep libpython]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/makepanda/makepanda.py b/makepanda/makepanda.py
+index c80e4c6..1dd995e 100755
+--- a/makepanda/makepanda.py
++++ b/makepanda/makepanda.py
+@@ -43,6 +43,7 @@ from sysconfig import get_platform
+ COMPILER=0
+ INSTALLER=0
+ WHEEL=0
++PYTHON_EMBED_LIB=True
+ RUNTESTS=0
+ GENMAN=0
+ COMPRESSOR="zlib"
+@@ -1181,6 +1182,13 @@ if (COMPILER=="GCC"):
+ 
+         if not PkgSkip("PYTHON"):
+             python_lib = SDK["PYTHONVERSION"]
++            if WHEEL and GetTarget() == "linux":
++                # manylinux interpreters ship no libpython (PEP 513), and
++                # extension modules never link it; only deploy-stub does.
++                import sysconfig
++                if not os.path.isfile(os.path.join(sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY"))):
++                    PYTHON_EMBED_LIB = False
++                    python_lib = ()
+             SmartPkgEnable("PYTHON", "", python_lib, (SDK["PYTHONVERSION"], SDK["PYTHONVERSION"] + "/Python.h"))
+ 
+             if GetTarget() == "linux":
+@@ -7016,7 +7024,7 @@ if not PkgSkip("CONTRIB") and not PkgSkip("PYTHON") and not RUNTIME:
+ #
+ # DIRECTORY: pandatool/src/deploy-stub
+ #
+-if PkgSkip("PYTHON") == 0:
++if PkgSkip("PYTHON") == 0 and PYTHON_EMBED_LIB:
+     OPTS=['DIR:pandatool/src/deploy-stub', 'BUILDING:DEPLOYSTUB']
+     PyTargetAdd('deploy-stub.obj', opts=OPTS, input='deploy-stub.c')
+     if GetTarget() == 'windows':
