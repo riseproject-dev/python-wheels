@@ -107,11 +107,17 @@ jobs:
           # PyPI's sdist for the current release on every leg that needs it
           # (clickhouse-connect's C extensions are optional - setup.py marks
           # them `optional=True` - so the sdist build never fails even without
-          # a working compiler). lz4/backports.zstd (clickhouse-connect's own
-          # runtime deps) do have full-matrix riscv64 wheels on our registry,
-          # so only-binary still applies to those.
+          # a working compiler). Its own runtime deps lz4 and backports.zstd
+          # (both `python_version < "3.14"` only) stay only-binary where a
+          # riscv64 wheel exists: backports.zstd has one on both libcs, but
+          # lz4 has manylinux riscv64 wheels only (neither our registry nor
+          # PyPI carries a musllinux riscv64 one). Forcing lz4 to binary on
+          # musllinux cp312/cp313 left pip no candidate and sent it
+          # backtracking through every clickhouse-connect sdist until the
+          # 60-minute job timeout, so musllinux lets lz4 build from its sdist
+          # (it vendors liblz4, needing only the image's C compiler).
           CIBW_TEST_REQUIRES: pytest pytest-xdist clickhouse-connect
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=lz4,backports.zstd
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.libc == 'manylinux' && 'PIP_ONLY_BINARY=lz4,backports.zstd' || 'PIP_ONLY_BINARY=backports.zstd' }}
           CIBW_TEST_SOURCES: rust/ch-core-py/tests
           CIBW_TEST_COMMAND: python -m pytest rust/ch-core-py/tests -n 4
 
