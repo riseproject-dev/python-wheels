@@ -84,31 +84,17 @@ jobs:
           git apply python-wheels/patches/scrapli/${{ env.SCRAPLI_VERSION }}/0001-wheel-targets-riscv64.patch
           git apply python-wheels/patches/scrapli/${{ env.SCRAPLI_VERSION }}/0002-ffi-arch-riscv64.patch
 
-      # scrapli vendors a precompiled libscrapli (a separate Zig project,
-      # github.com/scrapli/libscrapli) per platform rather than compiling a
-      # C extension itself; its own build.zig hardcodes the 6 targets it
-      # will cross-build and has no riscv64 entry, so clone it and patch
-      # that list in before the real build. setup.py's LIBSCRAPLI_BUILD_PATH
-      # override skips its own clone when build.zig already exists there --
-      # but (gotcha 677) that same check also gates the *build* itself, not
-      # just the clone: upstream's own util/build_wheels.sh relies on this to
-      # run its one (all-targets) zig build just once and reuse zig-out/
-      # across five `python -m build` calls. Patching build.zig in ourselves
-      # ahead of cibuildwheel means that check is already true on the
-      # container's first (and only) call too, so without building it here
-      # ourselves, setup.py would skip straight to globbing a zig-out/ that
-      # was never created and die with "error: expecting exactly one built
-      # object...". Run the exact same (all-targets) build setup.py would,
-      # with the same ziglang version pinned in CIBW_BEFORE_BUILD below, so
-      # zig-out/riscv64-linux-gnu/ already holds the object it expects.
-      - name: Fetch, patch and build libscrapli ${{ env.LIBSCRAPLI_VERSION }}
+      # setup.py skips building libscrapli whenever LIBSCRAPLI_BUILD_PATH
+      # already holds build.zig and just globs zig-out/<triple>/, so build it
+      # here the way libscrapli's own `make build-release` does, narrowed to
+      # riscv64-linux-gnu.
+      - name: Fetch and build libscrapli ${{ env.LIBSCRAPLI_VERSION }}
         env:
           PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
         run: |
           git clone --branch "v${LIBSCRAPLI_VERSION}" --depth 1 --single-branch \
             https://github.com/scrapli/libscrapli "${{ github.workspace }}/libscrapli-src"
           cd "${{ github.workspace }}/libscrapli-src"
-          git apply "${{ github.workspace }}/python-wheels/patches/scrapli/${{ env.SCRAPLI_VERSION }}/0003-libscrapli-ffi-targets-riscv64.patch"
           # This step runs directly on the ubuntu-24.04-riscv host runner, not
           # inside the manylinux container, and its system Python is PEP 668
           # externally-managed -- `pip install` there dies with
@@ -131,7 +117,13 @@ jobs:
           # "Install the built wheel" step.
           pip install -q --upgrade pip
           pip install -q ziglang==0.17.0
-          python3 -m ziglang build -freference-trace --summary all -- --release --all-targets
+          python3 -m ziglang build ffi \
+            -Doptimize=ReleaseSafe \
+            -freference-trace=4 \
+            -Ddependency-linkage=static \
+            -Dtarget=riscv64-linux-gnu \
+            --summary all
+          ls -l zig-out/riscv64-linux-gnu/libscrapli.*
 
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
