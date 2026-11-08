@@ -10,10 +10,12 @@ that does not exist), so the probe silently disables PYTHON and --wheel
 produces a wheel with no panda3d.core.
 
 Extension modules never link libpython anyway (makepanda drops PYTHON from
-every non-.exe link); only the deploy-stub executable embeds it. On Linux
---wheel builds whose interpreter has no libpython, probe PYTHON by its
-headers alone and skip deploy-stub. tests/dist/test_FreezeTool.py already
-skips when deploy-stub is absent.
+every non-.exe link). Only two executables do: deploy-stub, which embeds
+the interpreter, and p3dcparse, which links the Python-aware dcparser
+objects (the ones that also go into panda3d.direct). On Linux --wheel
+builds whose interpreter has no libpython, probe PYTHON by its headers
+alone and skip both executables. tests/dist/test_FreezeTool.py already
+skips when deploy-stub is absent; nothing in tests/ runs p3dcparse.
 
 Upstream-Status: Inappropriate [manylinux-image specific; upstream builds its wheels in images that keep libpython]
 
@@ -31,21 +33,31 @@ index c80e4c6..1dd995e 100755
  RUNTESTS=0
  GENMAN=0
  COMPRESSOR="zlib"
-@@ -1181,6 +1182,13 @@ if (COMPILER=="GCC"):
- 
+@@ -1181,6 +1182,14 @@ if (COMPILER=="GCC"):
+
          if not PkgSkip("PYTHON"):
              python_lib = SDK["PYTHONVERSION"]
 +            if WHEEL and GetTarget() == "linux":
 +                # manylinux interpreters ship no libpython (PEP 513), and
-+                # extension modules never link it; only deploy-stub does.
++                # extension modules never link it; only the deploy-stub and
++                # p3dcparse executables do.
 +                import sysconfig
 +                if not os.path.isfile(os.path.join(sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY"))):
 +                    PYTHON_EMBED_LIB = False
 +                    python_lib = ()
              SmartPkgEnable("PYTHON", "", python_lib, (SDK["PYTHONVERSION"], SDK["PYTHONVERSION"] + "/Python.h"))
- 
+
              if GetTarget() == "linux":
-@@ -7016,7 +7024,7 @@ if not PkgSkip("CONTRIB") and not PkgSkip("PYTHON") and not RUNTIME:
+@@ -5795,7 +5804,7 @@ if (PkgSkip("DIRECT")==0):
+ # DIRECTORY: direct/src/dcparse/
+ #
+
+-if (PkgSkip("PYTHON")==0 and PkgSkip("DIRECT")==0 and not RTDIST and not RUNTIME):
++if (PkgSkip("PYTHON")==0 and PkgSkip("DIRECT")==0 and PYTHON_EMBED_LIB and not RTDIST and not RUNTIME):
+   OPTS=['DIR:direct/src/dcparse', 'DIR:direct/src/dcparser', 'WITHINPANDA', 'ADVAPI']
+   PyTargetAdd('dcparse_dcparse.obj', opts=OPTS, input='dcparse.cxx')
+   PyTargetAdd('p3dcparse.exe', input='p3dcparser_composite1.obj')
+@@ -7016,7 +7025,7 @@ if not PkgSkip("CONTRIB") and not PkgSkip("PYTHON") and not RUNTIME:
  #
  # DIRECTORY: pandatool/src/deploy-stub
  #
