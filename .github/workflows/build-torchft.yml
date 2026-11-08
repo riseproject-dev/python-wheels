@@ -40,6 +40,8 @@ jobs:
     with:
       package: torchft
       version: ${{ inputs.version }}
+      # torch (a hard Requires-Dist, torch>=2.7) has riscv64 wheels only for cp312+ on pypi.riseproject.dev and none on PyPI (gotcha 84).
+      python-exclude: 'cp39 cp310 cp311'
 
   build_wheels:
     needs: [setup]
@@ -68,6 +70,9 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cp310/cp311 compile in ~22min, but cp312/cp313 (the only legs whose tests can install torch) lose the runner ~50min in,
+          # before and after the cargo cap below; bound the container to 12GB of the runner's 15GB (no swap) so an OOM kills pytest, not the runner (gotchas 421, 458).
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --memory=12g --memory-swap=12g"
           # torchft ships no [tool.cibuildwheel]; the Rust toolchain its maturin
           # backend needs is installed in-container here. tonic-build needs
           # protoc at build time to compile proto/torchft.proto; Rocky 10's CRB
@@ -91,7 +96,8 @@ jobs:
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             CARGO_BUILD_JOBS=2
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-          CIBW_TEST_ENVIRONMENT_LINUX: PIP_ONLY_BINARY=numpy,torch
+          # The integ tests run 2-3 replicas per process; one intra-op thread each keeps them within the 4-core runner.
+          CIBW_TEST_ENVIRONMENT_LINUX: PIP_ONLY_BINARY=numpy,torch OMP_NUM_THREADS=1
           CIBW_TEST_REQUIRES: pytest==8.3.4 pytest-timeout pytest-rerunfailures parameterized numpy
           # Mirrors upstream's own cpu-runner test leg (pytest -v --reruns 3
           # --reruns-delay 5). diloco_regression_test.py resolves its golden
