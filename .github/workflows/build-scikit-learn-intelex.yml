@@ -110,6 +110,8 @@ jobs:
             export CC=clang CXX=clang++
             .ci/scripts/build.sh --compiler clang --optimizations rv64 --target daal --backend-config ref --plat lnxriscv64 --blas-dir /work/openblas-install --tbb-dir /work/tbb-install --jobs "$(nproc)"
             .ci/scripts/build.sh --compiler clang --optimizations rv64 --target onedal_c --backend-config ref --plat lnxriscv64 --blas-dir /work/openblas-install --tbb-dir /work/tbb-install --jobs "$(nproc)"
+            # libonedal_thread links libtbb/libtbbmalloc dynamically; ship them alongside so auditwheel can vendor them.
+            cp -a /work/tbb-install/lib/libtbb.so* /work/tbb-install/lib/libtbbmalloc.so* __release_lnx_clang/daal/latest/lib/riscv64/
             ls -la __release_lnx_clang/daal/latest/lib/riscv64
           '
 
@@ -170,9 +172,13 @@ jobs:
           # release for those two interpreters and numpy's own highway RVV
           # microkernels fail to compile ("builtin requires at least one of the
           # following extensions: zve64x"). Pin to the newest version we publish
-          # a riscv64 wheel for on every interpreter this matrix builds.
-          CIBW_BEFORE_BUILD: pip install -q "numpy==2.4.3" "cython==3.2.5" "jinja2==3.1.6" "pybind11==3.0.4" "setuptools<=79"
+          # a riscv64 wheel for on each interpreter (numpy>=2.3 requires
+          # Python>=3.11, so cp310 tops out at 2.2.2 on our registry).
+          CIBW_BEFORE_BUILD: pip install -q "numpy==2.4.3; python_version>='3.11'" "numpy==2.2.2; python_version<'3.11'" "cython==3.2.5" "jinja2==3.1.6" "pybind11==3.0.4" "setuptools<=79"
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # The extensions link libonedal*.so (and, through libonedal_thread, oneTBB) from the
+          # oneDAL release tree; no daal/tbb Requires-Dist is declared, so they get vendored.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: LD_LIBRARY_PATH=/project/latest/lib/riscv64:$LD_LIBRARY_PATH auditwheel repair -w {dest_dir} {wheel}
           # DALROOT was {project}/latest: unlike CIBW_BEFORE_BUILD/CIBW_TEST_COMMAND,
           # CIBW_ENVIRONMENT_LINUX is shell-evaluated inside the container, not
           # formatted with {project}/{package} - the literal string ended up in the
