@@ -57,6 +57,7 @@ jobs:
       GFLAGS_VERSION: '2.2.2'
       GLOG_VERSION: '0.7.1'
       GRPC_VERSION: '1.83.1'
+      ARROW_VERSION: '11.0.0'
       CCACHE_VERSION: '4.13.6'
       DEPS_PREFIX: /opt/vineyard-deps
       # vineyard's own cmake_minimum_required(VERSION 3.3), and several of
@@ -94,6 +95,55 @@ jobs:
           key: ccache-vineyard-bdist-v${{ env.VINEYARD_BDIST_VERSION }}-grpc${{ env.GRPC_VERSION }}-manylinux_riscv64-${{ github.run_id }}
           restore-keys: |
             ccache-vineyard-bdist-v${{ env.VINEYARD_BDIST_VERSION }}-grpc${{ env.GRPC_VERSION }}-manylinux_riscv64-
+
+      # Mirrors docker/vineyardd/Dockerfile.alpine-builder's Arrow build:
+      # BUILD_VINEYARD_SERVER_SPILLING (default ON) makes find_apache_arrow()
+      # required for vineyardd. `-include cstdint`: Arrow 11 predates GCC 13
+      # dropping <cstdint> from libstdc++'s transitive includes.
+      - name: Build static Apache Arrow
+        run: |
+          set -eux
+          curl -fsSL -o arrow.tar.gz "https://github.com/apache/arrow/archive/refs/tags/apache-arrow-${ARROW_VERSION}.tar.gz"
+          tar zxf arrow.tar.gz
+          cmake -S "arrow-apache-arrow-${ARROW_VERSION}/cpp" -B arrow-build \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${DEPS_PREFIX}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint" \
+            -DARROW_COMPUTE=ON \
+            -DARROW_SIMD_LEVEL=NONE \
+            -DARROW_RUNTIME_SIMD_LEVEL=NONE \
+            -DARROW_WITH_UTF8PROC=OFF \
+            -DARROW_CSV=ON \
+            -DARROW_CUDA=OFF \
+            -DARROW_DATASET=OFF \
+            -DARROW_FILESYSTEM=ON \
+            -DARROW_FLIGHT=OFF \
+            -DARROW_GANDIVA=OFF \
+            -DARROW_HDFS=OFF \
+            -DARROW_JSON=OFF \
+            -DARROW_ORC=OFF \
+            -DARROW_PARQUET=OFF \
+            -DARROW_PLASMA=OFF \
+            -DARROW_PYTHON=OFF \
+            -DARROW_S3=OFF \
+            -DARROW_WITH_BROTLI=OFF \
+            -DARROW_WITH_BZ2=OFF \
+            -DARROW_WITH_GRPC=OFF \
+            -DARROW_WITH_LZ4=OFF \
+            -DARROW_WITH_RE2=OFF \
+            -DARROW_WITH_SNAPPY=OFF \
+            -DARROW_WITH_ZLIB=OFF \
+            -DARROW_WITH_ZSTD=OFF \
+            -DARROW_IPC=ON \
+            -DARROW_BUILD_BENCHMARKS=OFF \
+            -DARROW_BUILD_EXAMPLES=OFF \
+            -DARROW_BUILD_INTEGRATION=OFF \
+            -DARROW_BUILD_UTILITIES=OFF \
+            -DARROW_BUILD_TESTS=OFF \
+            -DARROW_JEMALLOC=OFF \
+            -DARROW_BUILD_SHARED=OFF \
+            -DARROW_BUILD_STATIC=ON
+          cmake --build arrow-build -j"$(nproc)" --target install
 
       - name: Build static OpenSSL
         env:
