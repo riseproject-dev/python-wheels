@@ -158,12 +158,24 @@ jobs:
             dnf -y install libstdc++-static &&
             mkdir -p /opt/meshioplusplus-deps &&
             tar -C /opt/meshioplusplus-deps -xzf {project}/meshioplusplus-deps.tar.gz
+          # PIP_ONLY_BINARY (gotcha 291): PyPI's newest h5py/netCDF4/cftime are
+          # sdist-only for riscv64 and newer than our registry's wheels, so without it
+          # pip picks e.g. the netCDF4 1.7.5.1.post1 sdist over our 1.7.4 wheel and
+          # fails to find netCDF-C headers (hdf5-devel/netcdf-devel are EPEL-only,
+          # and manylinux_riscv64 ships no EPEL, gotcha 51).
           CIBW_ENVIRONMENT_LINUX: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=h5py,netCDF4,cftime
             CMAKE_PREFIX_PATH=/opt/meshioplusplus-deps
             CMAKE_ARGS="-DMESHIOPLUSPLUS_WITH_HDF5=ON -DMESHIOPLUSPLUS_WITH_NETCDF=ON -DMESHIOPLUSPLUS_WITH_CGNSLIB=ON -DMESHIOPLUSPLUS_WITH_ZSTD=ON -DMESHIOPLUSPLUS_WITH_LZ4=ON -DMESHIOPLUSPLUS_WITH_BZIP2=ON -DMESHIOPLUSPLUS_WITH_KAHIP=ON -DMESHIOPLUSPLUS_PREFER_STATIC_DEPS=ON -DKAHIP_ROOT=/opt/meshioplusplus-deps -DMESHIOPLUSPLUS_WITH_ZLIB=ON -DMESHIOPLUSPLUS_ZLIB_STATIC=ON -DMESHIOPLUSPLUS_PARALLEL_BACKEND=SEQ -DMESHIOPLUSPLUS_STATIC_RUNTIME=ON -DMESHIOPLUSPLUS_WITH_OCCT=OFF -DMESHIOPLUSPLUS_PYTHON_SHARED_CORE=ON"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel -v repair -w {dest_dir} {wheel}"
-          CIBW_TEST_REQUIRES: "pytest h5py netCDF4"
+          # Upstream's "pytest h5py netCDF4", trimmed per interpreter to what
+          # pypi.riseproject.dev hosts a riscv64 wheel for (gotcha 709): h5py from
+          # cp312, netCDF4 only cp314/cp314t. wheel_base_smoke.py imports both
+          # under try/except ImportError, so a leg without them still runs every
+          # native HDF5/netCDF/cgns/codec check; only the in-process interop
+          # cross-check with that package is skipped.
+          CIBW_TEST_REQUIRES: ${{ startsWith(matrix.python, 'cp314') && 'pytest h5py netCDF4' || ((matrix.python == 'cp312' || matrix.python == 'cp313') && 'pytest h5py' || 'pytest') }}
           CIBW_TEST_COMMAND: >-
             python -c "import meshioplusplus; print(meshioplusplus.__version__, meshioplusplus._core.__parallel_backend__)"
             &&
