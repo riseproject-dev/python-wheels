@@ -15,9 +15,21 @@ This is the same root cause already documented for the Conan-built OpenSSL case
 in sqlcipher3 (CLAUDE.md gotcha 625) -- nothing about the extension is riscv64
 specific, only the asm is. Force the 64-bit no-asm `linux-generic64` target on
 riscv64 only; every other architecture keeps `./config`'s own auto-detection.
+
+The pinned openssl-3.2.0 cannot build no-asm on riscv64 as shipped: its AES
+providers (cipher_aes_{,ccm_,gcm_,ocb_,xts_}hw.c) select the rv64i code on
+`__riscv` alone, while the rv64i_zkn* / RISCV_HAS_ZKND_AND_ZKNE declarations in
+include/crypto/aes_platform.h are gated on OPENSSL_CPUID_OBJ, so make fails with
+
+    cipher_aes_ccm_hw_rv64i.inc:20:27: error: implicit declaration of function 'rv64i_zkne_set_encrypt_key'
+
+and, because setup.py runs it with check=False, the failure only surfaces later as
+libcurl's CMake "Could NOT find OpenSSL (missing: OPENSSL_CRYPTO_LIBRARY)". On
+riscv64, backport OpenSSL 3.2.2's fix (add `defined(OPENSSL_CPUID_OBJ)` to those
+guards) before configuring.
 --- a/setup.py
 +++ b/setup.py
-@@ -172,7 +172,11 @@ class CMakeBuild(build_ext):
+@@ -172,7 +172,16 @@ class CMakeBuild(build_ext):
                  "git clone --branch openssl-3.2.0 https://github.com/openssl/openssl.git && "
                  "cd openssl && "
                  "mkdir build && "
@@ -25,7 +37,12 @@ riscv64 only; every other architecture keeps `./config`'s own auto-detection.
 +                # riscv64's AES asm overflows R_RISCV_JAL once linked into this
 +                # large .so (CLAUDE.md gotcha 625); force the no-asm
 +                # linux-generic64 target there, leave other arches auto-detected.
++                # 3.2.0's riscv64 AES providers need OpenSSL 3.2.2's
++                # OPENSSL_CPUID_OBJ guard to build without asm.
 +                "OPENSSL_TARGET=$(uname -m | grep -q riscv64 && echo linux-generic64 || true) && "
++                "{ [ -z \"$OPENSSL_TARGET\" ] || sed -i "
++                "'s/^#elif defined(__riscv) && __riscv_xlen/#elif defined(OPENSSL_CPUID_OBJ) \\&\\& defined(__riscv) \\&\\& __riscv_xlen/' "
++                "providers/implementations/ciphers/cipher_aes_*hw.c; } && "
 +                "./config $OPENSSL_TARGET no-shared -static zlib -fPIC -L/usr/lib no-docs no-tests && "
                  "make -j2",
                  shell=True,  # nosec
