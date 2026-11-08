@@ -60,6 +60,29 @@ jobs:
             build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+            # kernels.variants drops every arch kernel on free-threaded Python <3.15,
+            # which these tests' hard-coded x86_64/aarch64 systems don't account for;
+            # upstream's test CI never runs a free-threaded interpreter.
+            test-deselect: >-
+              --deselect 'tests/test_cli_describe_api.py::test_selects_system_variant[variant_names1-'
+              --deselect 'tests/test_cli_describe_api.py::test_selects_system_variant[variant_names2-'
+              --deselect tests/test_cli_describe_api.py::test_hub_missing_symbols_does_not_try_another_variant
+              --deselect tests/test_cli_describe_api.py::test_local_missing_symbols_does_not_try_another_variant
+              --deselect tests/test_cli_variants.py::test_latest_version
+              --deselect tests/test_cli_variants.py::test_only_compatible
+              --deselect 'tests/test_cli_variants.py::test_json['
+              --deselect 'tests/test_cli_variants.py::test_json_no_compatible_variants[False-variants1]'
+              --deselect tests/test_cli_variants.py::test_versions_deprecated
+              --deselect tests/test_variants.py::test_resolve_cuda_
+              --deselect tests/test_variants.py::test_resolve_rocm
+              --deselect tests/test_variants.py::test_resolve_cpu_
+              --deselect tests/test_variants.py::test_resolve_metal_darwin
+              --deselect tests/test_variants.py::test_resolve_noarch_fallback
+              --deselect tests/test_variants.py::test_resolve_no_match
+              --deselect tests/test_variants.py::test_resolve_universal_
+              --deselect tests/test_variants.py::test_resolve_stable_abi_
+              --deselect tests/test_variants.py::test_resolve_tagless_preferred_over_abi_tagged
+              --deselect tests/test_variants.py::test_resolve_mixed_abi_tags
 
     env:
       KERNELS_VERSION: ${{ matrix.version }}
@@ -105,7 +128,10 @@ jobs:
             einops matplotlib numpy tabulate "huggingface-hub<2"
           CIBW_TEST_SOURCES: kernels/tests kernels/pytest.ini kernels/pyproject.toml
           # test_tvm_ffi.py is ignored: kernels-test/relu-tvm-ffi has x86_64 builds
-          # only, and apache-tvm-ffi has no riscv64 wheel for cp313/cp314.
+          # only, and apache-tvm-ffi has no riscv64 wheel for cp313/cp314. The
+          # deselected tests download Hub kernels (kernels-community/relu,
+          # kernels-test-untrusted/ci-test-kernel) published only for x86_64/aarch64
+          # or CUDA, or kernelize on "cuda": upstream runs them on GPU runners only.
           CIBW_TEST_COMMAND: >-
             python -c "import kernels._rust as m, importlib.metadata as md;
             assert m.__file__.endswith('.so'), m.__file__;
@@ -113,7 +139,30 @@ jobs:
             assert any(str(p).endswith('licenses/LICENSE') for p in files), files" &&
             cd kernels &&
             python -m mypy.stubtest kernels._rust &&
-            python -m pytest -v -rfEs tests --ignore tests/test_tvm_ffi.py &&
+            python -m pytest -v -rfEs tests --ignore tests/test_tvm_ffi.py
+            --deselect tests/test_basic.py::test_local_overrides
+            --deselect tests/test_basic.py::test_install_kernel_offline_with_revision
+            --deselect tests/test_basic.py::test_install_kernel_offline_avoids_network
+            --deselect tests/test_basic.py::test_install_kernel_offline_with_version
+            --deselect tests/test_basic.py::test_trust_remote_code_allows_trusted_org
+            --deselect tests/test_basic.py::test_trust_remote_code_flag_allows_untrusted
+            --deselect tests/test_basic.py::test_trust_remote_code_allowlist_allows_untrusted
+            --deselect tests/test_layer.py::test_missing_kernel_build_falls_back
+            --deselect tests/test_loaded_kernels.py::test_get_loaded_kernels_returns_copy
+            --deselect tests/test_loaded_kernels.py::test_get_kernel_registers_loaded_kernel
+            --deselect tests/test_loaded_kernels.py::test_repeated_get_kernel_is_cached
+            --deselect tests/test_loaded_kernels.py::test_get_local_kernel_registers_with_null_repo_info
+            --deselect tests/test_loaded_kernels.py::test_install_kernel_plus_import_does_not_set_repo_info
+            --deselect tests/test_resolver.py::test_hub_resolver_resolves_remote_kernel
+            --deselect tests/test_resolver.py::test_hub_resolver_resolves_revision_to_commit
+            --deselect tests/test_resolver.py::test_hub_cache_resolver_resolves_cached_kernel
+            --deselect tests/test_resolver.py::test_hub_cache_resolver_revision_passthrough
+            --deselect tests/test_resolver.py::test_locked_hub_cache_resolver_resolves_locked_kernel
+            --deselect tests/test_resolver.py::test_locked_hub_resolver_resolves_locked_revision
+            --deselect tests/test_verify.py::test_correctly_signed_kernel_passes_with_default_policy
+            --deselect tests/test_versions.py::test_a_downloaded_revision_resolves_offline
+            --deselect tests/test_versions.py::test_a_downloaded_version_resolves_offline
+            ${{ matrix.test-deselect }} &&
             python -m pip uninstall -y torch &&
             python -c "import kernels" &&
             kernels versions kernels-community/activation
