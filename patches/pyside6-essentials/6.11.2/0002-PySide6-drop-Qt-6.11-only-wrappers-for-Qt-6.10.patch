@@ -7,14 +7,21 @@ Subject: [PATCH] PySide6: drop Qt 6.11-only wrappers when building against
 Upstream-Status: Inappropriate [our image ships Qt 6.10.1, not the 6.11.x pyside-setup 6.11.2 expects]
 
 The typesystems mark QBasicReadWriteLock, QQuaternion::Axes,
-QCustomSeries and QWebView/QWebViewLoadingInfo/QWebViewSettings as
-since="6.11", so shiboken skips them against Rocky 10's Qt 6.10.1. The
-module CMakeLists still list their *_wrapper.cpp unconditionally, and
-CMake's AUTOMOC then aborts on the first missing one:
+QCustomSeries, QWebView/QWebViewLoadingInfo/QWebViewSettings and
+QStyleOptionMenuItemV2 as since="6.11", so shiboken skips them against
+Rocky 10's Qt 6.10.1. The module CMakeLists still list their
+*_wrapper.cpp unconditionally, and CMake's AUTOMOC then aborts on the
+first missing one:
 
   AutoGen error
   The source file "BIN:/PySide6/QtCore/PySide6/QtCore/
   qbasicreadwritelock_wrapper.cpp" does not exist.
+
+QtWidgets isn't AUTOMOC'd, so there the same gap instead reaches ninja's
+Unity build, which fails to compile the #include of the missing file:
+
+  fatal error: .../PySide6/QtWidgets/qstyleoptionmenuitemv2_wrapper.cpp:
+  No such file or directory
 
 Remove those sources from the module lists when Qt is older than 6.11.
 ---
@@ -88,3 +95,20 @@ index 4251bac..129af2d 100644
  set(QtWebView_include_dirs ${QtWebView_SOURCE_DIR}
                             ${QtWebView_BINARY_DIR}
                             ${Qt${QT_MAJOR_VERSION}Core_INCLUDE_DIRS}
+diff --git a/sources/pyside6/PySide6/QtWidgets/CMakeLists.txt b/sources/pyside6/PySide6/QtWidgets/CMakeLists.txt
+index e1b1332..34ba4af 100644
+--- a/sources/pyside6/PySide6/QtWidgets/CMakeLists.txt
++++ b/sources/pyside6/PySide6/QtWidgets/CMakeLists.txt
+@@ -203,6 +203,12 @@ ${SPECIFIC_OS_FILES}
+ ${QtWidgets_GEN_DIR}/qtwidgets_module_wrapper.cpp
+ )
+
++# Qt < 6.11 lacks these classes, so shiboken generates no wrapper for them.
++if(Qt${QT_MAJOR_VERSION}Core_VERSION VERSION_LESS 6.11)
++    list(REMOVE_ITEM QtWidgets_SRC
++         ${QtWidgets_GEN_DIR}/qstyleoptionmenuitemv2_wrapper.cpp)
++endif()
++
+ set(QtWidgets_include_dirs  ${QtWidgets_SOURCE_DIR}
+                             ${QtWidgets_BINARY_DIR}
+                             ${pyside6_SOURCE_DIR}
