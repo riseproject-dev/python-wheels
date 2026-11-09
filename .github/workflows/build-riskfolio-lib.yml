@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux leg of the `build_wheels` job of
+# https://github.com/dcajasn/Riskfolio-Lib/blob/master/.github/workflows/build.yml
+name: Build riskfolio-lib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/riskfolio-lib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-riskfolio-lib.yml'
+      - 'docs/packages/riskfolio-lib.yaml'
+      - 'patches/riskfolio-lib/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-riskfolio-lib.yml'
+      - 'docs/packages/riskfolio-lib.yaml'
+      - 'patches/riskfolio-lib/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: riskfolio-lib
+      version: ${{ inputs.version }}
+      # cvxpy has no riscv64 wheel on the registry for cp310/cp311 (Requires-Python
+      # >=3.11, and cp312 is the oldest it actually publishes there), and
+      # statsmodels has none for cp314, so none of the three can install or test
+      # the built wheel yet.
+      python-exclude: "cp39 cp310 cp311 cp314"
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build riskfolio-lib ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      RISKFOLIO_LIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      # dcajasn/Riskfolio-Lib publishes no tags; this is the commit that
+      # released riskfolio-lib 7.4.0 to PyPI (the next commit bumped to 7.4.1).
+      - name: Checkout riskfolio-lib v${{ env.RISKFOLIO_LIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dcajasn/Riskfolio-Lib
+          ref: 9eb32d350095b307bb4a3fef7e35d00c6488b283
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch riskfolio-lib source
+        run: git apply python-wheels/patches/riskfolio-lib/${{ env.RISKFOLIO_LIB_VERSION }}/0*.patch
+
+      # riskfolio.external.functions links Eigen 3.4.0, vendored at
+      # lib/eigen-3.4.0 without its own licence reaching the wheel.
+      - name: Stage the vendored dependency's licence
+        run: cp lib/eigen-3.4.0/COPYING.MPL2 COPYING.eigen
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,matplotlib,clarabel,scs,scikit-learn,statsmodels,arch,astropy,cvxpy,osqp,highspy,qdldl,sparsediffpy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import riskfolio; print(riskfolio.__version__)" &&
+            python -m pytest tests -v
+
+      - name: Check the wheel ships the extension and all licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("riskfolio/external/functions") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE.txt", "COPYING.eigen"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: riskfolio-lib-${{ env.RISKFOLIO_LIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish riskfolio-lib ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: riskfolio-lib-${{ matrix.version }}-*-manylinux_riscv64
