@@ -71,8 +71,11 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   workflow derives the git tag from `matrix.version`, not the other way round.
 - **The interpreters come from upstream, never from a fixed list.** Keep every upstream
   target in package metadata even when the current riscv64 toolchain cannot build it; matrix
-  generation omits unsupported targets without deleting that upstream coverage record. Build from
-  `include: ${{ fromJSON(needs.setup.outputs.matrix) }}`:
+  generation omits unsupported targets without deleting that upstream coverage record. Use
+  `include: ${{ fromJSON(needs.setup.outputs.matrix) }}` only for jobs whose commands or
+  artifacts vary by Python/platform. Use `needs.setup.outputs.versions` for `py3-none`, fixed
+  ABI3, build-once native dependencies, GPL collection, and publish jobs; otherwise identical
+  work is repeated for every target row. For interpreter-specific builds:
   each version gets the interpreters in its `files[].python` targets in the package
   YAML, which `check_versions.py` fills from upstream's PyPI wheels. Adjust by editing those targets
   or with `python-exclude` (default `"cp39"`), with a "why" comment. Hard-code `python:` only when extra matrix
