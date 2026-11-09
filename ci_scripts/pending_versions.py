@@ -181,6 +181,7 @@ def python_matrix(package, entries, selected, exclude=()):
                 "python": tag,
                 "python-version": python_version(tag),
                 "wheel-tag": tag,
+                "target": f"{target}:{platform}",
                 "platform": platform,
             })
 
@@ -211,6 +212,7 @@ def python_matrix(package, entries, selected, exclude=()):
                 "python-version": python_version(tag),
                 "wheel-tag": cp_tag(floor) + "-abi3",
                 "abi3-floor": floor,
+                "target": f"{floor}-abi3:{platform}",
                 "platform": platform,
             })
 
@@ -239,13 +241,14 @@ def _self_test():
     assert python_matrix("pkg", entries, ["1.0"], ["cp39", "cp310", "cp311", "cp314t"]) == ([
         {
             "version": "1.0", "python": "cp312", "python-version": "3.12",
-            "wheel-tag": "cp38-abi3", "abi3-floor": "3.8", "platform": "manylinux",
+            "wheel-tag": "cp38-abi3", "abi3-floor": "3.8",
+            "target": "3.8-abi3:manylinux", "platform": "manylinux",
         },
     ], [])
     assert python_matrix("pkg", entries, ["2.0"]) == ([
         {
             "version": "2.0", "python": "cp313", "python-version": "3.13",
-            "wheel-tag": "cp313", "platform": "manylinux",
+            "wheel-tag": "cp313", "target": "3.13:manylinux", "platform": "manylinux",
         }
     ], [])
     matrix, warnings = python_matrix("pkg", entries, ["2.0"], ["cp31?"])
@@ -255,11 +258,13 @@ def _self_test():
     assert python_matrix("pkg", entries, ["3.0"], ["cp39", "cp310", "cp311"]) == ([
         {
             "version": "3.0", "python": "cp312", "python-version": "3.12",
-            "wheel-tag": "cp312-abi3", "abi3-floor": "3.12", "platform": "manylinux",
+            "wheel-tag": "cp312-abi3", "abi3-floor": "3.12",
+            "target": "3.12-abi3:manylinux", "platform": "manylinux",
         },
         {
             "version": "3.0", "python": "cp314", "python-version": "3.14",
-            "wheel-tag": "cp314-abi3", "abi3-floor": "3.14", "platform": "manylinux",
+            "wheel-tag": "cp314-abi3", "abi3-floor": "3.14",
+            "target": "3.14-abi3:manylinux", "platform": "manylinux",
         },
     ], [])
     print("[+] self-test passed")
