@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build msprime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/msprime.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-msprime.yml'
+      - 'docs/packages/msprime.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-msprime.yml'
+      - 'docs/packages/msprime.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: msprime
+      version: ${{ inputs.version }}
+
+  python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      MSPRIME_VERSION: ${{ matrix.version }}
+
+    steps:
+    - name: checkout msprime
+      uses: actions/checkout@v7
+      with:
+        repository: tskit-dev/msprime
+        ref: ${{ env.MSPRIME_VERSION }}
+        submodules: true
+        persist-credentials: false
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build sdist
+      env:
+        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MSPRIME: ${{ env.MSPRIME_VERSION }}
+      run: |
+        rm -rf dist/
+        uv pip install build
+        python -m build --sdist
+
+    - name: upload sdist artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: msprime-${{ env.MSPRIME_VERSION }}-sdist
+        path: dist/*.tar.gz
+        if-no-files-found: error
+
+  linux:
+    needs: [setup, python_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build msprime ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      MSPRIME_VERSION: ${{ matrix.version }}
+
+    steps:
+    - name: fetch sdist artifact
+      id: fetch_sdist
+      uses: actions/download-artifact@v8
+      with:
+        name: msprime-${{ env.MSPRIME_VERSION }}-sdist
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build/test wheels
+      id: build
+      env:
+        CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+        # Rocky 10's riscv64 repos (BaseOS/AppStream/CRB) ship no gsl-devel,
+        # unlike the x86_64/aarch64 manylinux images upstream relies on; build
+        # it the way build-cffi.yml builds libffi.
+        CIBW_BEFORE_ALL_LINUX: |
+          set -eux && \
+          curl -L -O https://ftp.gnu.org/gnu/gsl/gsl-2.8.tar.gz && \
+          tar zxf gsl-2.8.tar.gz && cd gsl-2.8 && \
+          ./configure --disable-static --with-pic && \
+          make -j"$(nproc)" install && \
+          cd .. && rm -rf gsl-2.8 gsl-2.8.tar.gz
+        CIBW_ENVIRONMENT: >-
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MSPRIME=${{ matrix.version }}
+        CIBW_TEST_COMMAND: >-
+          python -c "import msprime._msprime" &&
+          msp --help
+      run: |
+        set -eux
+
+        mkdir msprime
+
+        tar zxf ${{ steps.fetch_sdist.outputs.download-path }}/msprime*.tar.gz --strip-components=1 -C msprime
+        uv pip install --upgrade cibuildwheel
+
+        python -m cibuildwheel --output-dir dist ./msprime
+
+        echo "artifact_name=$(ls ./dist/)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: msprime-${{ env.MSPRIME_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        path: ./dist/*.whl
+        if-no-files-found: error
+
+  publish:
+    name: Publish msprime ${{ matrix.version }}
+    needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: msprime-${{ matrix.version }}-*-manylinux_riscv64
