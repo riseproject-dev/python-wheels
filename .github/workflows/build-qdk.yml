@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# microsoft/qdk pushes no git tag for a Python-package release (its `v*` tags track the
+# compiler/CLI only, and the last one is v1.33.0): QDK_REF below is the commit a
+# byte-for-byte diff against the released 1.33.1 wheel's pure-Python files pinpointed
+# (CLAUDE.md gotcha 103/406) -- the only difference is qdk/telemetry.py's QSHARP_VERSION
+# constant, which upstream's own (non-public) release pipeline substitutes the same way
+# the "Set version" step below does.
+name: Build qdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/qdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-qdk.yml'
+      - 'docs/packages/qdk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-qdk.yml'
+      - 'docs/packages/qdk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: qdk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build qdk ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      QDK_VERSION: ${{ matrix.version }}
+      QDK_REF: 7c6a2b5116b30169d97567318bd84d50cc6ee19b
+
+    steps:
+      # Checkout root is the Cargo workspace root (qdk_package is one of its
+      # members, like noisy_simulator/qsc/resource_estimator/...), not
+      # source/qdk_package itself -- same shape as build-pyqir.yml/
+      # build-rerun-sdk.yml for a workspace-member Python binding.
+      - name: Checkout qdk ${{ env.QDK_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: microsoft/qdk
+          ref: ${{ env.QDK_REF }}
+          persist-credentials: false
+
+      # Both pyproject.toml's [project] version and the workspace Cargo.toml's
+      # [workspace.package] version are the literal placeholder "0.0.0" in the
+      # public tree; upstream's own (non-public) release pipeline substitutes
+      # the real version into both before building, same shape as
+      # build-dataframely.yml. telemetry.py's QSHARP_VERSION constant gets the
+      # same substitution (confirmed against the released wheel).
+      - name: Set version
+        run: |
+          sed -i "s/^version = \"0.0.0\"\$/version = \"${QDK_VERSION}\"/" Cargo.toml
+          sed -i "s/^version = \"0.0.0\"\$/version = \"${QDK_VERSION}\"/" source/qdk_package/pyproject.toml
+          sed -i "s/QSHARP_VERSION = \"0.0.0.dev0\"/QSHARP_VERSION = \"${QDK_VERSION}\"/" source/qdk_package/qdk/telemetry.py
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: source/qdk_package
+          output-dir: wheelhouse/
+          # pyo3's abi3-py310 feature is on unconditionally for non-Windows
+          # targets (source/qdk_package/Cargo.toml), matching upstream's own
+          # single cp310-abi3 wheel. musllinux is dropped: rustup.rs ships no
+          # riscv64 musl toolchain.
+          only: cp310-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # qdk ships no [tool.cibuildwheel]; the Rust toolchain its maturin
+          # backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pyqir is qdk's only non-extra runtime dependency and has no public
+          # riscv64 wheel; PIP_EXTRA_INDEX_URL above resolves it from our own
+          # registry. The rest of test_requirements.txt (expecttest, ipython,
+          # cirq-core, pandas, hypothesis, multiset) are all available from
+          # public PyPI for riscv64 (pandas as a real wheel, the others
+          # py3-none-any). The `ec` extra's own test deps (qodec, paulimer,
+          # binar) are not installed -- tests/ec_tests already skips itself
+          # when they are missing (test_requirements.txt's own comment).
+          CIBW_TEST_REQUIRES: >-
+            pytest expecttest==0.3.0 ipython pyqir>=0.12.6,<0.13
+            cirq-core==1.7.0 pandas>=2.1 hypothesis multiset
+          CIBW_TEST_SOURCES: source/qdk_package/tests source/qdk_package/pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import qdk._native as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            cd source/qdk_package &&
+            pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: qdk-${{ env.QDK_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish qdk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: qdk-${{ matrix.version }}-*-manylinux_riscv64
