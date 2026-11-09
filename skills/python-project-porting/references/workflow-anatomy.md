@@ -68,8 +68,13 @@ jobs:
       <PKG>_VERSION: ${{ matrix.version }}       # steps keep using env.<PKG>_VERSION
 ```
 
-Every job that consumes the matrix carries the `if:` guard, the `version:` vector (or the
-`include:` matrix, for the build jobs) and (for
+Every job carries the `if:` guard and uses one of two matrix shapes. Use
+`include: ${{ fromJSON(needs.setup.outputs.matrix) }}` only when the job's work or artifact
+actually varies by Python or Linux platform. Use
+`version: ${{ fromJSON(needs.setup.outputs.versions) }}` for interpreter-independent work:
+`py3-none-*` wheels, one fixed ABI3 wheel, native dependencies compiled once per version,
+GPL source collection, and publish jobs. Using the full setup matrix for version-only work
+silently repeats an identical build for every Python/platform row. Jobs then carry (for
 `runs-on` jobs) the `env:` line; a `uses:` job (publish) takes no `env:`. `version` is the
 version the **wheel** will carry — `update_doc.py` refuses to document a wheel whose version
 is not declared — so the workflow derives the git ref from it (`ref: v${{ env.X_VERSION }}`,
@@ -150,15 +155,25 @@ build more or fewer interpreter/platform targets than upstream for that version 
 `"cp39"`; setting it replaces that default, so `python-exclude: ""` also builds Python 3.9,
 and `"cp39 cp31[01] cp315*"` drops 3.10, 3.11, and 3.15.
 
-**Converting old workflows is gradual.** Most `build-<pkg>.yml` still hard-code `python:
-[...]` next to `version:`. When a workflow is touched to build a new release, switch it:
-make sure the new version's entry has target slots under `files`, and replace the `version:` +
-`python:` vectors of the build job(s) with
+**Choose the matrix by whether the output varies.** For a per-interpreter or per-platform
+wheel/test job, make sure the new version has target slots under `files`, and use
 `include: ${{ fromJSON(needs.setup.outputs.matrix) }}` (see `build-falcon.yml`). Select a
 cibuildwheel target as `${{ matrix.python }}-${{ matrix.platform }}_riscv64` and include the
 same `${{ matrix.platform }}` in job and artifact names. The matrix may grow (e.g. cp315/cp315t): exclude what fails for
-riscv64-specific reasons rather than reverting to a hard-coded list. Workflows whose extra
-axes (`libc`, `build`) don't fit a `{version, python}` include can stay hard-coded.
+riscv64-specific reasons rather than reverting to a hard-coded list. For a job whose output
+is identical across those rows, use the version-only matrix instead:
+
+```yaml
+strategy:
+  matrix:
+    version: ${{ fromJSON(needs.setup.outputs.versions) }}
+```
+
+Before converting any job, search its body for actual use of `matrix.python` or
+`matrix.platform`. If neither changes the command, inputs, or artifact, the job is
+version-only. A constant label such as `py3-none-manylinux_riscv64` or `cp310-abi3` is a
+strong signal that the full matrix would only duplicate work. Workflows whose extra axes
+(`libc`, `build`) don't fit an include list can stay hard-coded.
 
 A JSON `include:` can't carry per-entry keys (`test_skip`, `pytest_k`, …) or be trimmed by
 `exclude:`, so compute per-interpreter values in expressions instead, e.g.
