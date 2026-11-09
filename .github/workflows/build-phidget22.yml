@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Phidgets publishes no build workflow. Its manylinux wheels are the Phidget22Python
+# sources with libphidget22.so (built from the libphidget22 source tarball) copied into
+# Phidget22/.libs, which _phidget_support.py loads before falling back to the system one.
+#   https://www.phidgets.com/docs/OS_-_Linux#Installing_from_Source
+name: Build phidget22 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/phidget22.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-phidget22.yml'
+      - 'docs/packages/phidget22.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-phidget22.yml'
+      - 'docs/packages/phidget22.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PHIDGET22_DOWNLOADS: https://www.phidgets.com/downloads/phidget22/libraries
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: phidget22
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build phidget22 ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      PHIDGET22_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download libphidget22 and Phidget22Python ${{ env.PHIDGET22_VERSION }}
+        run: |
+          curl -fsSL -o libphidget22.tar.gz \
+            "$PHIDGET22_DOWNLOADS/linux/libphidget22/libphidget22-${PHIDGET22_VERSION}.tar.gz"
+          curl -fsSL -o Phidget22Python.zip \
+            "$PHIDGET22_DOWNLOADS/any/Phidget22Python/Phidget22Python_${PHIDGET22_VERSION}.zip"
+
+      # libusb stays a system dependency, as in Phidgets' own manylinux wheels.
+      - name: Build libphidget22 and package the wheel
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io "$MANYLINUX_RISCV64_IMAGE" bash -euo pipefail -c '
+            dnf install -y libusb1-devel
+            mkdir -p /tmp/libphidget22
+            tar -xzf libphidget22.tar.gz -C /tmp/libphidget22 --strip-components=1
+            cd /tmp/libphidget22
+            # The bundled 2014 config.guess does not know riscv64.
+            ./configure --build="$(uname -m)-unknown-linux-gnu" --disable-static
+            make -j"$(nproc)"
+
+            cd /io
+            PY=/opt/python/cp312-cp312/bin/python
+            "$PY" -m zipfile -e Phidget22Python.zip src
+            mkdir -p src/Phidget22Python/Phidget22/.libs
+            cp -L /tmp/libphidget22/.libs/libphidget22.so src/Phidget22Python/Phidget22/.libs/libphidget22.so
+            strip --strip-unneeded src/Phidget22Python/Phidget22/.libs/libphidget22.so
+
+            "$PY" -m pip wheel --no-deps -w tmpwheelhouse ./src/Phidget22Python
+            "$PY" -m pip install wheel
+            "$PY" -m wheel tags --remove --platform-tag linux_riscv64 tmpwheelhouse/*.whl
+            auditwheel repair --exclude libusb-1.0.so.0 -w wheelhouse tmpwheelhouse/*.whl
+          '
+
+      - name: Check the wheel ships the riscv64 libphidget22
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          (whl,) = sys.argv[1:]
+          assert "-py3-none-manylinux_" in whl and whl.endswith("_riscv64.whl"), whl
+          zf = zipfile.ZipFile(whl)
+          header = zf.read("Phidget22/.libs/libphidget22.so")[:20]
+          assert header[:4] == b"\x7fELF" and header[18] == 0xF3, header
+          assert any(n.endswith(".dist-info/LICENSE") for n in zf.namelist()), whl
+          print(whl, "ok")
+          EOF
+
+      - name: Install the wheel and exercise the bindings
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libusb-1.0-0 python3-venv
+          python3 -m venv .venv
+          .venv/bin/pip install -q --only-binary :all: wheelhouse/*.whl
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/.venv/bin/python" - <<'EOF'
+          import os
+          import Phidget22
+          from Phidget22.Phidget import Phidget
+          from Phidget22.PhidgetException import PhidgetException
+          from Phidget22.ErrorCode import ErrorCode
+          from Phidget22.Devices.DigitalInput import DigitalInput
+
+          libs = os.path.join(os.path.dirname(Phidget22.__file__), ".libs")
+          assert os.listdir(libs) == ["libphidget22.so"], os.listdir(libs)
+          version = Phidget.getLibraryVersion()
+          print(version)
+          assert version.startswith("Phidget22 - Version 1."), version
+
+          channel = DigitalInput()
+          try:
+              channel.openWaitForAttachment(500)
+          except PhidgetException as e:
+              assert e.code == ErrorCode.EPHIDGET_TIMEOUT, (e.code, e.details)
+          else:
+              raise AssertionError("attached to a device on a CI runner")
+          finally:
+              channel.close()
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: phidget22-${{ env.PHIDGET22_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish phidget22 ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: phidget22-${{ matrix.version }}-py3-none-manylinux_riscv64
