@@ -51,17 +51,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build mssql-python-rs ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    name: Build mssql-python-rs ${{ matrix.version }} ${{ matrix.wheel-tag }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     container:
-      image: quay.io/pypa/manylinux_2_39_riscv64
+      image: quay.io/pypa/${{ matrix.platform == 'musllinux' && 'musllinux_1_2' || 'manylinux_2_39' }}_riscv64
     defaults:
       run:
         shell: bash
     env:
       MSSQL_PYTHON_RS_VERSION: ${{ matrix.version }}
+      LIBC: ${{ matrix.platform == 'musllinux' && 'musl' || 'glibc' }}
+      WHEEL_PLAT: ${{ matrix.platform == 'musllinux' && 'musllinux_1_2' || 'manylinux_2_34' }}
 
     steps:
       - name: Checkout mssql-rs ${{ env.MSSQL_PYTHON_RS_REF }}
@@ -83,11 +85,18 @@ jobs:
 
       - name: Setup build environment
         run: |
-          dnf -y install openssl openssl-devel
+          if [ "$LIBC" = musl ]; then
+            apk add --no-cache openssl openssl-dev pkgconfig
+            # rust-toolchain.toml pins 1.95, which ships no riscv64 musl host toolchain (1.99 is the first).
+            export RUSTUP_TOOLCHAIN=1.99.1
+            echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" >> "$GITHUB_ENV"
+          else
+            dnf -y install openssl openssl-devel
+          fi
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" toolchain install
+          "$HOME/.cargo/bin/rustup" toolchain install ${RUSTUP_TOOLCHAIN:-}
           /opt/python/cp312-cp312/bin/python -m pip install maturin==1.15.0
 
       # mssql-py-core/ has no LICENSE of its own, so upstream's wheels ship none.
@@ -102,18 +111,19 @@ jobs:
       - name: Build ODBC driver
         run: |
           WORKSPACE_DIR="$GITHUB_WORKSPACE" ODBC_DROP_DIR="$GITHUB_WORKSPACE/odbc-drop" \
-            sh scripts/build-odbc-driver-only.sh glibc
+            sh scripts/build-odbc-driver-only.sh "$LIBC"
 
       - name: Inject ODBC driver into wheel
         run: |
-          mkdir -p drivers/linux/glibc/riscv64/lib
-          cp odbc-drop/build/mssqlodbc.so drivers/linux/glibc/riscv64/lib/mssqlodbc.so
+          mkdir -p "drivers/linux/$LIBC/riscv64/lib"
+          cp odbc-drop/build/mssqlodbc.so "drivers/linux/$LIBC/riscv64/lib/mssqlodbc.so"
           /opt/python/cp312-cp312/bin/python scripts/inject-odbc-into-wheels.py \
             --wheels-dir target/wheels \
             --drivers-dir drivers
 
       - name: Repair glibc wheel
-        run: REPAIR_PLAT=manylinux_2_34 bash scripts/repair-glibc-wheels-in-container.sh target/wheels
+        if: matrix.platform == 'manylinux'
+        run: REPAIR_PLAT="$WHEEL_PLAT" bash scripts/repair-glibc-wheels-in-container.sh target/wheels
 
       - name: Check the wheel carries both native libraries and the licence
         run: |
@@ -122,7 +132,7 @@ jobs:
           for whl in sys.argv[1:]:
               names = zipfile.ZipFile(whl).namelist()
               assert "mssql_py_core/mssql_py_core.abi3.so" in names, names
-              assert "mssql_py_core/libs/linux/glibc/riscv64/lib/mssqlodbc.so" in names, names
+              assert "mssql_py_core/libs/linux/${{ env.LIBC }}/riscv64/lib/mssqlodbc.so" in names, names
               assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
               print(whl, "ok")
           EOF
@@ -130,7 +140,7 @@ jobs:
       - name: Test wheel installs
         run: |
           ln -s "$GITHUB_WORKSPACE/scripts" /scripts
-          bash scripts/test-python-wheel-installs-linux.sh --container "$GITHUB_WORKSPACE/target/wheels" manylinux_2_34 riscv64
+          bash scripts/test-python-wheel-installs-linux.sh --container "$GITHUB_WORKSPACE/target/wheels" "$WHEEL_PLAT" riscv64
 
       # Upstream's dev/test-python.sh --skip-integration, run against the built
       # wheel instead of `maturin develop`; the integration tests need a SQL
@@ -144,13 +154,15 @@ jobs:
           (cd mssql-mock-tds-py && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 \
             /opt/python/cp312-cp312/bin/python -m maturin build --release --out "$GITHUB_WORKSPACE/mock-wheels")
           /opt/python/cp312-cp312/bin/python -m venv /venv
-          /venv/bin/pip install target/wheels/*.whl mock-wheels/*.whl pytest pytest-asyncio python-dotenv pyarrow
+          # pyarrow has no musllinux riscv64 wheel; its tests importorskip it.
+          /venv/bin/pip install target/wheels/*.whl mock-wheels/*.whl pytest pytest-asyncio python-dotenv \
+            ${{ matrix.platform == 'manylinux' && 'pyarrow' || '' }}
           cd mssql-py-core
           /venv/bin/python -m pytest tests/ -v -m "not integration and not longhaul and not smoke" --ignore=tests/mssql_python
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: mssql-python-rs-${{ env.MSSQL_PYTHON_RS_VERSION }}-cp310-abi3-manylinux_riscv64
+          name: mssql-python-rs-${{ env.MSSQL_PYTHON_RS_VERSION }}-${{ matrix.wheel-tag }}-${{ matrix.platform }}_riscv64
           path: target/wheels/*.whl
           if-no-files-found: error
 
@@ -169,4 +181,4 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: mssql-python-rs-${{ matrix.version }}-*-manylinux_riscv64
+      artifact-pattern: mssql-python-rs-${{ matrix.version }}-*_riscv64
