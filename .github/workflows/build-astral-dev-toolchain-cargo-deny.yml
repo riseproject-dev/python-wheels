@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# astral-dev-toolchain (which publishes these wheels) is not public. Its PyPI
+# wheels are maturin `bindings = "bin"` builds of cargo-deny's own tag, so this
+# mirrors that, plus the `self` job of
+# https://github.com/EmbarkStudios/cargo-deny/blob/0.20.2/.github/workflows/ci.yaml
+name: Build astral-dev-toolchain-cargo-deny wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/astral-dev-toolchain-cargo-deny.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-astral-dev-toolchain-cargo-deny.yml'
+      - 'docs/packages/astral-dev-toolchain-cargo-deny.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-astral-dev-toolchain-cargo-deny.yml'
+      - 'docs/packages/astral-dev-toolchain-cargo-deny.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: astral-dev-toolchain-cargo-deny
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build astral-dev-toolchain-cargo-deny ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+
+    env:
+      CARGO_DENY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cargo-deny ${{ env.CARGO_DENY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: EmbarkStudios/cargo-deny
+          ref: ${{ env.CARGO_DENY_VERSION }}
+          persist-credentials: false
+
+      - name: Write pyproject.toml
+        run: |
+          cat > pyproject.toml <<'TOML'
+          [build-system]
+          requires = ["maturin>=1.14,<2.0"]
+          build-backend = "maturin"
+
+          [project]
+          name = "astral-dev-toolchain-cargo-deny"
+          dynamic = ["version", "description", "readme", "license", "keywords", "authors", "urls"]
+
+          [tool.maturin]
+          bindings = "bin"
+          TOML
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked -o dist --strip
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Verify the wheel ships the riscv64 cargo-deny binary
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          version = os.environ["CARGO_DENY_VERSION"]
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert os.path.basename(sys.argv[1]).startswith(f"astral_dev_toolchain_cargo_deny-{version}-py3-none-manylinux_"), sys.argv[1]
+              binary = f"astral_dev_toolchain_cargo_deny-{version}.data/scripts/cargo-deny"
+              assert binary in names, names
+              header = zf.read(binary)[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: astral-dev-toolchain-cargo-deny-${{ env.CARGO_DENY_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test astral-dev-toolchain-cargo-deny ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      CARGO_DENY_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout cargo-deny ${{ env.CARGO_DENY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: EmbarkStudios/cargo-deny
+          ref: ${{ env.CARGO_DENY_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: astral-dev-toolchain-cargo-deny-${{ env.CARGO_DENY_VERSION }}-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+
+      - name: Install wheel
+        run: uv pip install --find-links wheelhouse "astral-dev-toolchain-cargo-deny==${CARGO_DENY_VERSION}"
+
+      - name: Test wheel
+        run: |
+          set -euxo pipefail
+          cargo-deny --version | grep -Fx "cargo-deny ${CARGO_DENY_VERSION}"
+
+          # cargo-deny 0.20.2's own tree (checked out above) fails its self-test
+          # check against its own committed Cargo.lock: RUSTSEC has since
+          # published advisories against the zstd/zstd-safe/zstd-sys versions it
+          # pins (reached via its dev-dep on spdx) and against the
+          # rustls/rustls-webpki/webpki-roots versions it pins (reached via its
+          # dev-dep on ureq). None of this touches the riscv64 binary under
+          # test. Bump each crate the way its advisory's own "Solution" line
+          # recommends, and allow the BSD-3-Clause license the zstd crates
+          # adopted as of those fixed versions - upstream's own deny.toml
+          # allow-list predates that relicensing and only lists
+          # MIT/Apache-2.0/ISC/Unicode-3.0/Zlib.
+          cargo update -p zstd --precise 0.13.4
+          cargo update -p zstd-safe --precise 7.4.0
+          cargo update -p zstd-sys --precise 2.1.2
+          cargo update -p rustls --precise 0.23.46
+          cargo update -p rustls-webpki --precise 0.103.16
+          cargo update -p webpki-roots --precise 1.0.10
+          python3 - <<'PATCH'
+          with open("deny.toml") as f:
+              s = f.read()
+          needle = "exceptions = [\n]"
+          assert needle in s, "deny.toml licenses.exceptions block not found in expected shape"
+          s = s.replace(
+              needle,
+              'exceptions = [\n'
+              '    { allow = ["BSD-3-Clause"], name = "zstd" },\n'
+              '    { allow = ["BSD-3-Clause"], name = "zstd-safe" },\n'
+              '    { allow = ["BSD-3-Clause"], name = "zstd-sys" },\n'
+              ']',
+          )
+          with open("deny.toml", "w") as f:
+              f.write(s)
+          PATCH
+
+          cargo deny -L debug --all-features --locked check
+
+  publish:
+    name: Publish astral-dev-toolchain-cargo-deny ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: astral-dev-toolchain-cargo-deny-${{ matrix.version }}-manylinux_riscv64
