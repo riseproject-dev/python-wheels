@@ -55,15 +55,11 @@ jobs:
     name: Build mssql-python-rs ${{ matrix.version }} ${{ matrix.wheel-tag }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
-    container:
-      image: quay.io/pypa/${{ matrix.platform == 'musllinux' && 'musllinux_1_2' || 'manylinux_2_39' }}_riscv64
-    defaults:
-      run:
-        shell: bash
     env:
       MSSQL_PYTHON_RS_VERSION: ${{ matrix.version }}
       LIBC: ${{ matrix.platform == 'musllinux' && 'musl' || 'glibc' }}
       WHEEL_PLAT: ${{ matrix.platform == 'musllinux' && 'musllinux_1_2' || 'manylinux_2_34' }}
+      BUILD_IMAGE: quay.io/pypa/${{ matrix.platform == 'musllinux' && 'musllinux_1_2' || 'manylinux_2_39' }}_riscv64
 
     steps:
       - name: Checkout mssql-rs ${{ env.MSSQL_PYTHON_RS_REF }}
@@ -78,87 +74,103 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
-      - name: Patch mssql-rs source
+      # quay.io/pypa/musllinux_1_2_riscv64 has no Node, so a job-level
+      # `container:` can't run the JS actions above (actions/checkout) or
+      # below (actions/upload-artifact) against it (gotcha 15). Drive it with
+      # `docker run` instead: write the in-container build script to a file
+      # on the host, then hand it to the container directly.
+      - name: Write in-container build script
         run: |
-          git config --global --add safe.directory '*'
-          git apply python-wheels/patches/mssql-python-rs/${{ env.MSSQL_PYTHON_RS_VERSION }}/00*.patch
+          cat > build-in-container.sh <<'SCRIPT'
+          #!/bin/bash
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE"
 
-      - name: Setup build environment
-        run: |
+          git config --global --add safe.directory '*'
+          git apply "python-wheels/patches/mssql-python-rs/$MSSQL_PYTHON_RS_VERSION"/00*.patch
+
+          # Setup build environment
           if [ "$LIBC" = musl ]; then
             apk add --no-cache openssl openssl-dev pkgconfig
             # rust-toolchain.toml pins 1.95, which ships no riscv64 musl host toolchain (1.99 is the first).
-            export RUSTUP_TOOLCHAIN=1.99.1
-            echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" >> "$GITHUB_ENV"
+            RUSTUP_TOOLCHAIN=1.99.1
           else
             dnf -y install openssl openssl-devel
           fi
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
           "$HOME/.cargo/bin/rustup" toolchain install ${RUSTUP_TOOLCHAIN:-}
           /opt/python/cp312-cp312/bin/python -m pip install maturin==1.15.0
 
-      # mssql-py-core/ has no LICENSE of its own, so upstream's wheels ship none.
-      - name: Stage licence
-        run: cp LICENSE mssql-py-core/
+          # mssql-py-core/ has no LICENSE of its own, so upstream's wheels ship none.
+          cp LICENSE mssql-py-core/
 
-      - name: Build abi3 wheel
-        run: |
+          # Build abi3 wheel
           WORKSPACE_DIR="$GITHUB_WORKSPACE" OUTPUT_DIR="$GITHUB_WORKSPACE/target/wheels" \
             bash scripts/build-python-wheels-in-container.sh
 
-      - name: Build ODBC driver
-        run: |
+          # Build ODBC driver
           WORKSPACE_DIR="$GITHUB_WORKSPACE" ODBC_DROP_DIR="$GITHUB_WORKSPACE/odbc-drop" \
             sh scripts/build-odbc-driver-only.sh "$LIBC"
 
-      - name: Inject ODBC driver into wheel
-        run: |
+          # Inject ODBC driver into wheel
           mkdir -p "drivers/linux/$LIBC/riscv64/lib"
           cp odbc-drop/build/mssqlodbc.so "drivers/linux/$LIBC/riscv64/lib/mssqlodbc.so"
           /opt/python/cp312-cp312/bin/python scripts/inject-odbc-into-wheels.py \
             --wheels-dir target/wheels \
             --drivers-dir drivers
 
-      - name: Repair glibc wheel
-        if: matrix.platform == 'manylinux'
-        run: REPAIR_PLAT="$WHEEL_PLAT" bash scripts/repair-glibc-wheels-in-container.sh target/wheels
+          # Repair glibc wheel
+          if [ "$LIBC" = glibc ]; then
+            REPAIR_PLAT="$WHEEL_PLAT" bash scripts/repair-glibc-wheels-in-container.sh target/wheels
+          fi
 
-      - name: Check the wheel carries both native libraries and the licence
-        run: |
-          /opt/python/cp312-cp312/bin/python - target/wheels/*.whl <<'EOF'
+          # Check the wheel carries both native libraries and the licence
+          /opt/python/cp312-cp312/bin/python - target/wheels/*.whl <<EOF
           import sys, zipfile
           for whl in sys.argv[1:]:
               names = zipfile.ZipFile(whl).namelist()
               assert "mssql_py_core/mssql_py_core.abi3.so" in names, names
-              assert "mssql_py_core/libs/linux/${{ env.LIBC }}/riscv64/lib/mssqlodbc.so" in names, names
+              assert "mssql_py_core/libs/linux/$LIBC/riscv64/lib/mssqlodbc.so" in names, names
               assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
               print(whl, "ok")
           EOF
 
-      - name: Test wheel installs
-        run: |
+          # Test wheel installs
           ln -s "$GITHUB_WORKSPACE/scripts" /scripts
           bash scripts/test-python-wheel-installs-linux.sh --container "$GITHUB_WORKSPACE/target/wheels" "$WHEEL_PLAT" riscv64
 
-      # Upstream's dev/test-python.sh --skip-integration, run against the built
-      # wheel instead of `maturin develop`; the integration tests need a SQL
-      # Server, which has no riscv64 image.
-      - name: Run unit tests
-        env:
-          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
-          PIP_ONLY_BINARY: pyarrow
-        run: |
+          # Run unit tests: upstream's dev/test-python.sh --skip-integration, run
+          # against the built wheel instead of `maturin develop`; the integration
+          # tests need a SQL Server, which has no riscv64 image.
           bash scripts/generate_mock_tds_server_certs.sh
           (cd mssql-mock-tds-py && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 \
             /opt/python/cp312-cp312/bin/python -m maturin build --release --out "$GITHUB_WORKSPACE/mock-wheels")
           /opt/python/cp312-cp312/bin/python -m venv /venv
           # pyarrow has no musllinux riscv64 wheel; its tests importorskip it.
-          /venv/bin/pip install target/wheels/*.whl mock-wheels/*.whl pytest pytest-asyncio python-dotenv \
-            ${{ matrix.platform == 'manylinux' && 'pyarrow' || '' }}
+          extra_test_deps=""
+          if [ "$LIBC" = glibc ]; then
+            extra_test_deps=pyarrow
+          fi
+          /venv/bin/pip install target/wheels/*.whl mock-wheels/*.whl pytest pytest-asyncio python-dotenv $extra_test_deps
           cd mssql-py-core
           /venv/bin/python -m pytest tests/ -v -m "not integration and not longhaul and not smoke" --ignore=tests/mssql_python
+          SCRIPT
+          chmod +x build-in-container.sh
+
+      - name: Build, test and repair the wheel in ${{ env.BUILD_IMAGE }}
+        run: |
+          docker run --rm \
+            -v "$PWD:$PWD" -w "$PWD" \
+            -e GITHUB_WORKSPACE="$PWD" \
+            -e MSSQL_PYTHON_RS_VERSION="$MSSQL_PYTHON_RS_VERSION" \
+            -e LIBC="$LIBC" \
+            -e WHEEL_PLAT="$WHEEL_PLAT" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=pyarrow \
+            "$BUILD_IMAGE" \
+            bash ./build-in-container.sh
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
