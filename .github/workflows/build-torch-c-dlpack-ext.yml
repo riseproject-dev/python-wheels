@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own build steps for this addon:
+#   https://github.com/apache/tvm-ffi/blob/v0.1.15-post1/.github/workflows/torch_c_dlpack.yml
+#   https://github.com/apache/tvm-ffi/blob/v0.1.15-post1/addons/torch_c_dlpack_ext/build_aot_wheels.sh
+name: Build torch-c-dlpack-ext wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/torch-c-dlpack-ext.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torch-c-dlpack-ext.yml'
+      - 'docs/packages/torch-c-dlpack-ext.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torch-c-dlpack-ext.yml'
+      - 'docs/packages/torch-c-dlpack-ext.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Our registry only has the torch release the ladybug/torchaudio/vesin-torch
+  # ports already built; the addon bundles one .so per torch major.minor.
+  TORCH_VERSION: 2.13.0+cpu
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: torch-c-dlpack-ext
+      version: ${{ inputs.version }}
+      # apache-tvm-ffi, a build-time requirement, has riscv64 wheels only for
+      # cp312 and cp314t; cp314t is not in upstream's own build matrix for
+      # this addon, so cp312 is the only target both sides support.
+      python-exclude: 'cp39 cp310 cp311 cp313 cp314'
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build torch-c-dlpack-ext ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      TCDE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout tvm-ffi v0.1.15-post1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/tvm-ffi
+          ref: v0.1.15-post1
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: addons/torch_c_dlpack_ext
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # build_backend.py only compiles the addon when torch is already
+          # importable in the build env, and doesn't declare it as a build
+          # requirement (unlike apache-tvm-ffi, which it does declare) - so
+          # isolation must be off, same shape as our vesin-torch port.
+          CIBW_BUILD_FRONTEND: 'pip; args: --no-build-isolation'
+          CIBW_BEFORE_BUILD: >-
+            pip install setuptools wheel ninja apache-tvm-ffi torch==${{ env.TORCH_VERSION }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # setuptools has no ext_modules here (the .so ships as package-data),
+          # so the built wheel is tagged py3-none-any; re-tag it to the build
+          # interpreter before auditwheel, exactly as build_aot_wheels.sh does,
+          # excluding the torch libs it dynamically links at import time.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            pip install -q wheel &&
+            python -m wheel tags --python-tag ${{ matrix.python }} --abi-tag ${{ matrix.python }} --remove {wheel} &&
+            auditwheel repair -w {dest_dir} $(dirname {wheel})/*.whl
+            --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so
+            --exclude libtorch_global_deps.so --exclude libc10.so --exclude libgomp.so.1
+          CIBW_TEST_REQUIRES: torch==${{ env.TORCH_VERSION }}
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=:all:
+          CIBW_TEST_COMMAND: >-
+            python -c "import torch, torch_c_dlpack_ext;
+            assert hasattr(torch.Tensor, '__dlpack_c_exchange_api__') or hasattr(torch.Tensor, '__c_dlpack_exchange_api__')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torch-c-dlpack-ext-${{ env.TCDE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish torch-c-dlpack-ext ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: torch-c-dlpack-ext-${{ matrix.version }}-*-manylinux_riscv64
