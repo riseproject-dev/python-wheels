@@ -186,6 +186,20 @@ jobs:
           # existed and get_onedal_version() raised UnboundLocalError on
           # header_version. cibuildwheel always mounts the project at /project for
           # Linux container builds, so that's the one to hardcode.
+          # Testing installs the just-built wheel, whose Requires-Dist (scikit-learn>=1.0,
+          # unpinned) pip then has to resolve. Our registry only publishes scikit-learn
+          # riscv64 wheels for cp312-cp314 so far, so on cp310/cp311 pip picks scikit-learn's
+          # newest PyPI sdist instead, which pulls unpinned numpy/scipy sdists too: numpy's
+          # own highway RVV microkernels fail to compile on cp310 (same "zve64x" issue as the
+          # CIBW_BEFORE_BUILD comment above) and scipy's meson build fails outright with
+          # `Dependency "OpenBLAS" not found` on cp311, since this image carries no system
+          # BLAS (gotcha 291 - same mechanism as the moyopy/pymatgen case, one hop further
+          # down scikit-learn-intelex's own dependency tree instead of a CIBW_TEST_REQUIRES
+          # entry). PIP_ONLY_BINARY makes pip pick the newest *wheel* for these two names
+          # across both indexes - since public PyPI ships no riscv64 wheels at all, that's
+          # always our registry's, so scikit-learn's own from-source build (needed regardless,
+          # since our registry has none for cp310/cp311) links against prebuilt numpy/scipy
+          # instead of recompiling them.
           CIBW_ENVIRONMENT_LINUX: >-
             DALROOT=/project/latest
             NO_DIST=1
@@ -194,6 +208,7 @@ jobs:
             CXX=clang++
             SKLEARNEX_VERSION=${{ env.SKLEX_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
           CIBW_TEST_COMMAND: "python -c \"import daal4py, onedal, sklearnex; sklearnex.patch_sklearn()\""
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
