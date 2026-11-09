@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream builds every mostrobotpy meson subproject in one job (dist.yml's
+# build-meson, `python -m devtools ci build-meson-wheels`) on the native host per
+# Python version; this narrows that to robotpy-wpiutil alone via cibuildwheel, against
+# the already-published robotpy-native-wpiutil wheel (build-robotpy-native-wpiutil.yml).
+name: Build robotpy-wpiutil wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/robotpy-wpiutil.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robotpy-wpiutil.yml'
+      - 'docs/packages/robotpy-wpiutil.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robotpy-wpiutil.yml'
+      - 'docs/packages/robotpy-wpiutil.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: robotpy-wpiutil
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build robotpy-wpiutil ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      ROBOTPY_WPIUTIL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mostrobotpy ${{ env.ROBOTPY_WPIUTIL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: robotpy/mostrobotpy
+          ref: ${{ env.ROBOTPY_WPIUTIL_VERSION }}
+          persist-credentials: false
+
+      # subprojects/robotpy-wpiutil has no licence of its own, so upstream's wheel ships none.
+      - name: Add the mostrobotpy licence
+        run: cp LICENSE.md subprojects/robotpy-wpiutil/LICENSE.md
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: subprojects/robotpy-wpiutil
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=${{ env.PIP_EXTRA_INDEX_URL }}
+          CIBW_TEST_REQUIRES: pytest hatch-meson hatchling ninja semiwrap~=0.3.0
+          CIBW_TEST_COMMAND: >-
+            pip install --no-build-isolation {package}/tests/cpp &&
+            pytest {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: robotpy-wpiutil-${{ env.ROBOTPY_WPIUTIL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish robotpy-wpiutil ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: robotpy-wpiutil-${{ matrix.version }}-*-manylinux_riscv64
