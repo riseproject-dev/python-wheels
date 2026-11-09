@@ -79,10 +79,13 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Our registry's cp310 numpy riscv64 wheels stop at 2.2.2, below the
+          # pyproject.toml build requirement numpy>=2.2.6; let pip build numpy from
+          # sdist for cp310 only, keeping the faster prebuilt wheel everywhere else.
           CIBW_ENVIRONMENT: >-
             BUILD_WNTR_EXTENSIONS='true'
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas,matplotlib,contourpy,kiwisolver,pillow,shapely,pyproj,pyogrio,rasterio,rtree,pyzmq,rpds-py
+            PIP_ONLY_BINARY=${{ matrix.python == 'cp310' && 'scipy,pandas,matplotlib,contourpy,kiwisolver,pillow,shapely,pyproj,pyogrio,rasterio,rtree,pyzmq,rpds-py' || 'numpy,scipy,pandas,matplotlib,contourpy,kiwisolver,pillow,shapely,pyproj,pyogrio,rasterio,rtree,pyzmq,rpds-py' }}
           # Upstream commits x86_64-only EPANET binaries under libepanet/linux-x64; this
           # compiles the same sources they were built from into libepanet/linux-riscv64.
           CIBW_BEFORE_ALL: |
@@ -119,7 +122,10 @@ jobs:
             cmake --install msx-build --prefix /tmp/epanet/msx-install
             cp msx-install/lib/libepanet2.so msx-install/lib/libepanetmsx.so $dest/
             cp EPANETMSX-85a303dca05859389eced63fabd5ea145c096333/license.txt {project}/LICENSE.EPANETMSX
-          CIBW_TEST_EXTRAS: optional,test
+          # rasterio/shapely/pyproj have no riscv64 wheel on our registry below cp312,
+          # and the 'optional' tests guard their imports; test only 'test' on cp310/cp311.
+          CIBW_TEST_EXTRAS: >-
+            ${{ (matrix.python == 'cp310' || matrix.python == 'cp311') && 'test' || 'optional,test' }}
           CIBW_TEST_SOURCES: pyproject.toml wntr/tests examples
           CIBW_TEST_COMMAND: pytest wntr/tests/ --ignore=wntr/tests/test_demos.py --ignore=wntr/tests/test_examples.py
 
