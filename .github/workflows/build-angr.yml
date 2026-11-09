@@ -69,25 +69,33 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
-      # no_std_time (reached through libafl and libafl_bolts, both pinned
-      # =0.16.1 by native/angr/Cargo.toml) imports core::arch::asm only on
-      # aarch64/arm, yet its riscv64 read_time_counter calls
-      # asm!("rdcycle ..."), so it fails with "cannot find macro `asm` in this
-      # scope". 0.16.1 is its latest release and LibAFL main is still unfixed,
-      # so a fixed copy of the crates.io tarball (flattened manifest, no
-      # [workspace]) is vendored into the checkout and wired in via
-      # [patch.crates-io] (CLAUDE.md gotcha 300).
-      - name: Vendor riscv64-fixed no_std_time
+      # Two LibAFL crates reached through libafl and libafl_bolts (both pinned
+      # =0.16.1 by native/angr/Cargo.toml) do not build on linux/riscv64:
+      # no_std_time imports core::arch::asm only on aarch64/arm, yet its
+      # riscv64 read_time_counter calls asm!("rdcycle ..."); minibsod defines
+      # dump_registers/write_crash on Linux only for x86, x86_64, aarch64 and
+      # arm, and its generic fallback excludes all of Linux. 0.16.1 is the
+      # latest release of both and LibAFL main is still unfixed, so fixed
+      # copies of the crates.io tarballs (flattened manifests, no [workspace])
+      # are vendored into the checkout and wired in via [patch.crates-io]
+      # (CLAUDE.md gotcha 300).
+      - name: Vendor riscv64-fixed LibAFL crates
         run: |
-          NO_STD_TIME_VERSION=$(awk '$0 == "name = \"no_std_time\""{getline; print; exit}' Cargo.lock | sed -E 's/^version = "(.*)"$/\1/')
+          vendor_crate() {
+            local version
+            version=$(awk -v name="name = \"$1\"" '$0 == name{getline; print; exit}' Cargo.lock | sed -E 's/^version = "(.*)"$/\1/')
 
-          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o no_std_time.tar.gz "https://crates.io/api/v1/crates/no_std_time/${NO_STD_TIME_VERSION}/download"
-          mkdir "no_std_time-${NO_STD_TIME_VERSION}-riscv64"
-          tar xzf no_std_time.tar.gz -C "no_std_time-${NO_STD_TIME_VERSION}-riscv64" --strip-components=1
-          rm no_std_time.tar.gz
-          patch -p1 -d "no_std_time-${NO_STD_TIME_VERSION}-riscv64" < python-wheels/patches/angr/${{ env.ANGR_VERSION }}/0001-no_std_time-import-asm-on-riscv.patch
+            curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o "$1.tar.gz" "https://crates.io/api/v1/crates/$1/${version}/download"
+            mkdir "$1-${version}-riscv64"
+            tar xzf "$1.tar.gz" -C "$1-${version}-riscv64" --strip-components=1
+            rm "$1.tar.gz"
+            patch -p1 -d "$1-${version}-riscv64" < "python-wheels/patches/angr/${{ env.ANGR_VERSION }}/$2"
+          }
 
-          git apply python-wheels/patches/angr/${{ env.ANGR_VERSION }}/0002-cargo-patch-no_std_time-for-riscv64.patch
+          vendor_crate no_std_time 0001-no_std_time-import-asm-on-riscv.patch
+          vendor_crate minibsod 0002-minibsod-dump-registers-on-riscv64.patch
+
+          git apply python-wheels/patches/angr/${{ env.ANGR_VERSION }}/0003-cargo-patch-libafl-crates-for-riscv64.patch
 
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
