@@ -154,7 +154,13 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 300
+    # 24h: see the "Test wheel" step below (CLAUDE.md gotcha 598) — the 61-case
+    # MILP-solve test suite is genuinely slow on this fleet's riscv64 hardware,
+    # not hung. A single build+test job otherwise gives the test step whatever
+    # is left of this timeout, so a merely-slow (not stuck) suite can still burn
+    # the whole budget and end in "cancelled" with the already-built wheel never
+    # uploaded (run 42301146079: cancelled at 5h00m with 28/61 cases done).
+    timeout-minutes: 1440
     env:
       CBCBOX_VERSION: ${{ matrix.version }}
 
@@ -190,7 +196,7 @@ jobs:
           path: .
       - run: tar -xzf cbc_dist_debug.tar.gz
 
-      - name: Build and test wheel (compilation skipped — binaries pre-built)
+      - name: Build wheel (compilation skipped — binaries pre-built)
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           package-dir: .
@@ -204,16 +210,34 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >
             dnf install -y gcc-gfortran &&
             pip install patchelf
-          CIBW_ENVIRONMENT_LINUX: "PERF_REPORT_DIR=/output"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
-          CIBW_TEST_REQUIRES: "pytest"
-          CIBW_TEST_COMMAND: "mkdir -p /output && pytest {package}/tests/ -v"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: cbcbox-${{ env.CBCBOX_VERSION }}-py3-none-manylinux_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
+
+      # Split from the build step above and given its own bounded timeout
+      # (CLAUDE.md gotcha 598), so the wheel is uploaded before this runs and a
+      # slow (or genuinely stuck) test run can't silently consume the rest of
+      # the job's 24h budget. Reproduces cibuildwheel's own test phase (pytest
+      # against the installed wheel, PERF_REPORT_DIR for the solver's perf
+      # reports) without its wrapping, since testing no longer happens inside
+      # the build action.
+      - name: Test wheel (manylinux_2_39_riscv64)
+        timeout-minutes: 1380  # 23h
+        run: |
+          docker run --rm \
+            -v "$PWD:/project" \
+            -v "$PWD/wheelhouse:/wheelhouse" \
+            -e PERF_REPORT_DIR=/output \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash -c 'export PATH=/opt/python/cp313-cp313/bin:$PATH &&
+                     mkdir -p /output &&
+                     pip install /wheelhouse/*.whl pytest &&
+                     cd /project &&
+                     pytest tests/ -v'
 
   gpl_sources:
     needs: [setup]
