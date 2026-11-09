@@ -1,0 +1,88 @@
+Upstream-Status: To upstream [xsimd::make_sized_batch only searches xsimd's native per-ISA architectures, never the "emulated" XSIMD_DEFAULT_ARCH fallback finufft's own xsimd.hpp wires in for architectures with no native xsimd backend at all (e.g. riscv64 built without the vector extension, our baseline here); not yet submitted upstream]
+
+On riscv64 without -march=...v (our baseline, since the vector extension isn't
+guaranteed hardware and this repo's wheels must run on any riscv64), xsimd
+detects no native architecture and finufft/xsimd.hpp falls back to
+XSIMD_DEFAULT_ARCH=emulated<128>. That fallback is only wired into
+xsimd::default_arch - xsimd::make_sized_batch (used by min_simd_width,
+GetPaddedSIMDWidth and PaddedSIMD to search for a SIMD batch of a given
+width) only searches xsimd::supported_architectures, which is built purely
+from native per-ISA detection and never includes "emulated". So every width
+probed comes back void, min_simd_width's doubling search overflows uint8_t
+(128 -> 256) with no match ever found, and every constexpr call sites
+depending on it (get_padding, PaddedSIMD, ...) fail to compile - this is what
+fails "Build finufft 2.5.1 py3-none-manylinux_riscv64" in CI with errors like:
+
+  error: 'constexpr auto finufft::spreadinterp::{anonymous}::get_padding()
+  [with T = double; unsigned char ns = 28]' called in a constant expression
+  error: no matching function for call to 'min_simd_width<double, (128 * 2)>()'
+  error: narrowing conversion of '256' from 'int' to 'unsigned char'
+
+Bound the search by xsimd::default_arch's own batch size and fall back to
+xsimd::batch<T, default_arch> directly once no native match exists, instead
+of growing the probed width past it. This leaves native-architecture
+platforms (x86_64, aarch64, ...) byte-for-byte unaffected, since there
+default_arch resolves to the same architecture as before and the native
+search always finds a match before reaching this bound - verified by
+comparing finufft::utils::GetPaddedSIMDWidth<T, N>() for every N in [4, 16]
+and both T=float/double, compiled natively with -mavx2, before and after this
+patch (identical). Verified the patched src/spreadinterp.cpp now
+cross-compiles cleanly for riscv64 (-march=rv64gc, no vector extension,
+riscv64-linux-gnu-g++ 13) with zero errors, where it previously failed with
+the exact error chain seen in CI; also verified under qemu-riscv64 that the
+resulting padded SIMD widths are sane (2 for double, 4 for float - the fixed
+128-bit emulated batch, as intended).
+
+diff --git a/include/finufft/finufft_utils.hpp b/include/finufft/finufft_utils.hpp
+index 0000000..0000000 100644
+--- a/include/finufft/finufft_utils.hpp
++++ b/include/finufft/finufft_utils.hpp
+@@ -18,7 +18,14 @@ namespace finufft::utils {
+ template<class T, uint8_t N = 1> constexpr uint8_t min_simd_width() {
+   // finds the smallest simd width that can handle N elements
+   // simd size is batch size the SIMD width in xsimd terminology
+-  if constexpr (std::is_void_v<xsimd::make_sized_batch_t<T, N>>) {
++  // on platforms with no native xsimd architecture (e.g. riscv64 without the
++  // vector extension), xsimd::make_sized_batch never matches any width since
++  // it only searches native architectures, not xsimd::default_arch's
++  // "emulated" fallback - bound the doubling by that fallback's own width
++  // instead of overflowing uint8_t looking for a width that will never match
++  if constexpr (N >= xsimd::batch<T, xsimd::default_arch>::size) {
++    return xsimd::batch<T, xsimd::default_arch>::size;
++  } else if constexpr (std::is_void_v<xsimd::make_sized_batch_t<T, N>>) {
+     return min_simd_width<T, N * 2>();
+   } else {
+     return N;
+@@ -47,7 +54,15 @@ template<class T, uint8_t N> constexpr std::size_t GetPaddedSIMDWidth() {
+   // helper function to get the SIMD width with padding for the given number of elements
+   // that minimizes the number of iterations
+
+-  return xsimd::make_sized_batch<T, find_optimal_simd_width<T, N>()>::type::size;
++  constexpr std::size_t width = find_optimal_simd_width<T, N>();
++  // same fallback as min_simd_width: no native xsimd architecture matches
++  // "width" exactly (e.g. riscv64 without the vector extension), so use the
++  // fixed-width "emulated" default_arch batch directly instead
++  if constexpr (std::is_void_v<xsimd::make_sized_batch_t<T, width>>) {
++    return xsimd::batch<T, xsimd::default_arch>::size;
++  } else {
++    return xsimd::make_sized_batch<T, width>::type::size;
++  }
+ }
+ template<class T, uint8_t ns>
+ constexpr std::size_t get_simd_width_helper(uint8_t runtime_ns) {
+diff --git a/src/spreadinterp.cpp b/src/spreadinterp.cpp
+index 0000000..0000000 100644
+--- a/src/spreadinterp.cpp
++++ b/src/spreadinterp.cpp
+@@ -70,7 +70,10 @@ template<class T, uint8_t N, uint8_t K = N> constexpr auto BestSIMDHelper() {
+ }
+
+ template<class T, uint8_t N>
+-using PaddedSIMD = typename xsimd::make_sized_batch<T, GetPaddedSIMDWidth<T, N>()>::type;
++using PaddedSIMD = std::conditional_t<
++    std::is_void_v<xsimd::make_sized_batch_t<T, GetPaddedSIMDWidth<T, N>()>>,
++    xsimd::batch<T, xsimd::default_arch>,
++    typename xsimd::make_sized_batch<T, GetPaddedSIMDWidth<T, N>()>::type>;
+
+ template<class T, uint8_t ns> constexpr auto get_padding() {
+   constexpr uint8_t width = GetPaddedSIMDWidth<T, ns>();
