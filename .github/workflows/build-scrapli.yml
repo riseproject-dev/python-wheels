@@ -117,12 +117,21 @@ jobs:
           # "Install the built wheel" step.
           pip install -q --upgrade pip
           pip install -q ziglang==0.17.0
-          python3 -m ziglang build ffi \
-            -Doptimize=ReleaseSafe \
-            -freference-trace=4 \
-            -Ddependency-linkage=static \
-            -Dtarget=riscv64-linux-gnu \
-            --summary all
+          # `zig build` fetches build.zig.zon's zig-yaml/zig-xml deps straight
+          # from codeberg.org/github.com with no retry of its own, and each
+          # matrix leg hits this independently -- intermittent
+          # TlsInitializationFailed/HttpConnectionClosing there otherwise fails
+          # the job (same shape as build-polyscope.yml's submodule fetch).
+          for attempt in 1 2 3 4 5; do
+            python3 -m ziglang build ffi \
+              -Doptimize=ReleaseSafe \
+              -freference-trace=4 \
+              -Ddependency-linkage=static \
+              -Dtarget=riscv64-linux-gnu \
+              --summary all && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep $((attempt * 30))
+          done
           ls -l zig-out/riscv64-linux-gnu/libscrapli.*
 
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
