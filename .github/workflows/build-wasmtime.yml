@@ -149,11 +149,21 @@ jobs:
       # test run needs the pytest-mypy plugin (plus mypy itself) or pytest rejects
       # --mypy outright before collecting any tests ("unrecognized arguments: --mypy").
       # mypy is a pure static-analysis tool with no compiled/arch-specific component,
-      # so it runs the same on riscv64 as anywhere else.
-      - run: pip install pycparser pytest mypy pytest-mypy
+      # so it runs the same on riscv64 as anywhere else. Pin it to upstream's own
+      # uv.lock version: unpinned, it resolves to mypy 2.x, which flags
+      # test_module.py's bytearray smoke-test call as a type error 1.18.2 does not.
+      - run: pip install pycparser pytest "mypy==1.18.2" pytest-mypy
 
+      # test_wasi.py::test_config calls config.preopen_dir('wasmtime', ...), which
+      # needs a real `wasmtime` directory relative to the process cwd; upstream has
+      # the package source there, but this job's sparse checkout leaves it out so it
+      # can't shadow the installed wheel. Give the test a throwaway one in a cwd
+      # that isn't on pytest's import path instead of putting it back.
       - name: Run upstream's tests
-        run: python -m pytest tests -v
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-run/wasmtime"
+          cd "$RUNNER_TEMP/test-run"
+          python -m pytest "$GITHUB_WORKSPACE/tests" -v
 
   publish:
     name: Publish wasmtime ${{ matrix.version }}
