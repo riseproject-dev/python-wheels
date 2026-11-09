@@ -77,6 +77,7 @@ jobs:
           pkgs/sagemath-bliss
           src/sage/graphs/bliss.p*
           src/sage/graphs/bliss_cpp
+          src/sage/graphs/all__sagemath_bliss.py
           src/sage/all__sagemath_bliss.py
         sparse-checkout-cone-mode: false
         persist-credentials: false
@@ -92,6 +93,17 @@ jobs:
 
     - name: Render pyproject.toml
       run: ./bootstrap
+
+    # ./bootstrap's own per-package render (sage-package bootstrap) runs all
+    # ~650 spkgs in parallel batches and aborts a batch outright if any
+    # member fails (sage_conf's needs the full configure.ac, absent from
+    # this sparse checkout); render this one package ourselves so it is
+    # not at the mercy of that batch's luck.
+    - name: Render pkgs/sagemath-bliss/pyproject.toml.m4
+      working-directory: pkgs/sagemath-bliss
+      run: |
+        export M4PATH="$GITHUB_WORKSPACE/m4"
+        for f in *.m4; do m4 "$f" > "${f%.m4}"; done
 
     - name: setup uv
       uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
@@ -178,16 +190,21 @@ jobs:
         # Replays build/pkgs/bliss/spkg-install.in. No riscv64 bliss-devel
         # exists (EPEL ships no riscv64 repo at all), so this always builds
         # from source, same as upstream's own spkg-configure.m4 fallback.
-        CIBW_BEFORE_ALL_LINUX: >-
-          dnf install -y --setopt=install_weak_deps=False cmake ninja-build unzip &&
-          curl -fsSLo /tmp/bliss.zip https://github.com/scipopt/bliss/archive/${{ env.BLISS_COMMIT }}.zip &&
-          echo "${{ env.BLISS_SHA256 }}  /tmp/bliss.zip" | sha256sum -c - &&
-          unzip -q /tmp/bliss.zip -d /tmp &&
-          cd /tmp/bliss-${{ env.BLISS_COMMIT }} &&
-          cmake -GNinja -DUSE_GMP=OFF -DCMAKE_INSTALL_PREFIX=/usr/local . &&
-          cmake --build . &&
-          cmake --install . &&
-          ldconfig
+        CIBW_BEFORE_ALL_LINUX: |
+          set -euo pipefail
+          if command -v apk >/dev/null; then
+            apk add --no-cache cmake ninja unzip curl
+          else
+            dnf install -y --setopt=install_weak_deps=False cmake ninja-build unzip
+          fi
+          curl -fsSLo /tmp/bliss.zip https://github.com/scipopt/bliss/archive/${{ env.BLISS_COMMIT }}.zip
+          echo "${{ env.BLISS_SHA256 }}  /tmp/bliss.zip" | sha256sum -c -
+          unzip -q /tmp/bliss.zip -d /tmp
+          cd /tmp/bliss-${{ env.BLISS_COMMIT }}
+          cmake -GNinja -DUSE_GMP=OFF -DCMAKE_INSTALL_PREFIX=/usr/local .
+          cmake --build .
+          cmake --install .
+          ldconfig || true
         CIBW_ENVIRONMENT_LINUX: >-
           PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH
