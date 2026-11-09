@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/taishi-i/nagisa/blob/0.3.1/.github/workflows/build_wheels.yml
+name: Build nagisa wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nagisa.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nagisa.yml'
+      - 'docs/packages/nagisa.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nagisa.yml'
+      - 'docs/packages/nagisa.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nagisa
+      version: ${{ inputs.version }}
+
+  # DyNet38, an install-time (not build-time) dependency for python < 3.15,
+  # has riscv64 wheels only for cp312/cp313/cp314 - no cp310, cp311, cp314t,
+  # cp315(t), and no musllinux - so those targets stay off this matrix
+  # instead of the dynamic one (platform can't be excluded by python-exclude).
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build nagisa ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      NAGISA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout nagisa ${{ env.NAGISA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: taishi-i/nagisa
+          ref: ${{ env.NAGISA_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64'
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_USE_PEP517=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_PREFER_BINARY=1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nagisa-${{ env.NAGISA_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish nagisa ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: nagisa-${{ matrix.version }}-manylinux_riscv64
