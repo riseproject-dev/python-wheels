@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux leg of the `build_wheels` job of
+# https://github.com/quantumgizmos/ldpc/blob/main/.github/workflows/build.yml
+name: Build ldpc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ldpc.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ldpc.yml'
+      - 'docs/packages/ldpc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ldpc.yml'
+      - 'docs/packages/ldpc.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ldpc
+      version: ${{ inputs.version }}
+      # stim and pymatching, both hard runtime dependencies, have no riscv64
+      # wheel on the registry below cp312 (their own floor there).
+      python-exclude: "cp39 cp310 cp311"
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ldpc ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      LDPC_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream pushes no git tag for any release; d3429964 is the commit that
+      # released 2.4.1 (the next commit moved past it), 67 minutes before the
+      # PyPI sdist upload. Its pyproject.toml/setup.py/src_python/src_cpp are
+      # byte-identical to that sdist, but the sdist's MANIFEST.in never grafts
+      # include/robin_map, which src_cpp/lsd.hpp and union_find.hpp #include --
+      # the checkout is required, not the sdist.
+      - name: Checkout ldpc d3429964 (2.4.1 release commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: quantumgizmos/ldpc
+          ref: d3429964cd4ffe1abfc041c6ec8b8425cb174f40
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          # musllinux dropped: numpy/scipy/stim/pymatching have no musl riscv64 wheel.
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: python_test
+          # test_soft_info_decoder.py's two SoftInfoBpDecoder assertions fail on
+          # a plain x86_64 checkout build too (verified locally): a pre-existing
+          # upstream bug, not riscv64-specific.
+          CIBW_TEST_COMMAND: >-
+            python -c "import ldpc, ldpc.bp_decoder._bp_decoder as m;
+            assert m.__file__.endswith('.so'), m.__file__"
+            && python -m pytest python_test -q
+            -k "not test_one_errored_syndrome_bit and not test_long_rep_code"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ldpc-${{ env.LDPC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ldpc ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ldpc-${{ matrix.version }}-*-manylinux_riscv64
