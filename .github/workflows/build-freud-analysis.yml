@@ -68,6 +68,19 @@ jobs:
           ref: v${{ env.FREUD_ANALYSIS_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # pyproject.toml's license-files is an explicit ["LICENSE"] list, so
+      # scikit-build-core's default licence glob never runs; widen it to also match
+      # LICENSE.* instead of setting SKBUILD_WHEEL_LICENSE_FILES, since scikit-build-core
+      # refuses to have both project.license-files and the env var set at once.
+      - name: Patch freud-analysis source
+        run: git apply python-wheels/patches/freud-analysis/${{ env.FREUD_ANALYSIS_VERSION }}/00*.patch
+
       # doc/source/gettingstarted/examples is a doc-only submodule, unneeded for the build.
       - name: Fetch the Eigen/voro++/fsph submodules
         run: git submodule update --init --depth=1 -- extern/Eigen extern/voro++ extern/fsph
@@ -77,8 +90,8 @@ jobs:
       # submodules, extern/bessel-library.hpp (MIT, vendored straight into the repo, licence
       # only in its header comment) and oneTBB (Apache-2.0, see below); nanobind (BSD-3-Clause,
       # a pip build dependency, not vendored) also vendors tsl::robin_map (MIT). Upstream's
-      # own wheel ships only its own LICENSE (pyproject.toml's license-files is the literal
-      # list ["LICENSE"]).
+      # own wheel ships only its own LICENSE; the patch above widens pyproject.toml's
+      # license-files so these all get picked up too.
       - name: Stage the vendored dependencies' licences
         run: |
           set -euo pipefail
@@ -107,7 +120,6 @@ jobs:
             CMAKE_ARGS=-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=True
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,scipy,matplotlib
-            SKBUILD_WHEEL_LICENSE_FILES=LICENSE*
           # Upstream's own repair-wheel-command pipes auditwheel repair into a
           # pipx-installed abi3audit; the riscv64 image carries no pipx (CLAUDE.md gotcha
           # 217), and it is redundant besides, since cibuildwheel's own default
