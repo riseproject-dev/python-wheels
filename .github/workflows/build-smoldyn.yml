@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/ssandrews/Smoldyn/blob/v2.76/.github/workflows/wheels_linux.yml
+# (scripts/Dockerfile + scripts/build_wheels_linux.sh) and the tests of
+# https://github.com/ssandrews/Smoldyn/blob/v2.76/.github/workflows/linux.yml
+name: Build smoldyn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/smoldyn.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-smoldyn.yml'
+      - 'docs/packages/smoldyn.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-smoldyn.yml'
+      - 'docs/packages/smoldyn.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: smoldyn
+      version: ${{ inputs.version }}
+      # Upstream's linux.yml tests 3.10-3.14 only.
+      python-exclude: "cp39 cp315"
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build smoldyn ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      SMOLDYN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout smoldyn v${{ env.SMOLDYN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ssandrews/Smoldyn
+          ref: v${{ env.SMOLDYN_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test the wheel
+        env:
+          PY_TAG: ${{ matrix.python }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e SMOLDYN_VERSION \
+            -e PY_TAG \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False \
+            freeglut-devel libtiff-devel libXmu-devel libffi-devel libXi-devel \
+            xorg-x11-server-Xvfb
+
+          PYDIR="/opt/python/${PY_TAG%t}-${PY_TAG}"
+          PYTHON="${PYDIR}/bin/python"
+          "$PYTHON" -m pip install pytest setuptools wheel
+
+          mkdir -p _build_wheel_linux wheelhouse
+          (
+            cd _build_wheel_linux
+            PYLIB=$(ls -d "$PYDIR"/lib/python3.*)
+            PYINDIR=$(ls -d "$PYDIR"/include/python3.*)
+            cmake .. \
+              -DOPTION_PYTHON=ON \
+              -DOPTION_EXAMPLES=ON \
+              -DCMAKE_INSTALL_PREFIX=/usr \
+              -DSMOLDYN_VERSION="$SMOLDYN_VERSION" \
+              -DPython3_EXECUTABLE="$PYTHON" \
+              -DPython3_INCLUDE_DIR="$PYINDIR" \
+              -DPython3_LIBRARY="$PYLIB"
+            make -j"$(nproc)"
+            make wheel
+            PYTHONPATH="$(pwd)/py" "$PYTHON" -m smoldyn ../examples/S4_molecules/mollist.txt
+
+            # The setuptools project labels the wheel py3-none-any, but _smoldyn is a per-interpreter extension.
+            "$PYTHON" -m wheel tags --remove \
+              --python-tag "${PY_TAG%t}" --abi-tag "$PY_TAG" --platform-tag linux_riscv64 \
+              smoldyn-*.whl
+            auditwheel show smoldyn-*.whl
+            auditwheel repair smoldyn-*.whl -w /work/wheelhouse
+          )
+
+          "$PYTHON" -m pip install wheelhouse/smoldyn-*.whl numpy
+          cd /tmp
+          "$PYTHON" -c 'import smoldyn; print(dir(smoldyn))'
+          "$PYTHON" -c 'import smoldyn; print(smoldyn.__version__)'
+
+          Xvfb :99 -ac -screen 0 1280x1024x16 >/dev/null 2>&1 &
+          export DISPLAY=:99 SMOLDYN_NO_PROMPT=1
+          cd /work/tests
+          for t in test_*.py; do
+            [ "$t" = test_biosimulators.py ] && continue
+            echo "::group::$t"
+            "$PYTHON" "$t"
+            echo "::endgroup::"
+          done
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: smoldyn-${{ env.SMOLDYN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for smoldyn ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      SMOLDYN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # gcc runtime plus libtiff's jbigkit, vendored out of the build image.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc jbigkit-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: smoldyn-${{ env.SMOLDYN_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish smoldyn ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: smoldyn-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: smoldyn-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
