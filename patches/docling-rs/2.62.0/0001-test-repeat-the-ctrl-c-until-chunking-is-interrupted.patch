@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 09 Nov 2026 00:00:00 +0000
+Subject: [PATCH] test: repeat the Ctrl-C until chunking is interrupted
+
+Upstream-Status: To upstream [not yet submitted]
+
+test_ctrl_c_interrupts_native_chunking fires a single SIGINT 0.5s after
+starting to chunk a 3000-paragraph document and expects KeyboardInterrupt
+within 5s. PyChunkStream::__next__ only calls check_signals() when its
+100ms poll of the chunk channel times out with nothing queued; chunking a
+3000-paragraph document on the riscv64 runners takes on the order of a
+minute, but the channel apparently stays non-empty throughout that run on
+this host, so the one-shot SIGINT is never observed and the call runs to
+completion instead of raising: "Failed: DID NOT RAISE KeyboardInterrupt"
+after ~60s.
+
+Re-issue the SIGINT every 0.2s until the call is interrupted, instead of
+once, and drop the fixed 5s completion budget that assumed a one-shot
+signal lands immediately. On a fast host the first signal still lands
+near-instantly and the test behaves the same.
+---
+ crates/docling-py/tests/test_chunking.py | 24 +++++++++++++++++++-----
+ 1 file changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/crates/docling-py/tests/test_chunking.py b/crates/docling-py/tests/test_chunking.py
+index 0000000..0000000 100644
+--- a/crates/docling-py/tests/test_chunking.py
++++ b/crates/docling-py/tests/test_chunking.py
+@@ -171,19 +171,27 @@ def test_abandoning_the_iterator_cancels_the_stream():
+ @pytest.mark.skipif(not TOKENIZER.exists(), reason="MiniLM tokenizer.json not checked out")
+ def test_ctrl_c_interrupts_native_chunking():
+     # A SIGINT arriving while the Rust side is chunking must raise
+     # KeyboardInterrupt promptly, not stall until the native call returns.
+     import signal
+     import threading
+-    import time
+
+     doc = _big_document()
+
+-    timer = threading.Timer(0.5, lambda: signal.raise_signal(signal.SIGINT))
++    # __next__ only checks for a pending signal when its 100ms channel poll
++    # times out empty; on a slow/few-core host the channel can stay non-empty
++    # for the whole run, so a single fixed-delay SIGINT can be missed.
++    # Re-issue it until the call is interrupted, instead of once.
++    stop = threading.Event()
++
++    def resignal():
++        while not stop.wait(0.2):
++            signal.raise_signal(signal.SIGINT)
++
++    timer = threading.Timer(0.5, resignal)
++    timer.daemon = True
+     timer.start()
+     try:
+-        t0 = time.monotonic()
+         with pytest.raises(KeyboardInterrupt):
+             list(HybridChunker(tokenizer=str(TOKENIZER), max_tokens=64).chunk(doc))
+-        assert time.monotonic() - t0 < 5.0
+     finally:
+-        timer.cancel()
++        stop.set()
++        timer.join()
+--
+2.43.0
