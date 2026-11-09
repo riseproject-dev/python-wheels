@@ -207,10 +207,56 @@ jobs:
           )
           BUILD_FILE
 
+          # manylinux_2_39_riscv64's glibc (2.39) predates <sys/hwprobe.h>
+          # (glibc 2.40+), which XNNPACK's vendored cpuinfo needs unconditionally
+          # to build src/riscv/linux/riscv-hw.c on riscv64. Shim the header and
+          # the __riscv_hwprobe(2) wrapper over the raw syscall (number 258, per
+          # Linux's scripts/syscall.tbl) so cpuinfo gets real vendor/uarch data
+          # from the kernel instead of failing to compile.
+          mkdir -p /tmp/override/hwprobe/include/sys
+          cat > /tmp/override/hwprobe/include/sys/hwprobe.h <<'HWPROBE_H'
+          #ifndef _SYS_HWPROBE_H
+          #define _SYS_HWPROBE_H 1
+          #include <stddef.h>
+
+          struct riscv_hwprobe {
+              long long key;
+              unsigned long long value;
+          };
+
+          #define RISCV_HWPROBE_KEY_MVENDORID 0
+          #define RISCV_HWPROBE_KEY_MARCHID 1
+          #define RISCV_HWPROBE_KEY_MIMPID 2
+
+          extern int __riscv_hwprobe(struct riscv_hwprobe *pairs, size_t pair_count,
+                                      size_t cpusetsize, unsigned long *cpus,
+                                      unsigned int flags);
+          #endif
+          HWPROBE_H
+          cat > /tmp/override/hwprobe/hwprobe_shim.c <<'HWPROBE_C'
+          #include <sys/syscall.h>
+          #include <unistd.h>
+          #include <sys/hwprobe.h>
+
+          #ifndef __NR_riscv_hwprobe
+          #define __NR_riscv_hwprobe 258
+          #endif
+
+          int __riscv_hwprobe(struct riscv_hwprobe *pairs, size_t pair_count,
+                               size_t cpusetsize, unsigned long *cpus,
+                               unsigned int flags) {
+              return (int)syscall(__NR_riscv_hwprobe, pairs, pair_count, cpusetsize, cpus, flags);
+          }
+          HWPROBE_C
+          gcc -c -O2 -I/tmp/override/hwprobe/include \
+            -o /tmp/override/hwprobe/hwprobe_shim.o /tmp/override/hwprobe/hwprobe_shim.c
+
           bazel build -c opt --nosubcommands --noenable_bzlmod \
             --java_runtime_version=local_jdk --tool_java_runtime_version=local_jdk \
             --override_repository=python=/tmp/override/python \
             --override_repository=pypi_numpy=/tmp/override/pypi_numpy \
+            --copt=-I/tmp/override/hwprobe/include \
+            --linkopt=/tmp/override/hwprobe/hwprobe_shim.o \
             --curses=no --show_progress_rate_limit=60 \
             //tensorflow/lite/c:libtensorflowlite_c.so
 
