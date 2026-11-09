@@ -17,8 +17,10 @@ Markdown pages under docs/project/<name>/, so this script only needs to
 maintain the YAML source of truth; it never touches a generated page directly.
 """
 
+import argparse
 import difflib
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -38,6 +40,7 @@ RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 GH_TOKEN = os.environ.get("GH_TOKEN", "")
+BUILD_MATRIX = json.loads(os.environ.get("BUILD_MATRIX", "[]"))
 
 
 def find_wheel_files(path):
@@ -197,8 +200,10 @@ def version_blocks(lines):
         yield start, len(lines)
 
 
-def merge_publication_files(declared_files, published_files):
-    """Fill declared target slots from a complete freshly built wheel set."""
+def merge_publication_files(declared_files, published_files, effective_targets):
+    """Fill target slots and require completeness for this run's effective matrix."""
+    if not effective_targets:
+        raise SystemExit("effective target list is empty or was not provided")
     published_by_target = {
         item["python"]: item
         for item in published_files
@@ -218,7 +223,18 @@ def merge_publication_files(declared_files, published_files):
         raise SystemExit(
             "built wheels have undeclared python targets: " + ", ".join(sorted(unknown))
         )
-    missing = [item["python"] for item in merged if "filename" not in item]
+    declared_targets = {item["python"] for item in declared_files}
+    unknown_effective = effective_targets - declared_targets
+    if unknown_effective:
+        raise SystemExit(
+            "effective matrix has undeclared python targets: "
+            + ", ".join(sorted(unknown_effective))
+        )
+    missing = [
+        item["python"]
+        for item in merged
+        if item["python"] in effective_targets and "filename" not in item
+    ]
     if missing:
         raise SystemExit(
             "release is incomplete; no wheel was built for: " + ", ".join(missing)
@@ -256,7 +272,14 @@ def append_version(
     declared_files = existing_version.get("files") or []
     if not declared_files:
         raise SystemExit(f"version {version} has no declared target files")
-    publication["files"] = merge_publication_files(declared_files, publication["files"])
+    effective_targets = {
+        item["target"]
+        for item in BUILD_MATRIX
+        if str(item.get("version")) == str(version) and item.get("target")
+    }
+    publication["files"] = merge_publication_files(
+        declared_files, publication["files"], effective_targets
+    )
 
     publication_keys = ("tag", "files", "gpl-sources")
     if any(key in existing_version for key in publication_keys):
@@ -428,7 +451,7 @@ def extract_pr_url(stdout):
     return None
 
 
-def main():
+def main(validate_only=False):
     wheel_files = find_wheel_files(ARTIFACTS_PATH)
     if not wheel_files:
         print(f"No .whl file found in {ARTIFACTS_PATH}")
@@ -479,6 +502,14 @@ def main():
             comment,
         )
         return old_content, new_content
+
+    if validate_only:
+        old_content, new_content = compute_content()
+        if new_content is None:
+            print(f"{slug} {version} is already documented; nothing to validate")
+        else:
+            print(f"Validated complete wheel set for {slug} {version}")
+        return
 
     if DRY_RUN:
         old_content, new_content = compute_content()
@@ -556,4 +587,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--validate-only", action="store_true")
+    main(parser.parse_args().validate_only)
