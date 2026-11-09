@@ -263,12 +263,14 @@ jobs:
 
 The `if:` guard is required: GitHub Actions rejects a job whose matrix vector is
 empty, and `versions` is `[]` whenever nothing is pending. `_setup.yml`
-also outputs `matrix`: one
-`{version, python}` entry per interpreter in the version's `files[].python` targets
-(see [Target Python Versions](#target-python-versions)) that cibuildwheel
-can build for riscv64. The `python-exclude` input drops interpreters for a
-package. Workflows that still hard-code `python: [...]` switch to it when
-next updated for a new release. Job outputs are not
+also outputs `matrix`: one target row per interpreter/platform in the version's
+`files[].python` targets (see [Target Python Versions](#target-python-versions)) that
+cibuildwheel can build for riscv64. Use this full matrix only when the job command or
+artifact varies by Python/platform. Interpreter-independent jobs, including `py3-none`
+wheels, one fixed ABI3 wheel, native dependencies built once, GPL collection, and publish,
+use the version-only `needs.setup.outputs.versions` matrix. Otherwise GitHub repeats the
+same work for every target row. The `python-exclude` input drops interpreters for a package.
+Job outputs are not
 per matrix leg, so a job must not hand its version to another through
 `outputs:`; use `matrix.version` (or an artifact named after it) instead.
 
