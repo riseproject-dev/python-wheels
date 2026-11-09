@@ -4,6 +4,13 @@
 # This workflow is based on upstream's own build steps for this addon:
 #   https://github.com/apache/tvm-ffi/blob/v0.1.15-post1/.github/workflows/torch_c_dlpack.yml
 #   https://github.com/apache/tvm-ffi/blob/v0.1.15-post1/addons/torch_c_dlpack_ext/build_aot_wheels.sh
+# Upstream itself doesn't run this addon through cibuildwheel - build_aot_wheels.sh drives
+# the manylinux image directly (build, retag, auditwheel repair) - and that's load-bearing
+# here, not just a style choice: build_backend.py has no ext_modules, so the wheel `pip wheel`
+# produces is always py3-none-any, and cibuildwheel 4.2.0 rejects that before its
+# repair-wheel-command ever runs (platforms/linux.py checks `endswith("none-any.whl")` right
+# after the build step, with no config to skip it). Mirror build_aot_wheels.sh's build+retag+
+# repair tail with `docker run` instead.
 name: Build torch-c-dlpack-ext wheels (riscv64)
 
 on:
@@ -69,39 +76,43 @@ jobs:
           ref: v0.1.15-post1
           persist-credentials: false
 
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: addons/torch_c_dlpack_ext
-          output-dir: wheelhouse/
+      - name: Build and test
+        shell: bash
         env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # build_backend.py only compiles the addon when torch is already
-          # importable in the build env, and doesn't declare it as a build
-          # requirement (unlike apache-tvm-ffi, which it does declare) - so
-          # isolation must be off, same shape as our vesin-torch port.
-          CIBW_BUILD_FRONTEND: 'pip; args: --no-build-isolation'
-          CIBW_BEFORE_BUILD: >-
-            pip install setuptools wheel ninja apache-tvm-ffi torch==${{ env.TORCH_VERSION }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # setuptools has no ext_modules here (the .so ships as package-data),
-          # so the built wheel is tagged py3-none-any; re-tag it to the build
-          # interpreter before auditwheel, exactly as build_aot_wheels.sh does,
-          # excluding the torch libs it dynamically links at import time.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            pip install -q wheel &&
-            python -m wheel tags --python-tag ${{ matrix.python }} --abi-tag ${{ matrix.python }} --remove {wheel} &&
-            auditwheel repair -w {dest_dir} $(dirname {wheel})/*.whl
-            --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so
-            --exclude libtorch_global_deps.so --exclude libc10.so --exclude libgomp.so.1
-          CIBW_TEST_REQUIRES: torch==${{ env.TORCH_VERSION }}
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=:all:
-          CIBW_TEST_COMMAND: >-
-            python -c "import torch, torch_c_dlpack_ext;
-            assert hasattr(torch.Tensor, '__dlpack_c_exchange_api__') or hasattr(torch.Tensor, '__c_dlpack_exchange_api__')"
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            -e PYTHON_TAG="${PYTHON_TAG}" \
+            -e TORCH_VERSION="${{ env.TORCH_VERSION }}" \
+            -e PIP_EXTRA_INDEX_URL="https://pypi.riseproject.dev/simple/" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euxo pipefail
+              case "$PYTHON_TAG" in
+                *t) pybin="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+                *) pybin="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+              esac
+
+              "$pybin/pip" install -q setuptools wheel ninja apache-tvm-ffi "torch==${TORCH_VERSION}"
+
+              cd addons/torch_c_dlpack_ext
+              "$pybin/pip" wheel . --no-deps --no-build-isolation -w dist
+              ls dist
+
+              # setuptools has no ext_modules here (the .so ships as package-data),
+              # so the built wheel is tagged py3-none-any; retag it to the build
+              # interpreter before auditwheel, exactly as build_aot_wheels.sh does.
+              "$pybin/python" -m wheel tags --python-tag "$PYTHON_TAG" --abi-tag "$PYTHON_TAG" --remove dist/*.whl
+
+              auditwheel repair -w /work/wheelhouse dist/*.whl \
+                --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so \
+                --exclude libtorch_global_deps.so --exclude libc10.so --exclude libgomp.so.1
+              ls /work/wheelhouse
+
+              "$pybin/pip" install -q --only-binary=:all: /work/wheelhouse/*.whl "torch==${TORCH_VERSION}"
+              "$pybin/python" -c "import torch, torch_c_dlpack_ext; assert hasattr(torch.Tensor, \"__dlpack_c_exchange_api__\") or hasattr(torch.Tensor, \"__c_dlpack_exchange_api__\")"
+            '
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
