@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the manylinux leg of upstream's own
+#   https://github.com/epics-base/pvxs/blob/master/.github/workflows/python.yml
+name: Build pvxslibs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pvxslibs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pvxslibs.yml'
+      - 'docs/packages/pvxslibs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pvxslibs.yml'
+      - 'docs/packages/pvxslibs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PVXS_REPO: epics-base/pvxs
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pvxslibs
+      version: ${{ inputs.version }}
+
+  python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    # The sdist just packages the vendored libevent + pvxs source tree; nothing
+    # in it is arch-specific, so build it once on x86 rather than on a scarce
+    # riscv runner.
+    name: Build pvxslibs ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    env:
+      PVXS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pvxs v${{ env.PVXS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ env.PVXS_REPO }}
+          ref: ${{ env.PVXS_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Matches upstream's own python.yml build step: setuptools_dso and
+      # epicscorelibs must be importable before setup.py can even emit a
+      # sdist (it reads epicscorelibs.config/path/version at parse time).
+      - name: Build sdist
+        run: |
+          set -euo pipefail
+          uv pip install setuptools wheel 'setuptools_dso>=2.11a2' epicscorelibs
+          python setup.py sdist --formats=gztar
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pvxslibs-${{ env.PVXS_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pvxslibs ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      PVXS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pvxslibs-${{ env.PVXS_VERSION }}-sdist
+
+      - name: Extract sdist
+        run: |
+          set -euo pipefail
+          mkdir pvxslibs
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}"/*.tar.gz \
+            --strip-components=1 -C pvxslibs
+
+      # libevent's own BSD licence doesn't reach the wheel through setuptools'
+      # default top-level licence glob; stage it there like the DSO-vendoring
+      # ports already in this repo do.
+      - name: Stage the vendored libevent licence
+        run: cp pvxslibs/bundle/libevent/LICENSE pvxslibs/LICENSE.libevent
+
+      # Upstream builds/tests every interpreter the same way (python.yml's
+      # manylinux job): setuptools_dso + epicscorelibs must resolve at build
+      # time (pyproject.toml build-system.requires), and PyPI also carries a
+      # newer epicscorelibs sdist inside the version range pvxslibs accepts,
+      # which has no riscv64 wheel - force binary-only resolution so pip
+      # can't fall back to source-building it.
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          package-dir: pvxslibs
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=${{ env.PIP_EXTRA_INDEX_URL }}
+            PIP_ONLY_BINARY=epicscorelibs
+          CIBW_TEST_REQUIRES: nose2
+          CIBW_TEST_COMMAND: >-
+            python -c "import pvxslibs; print('IMPORT', pvxslibs.__file__)"
+            && python -m nose2 -v pvxslibs
+
+      - name: Check the wheel ships the DSOs and both licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              for dso in ("event_core", "pvxs", "pvxsIoc"):
+                  assert any(n == f"pvxslibs/lib/lib{dso}.so" for n in names), (whl, dso)
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences >= {"LICENSE", "LICENSE.libevent"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pvxslibs-${{ env.PVXS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pvxslibs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: pvxslibs-${{ matrix.version }}-*-manylinux_riscv64
