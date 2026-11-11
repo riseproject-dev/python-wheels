@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/angr/ci-settings/blob/master/.github/workflows/angr-release.yml
+name: Build angr wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/angr.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-angr.yml'
+      - 'docs/packages/angr.yaml'
+      - 'patches/angr/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-angr.yml'
+      - 'docs/packages/angr.yaml'
+      - 'patches/angr/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: angr
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build angr ${{ matrix.version }} ${{ matrix.wheel-tag }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      ANGR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout angr ${{ env.ANGR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: angr/angr
+          ref: v${{ env.ANGR_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Two LibAFL crates reached through libafl and libafl_bolts (both pinned
+      # =0.16.1 by native/angr/Cargo.toml) do not build on linux/riscv64:
+      # no_std_time imports core::arch::asm only on aarch64/arm, yet its
+      # riscv64 read_time_counter calls asm!("rdcycle ..."); minibsod defines
+      # dump_registers/write_crash on Linux only for x86, x86_64, aarch64 and
+      # arm, and its generic fallback excludes all of Linux. 0.16.1 is the
+      # latest release of both and LibAFL main is still unfixed, so fixed
+      # copies of the crates.io tarballs (flattened manifests, no [workspace])
+      # are vendored into the checkout and wired in via [patch.crates-io]
+      # (CLAUDE.md gotcha 300).
+      - name: Vendor riscv64-fixed LibAFL crates
+        run: |
+          vendor_crate() {
+            local version
+            version=$(awk -v name="name = \"$1\"" '$0 == name{getline; print; exit}' Cargo.lock | sed -E 's/^version = "(.*)"$/\1/')
+
+            curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o "$1.tar.gz" "https://crates.io/api/v1/crates/$1/${version}/download"
+            mkdir "$1-${version}-riscv64"
+            tar xzf "$1.tar.gz" -C "$1-${version}-riscv64" --strip-components=1
+            rm "$1.tar.gz"
+            patch -p1 -d "$1-${version}-riscv64" < "python-wheels/patches/angr/${{ env.ANGR_VERSION }}/$2"
+          }
+
+          vendor_crate no_std_time 0001-no_std_time-import-asm-on-riscv.patch
+          vendor_crate minibsod 0002-minibsod-dump-registers-on-riscv64.patch
+
+          git apply python-wheels/patches/angr/${{ env.ANGR_VERSION }}/0003-cargo-patch-libafl-crates-for-riscv64.patch
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain,
+          # and z3-solver, which angr links against, has no musllinux wheel.
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build  # upstream's build[uv] needs a host uv the runner has none of (gotcha 13)
+          CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair --exclude libpyvex.so --exclude "libz3.so.5.*" -w {dest_dir} {wheel}
+          # Every compiled dependency is taken as a wheel: PyPI's newer sdists
+          # would otherwise win and be compiled in-container.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=bitarray,capstone,cffi,grpcio,grpcio-tools,keystone-engine,lmdb,msgspec,protobuf,psutil,pycryptodome,pydemumble,pypcode,pyvex,pyxdia,uefi-firmware,z3-solver
+          # Upstream's suite needs the angr/binaries corpus; these tests build
+          # their inputs from shellcode, so the deselected ones are those that
+          # load a binary from it.
+          CIBW_TEST_REQUIRES: pytest keystone-engine
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_ENVIRONMENT: CI=true
+          # test_real_execution_constraints_parse needs the angr/binaries
+          # fauxware corpus like the other deselected tests above, but its
+          # name doesn't contain "fauxware" so the -k filter missed it.
+          # icicle's edge-hitmap coverage tracking comes back all-zero on
+          # riscv64 (IcicleEngine.process() runs and returns, but no edge is
+          # ever marked hit), which every LibAFL-backed fuzzer scenario
+          # depends on end to end - hence dropping tests/test_fuzzer.py
+          # outright - and which test_icicle.py's three TestEdgeHitmap cases
+          # hit directly.
+          CIBW_TEST_COMMAND: >-
+            python -c "import pathlib, angr; assert angr.rustylib.__file__.endswith('.so'); assert (pathlib.Path(angr.__file__).parent / 'unicornlib.so').is_file(); print('angr imports!')" &&
+            python -m pytest tests/claripy tests/test_load_shellcode.py tests/sim/test_icicle.py
+            -k "not fauxware and not test_tracing and not vuln_stacksmash and not test_any_named and not test_real_execution_constraints_parse and not TestEdgeHitmap"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: angr-${{ env.ANGR_VERSION }}-${{ matrix.wheel-tag }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish angr ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: angr-${{ matrix.version }}-*-manylinux_riscv64
