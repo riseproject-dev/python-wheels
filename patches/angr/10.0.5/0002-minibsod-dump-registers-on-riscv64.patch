@@ -1,0 +1,55 @@
+Upstream-Status: To upstream [minibsod has Linux dump_registers/write_crash only for x86, x86_64, aarch64 and arm, while its generic fallback excludes every target_os = "linux", so linux/riscv64 gets neither; still unfixed on LibAFL main; not filed per this session's policy against opening external issues/PRs]
+
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -173,6 +173,28 @@
+ }
+
+ /// Write the content of all important registers
++#[cfg(all(target_os = "linux", target_arch = "riscv64"))]
++pub fn dump_registers<W: Write>(
++    writer: &mut BufWriter<W>,
++    ucontext: &ucontext_t,
++) -> Result<(), std::io::Error> {
++    // __gregs[0] is the pc, __gregs[1..32] are x1..x31
++    for reg in 1..32_usize {
++        write!(
++            writer,
++            "x{:02}: 0x{:016x} ",
++            reg, ucontext.uc_mcontext.__gregs[reg]
++        )?;
++        if reg % 4 == 0 {
++            writeln!(writer)?;
++        }
++    }
++    writeln!(writer, "pc : 0x{:016x} ", ucontext.uc_mcontext.__gregs[0])?;
++
++    Ok(())
++}
++
++/// Write the content of all important registers
+ #[cfg(all(target_os = "linux", target_arch = "arm"))]
+ pub fn dump_registers<W: Write>(
+     writer: &mut BufWriter<W>,
+@@ -684,6 +706,21 @@
+     )?;
+
+     Ok(())
++}
++
++#[cfg(all(target_os = "linux", target_arch = "riscv64"))]
++fn write_crash<W: Write>(
++    writer: &mut BufWriter<W>,
++    signal: Signal,
++    ucontext: &ucontext_t,
++) -> Result<(), std::io::Error> {
++    writeln!(
++        writer,
++        "Received signal {} at 0x{:016x}",
++        signal, ucontext.uc_mcontext.__gregs[0]
++    )?;
++
++    Ok(())
+ }
+
+ #[cfg(all(target_os = "linux", target_arch = "arm"))]

@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the manylinux leg of the `build` job of
+# https://github.com/phenobarbital/navconfig/blob/3.0.0/.github/workflows/release.yml
+name: Build navconfig wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/navconfig.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-navconfig.yml'
+      - 'docs/packages/navconfig.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-navconfig.yml'
+      - 'docs/packages/navconfig.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: navconfig
+      version: ${{ inputs.version }}
+      # pytomlpp, a hard runtime dependency, has no riscv64 wheel on the
+      # registry for cp310/cp311 (only cp312-cp314t), so neither interpreter
+      # can install or test the built wheel yet.
+      python-exclude: "cp39 cp310 cp311"
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build navconfig ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      NAVCONFIG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout navconfig v${{ env.NAVCONFIG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: phenobarbital/navconfig
+          ref: ${{ env.NAVCONFIG_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=orjson,cryptography,pycryptodomex,uvloop,pytomlpp
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_REQUIRES: "pytest>=9.0.3 pytest-asyncio>=0.21.0 uvloop>=0.22.1"
+          # kardex env create scaffolds env/etc/.../ so Kardex can bootstrap at
+          # all (a bare install errors otherwise); three test_config.py cases
+          # beyond that need the navconfig dev repo's own untracked settings/
+          # package and a custom etc/navigator.ini, neither of which is ever
+          # materialized by the project itself (settings/ is gitignored) or by
+          # upstream's CI (release.yml only imports navconfig post-deploy).
+          # SITE_ROOT is pinned to the test cwd because navconfig's own
+          # bootstrap() otherwise derives it from sys.prefix's parent when run
+          # inside a virtualenv (navconfig/project.py:project_root), which is
+          # cibuildwheel's test venv directory, not the test_cwd kardex env
+          # create scaffolds into one level below it; upstream's own
+          # test_cli.py/test_cli_env.py pin SITE_ROOT the same way.
+          CIBW_TEST_COMMAND: >-
+            export SITE_ROOT="$(pwd)" &&
+            kardex env create &&
+            python -c "import navconfig; print(f'NavConfig {navconfig.__version__} installed successfully')" &&
+            python -c "from navconfig import config; print('Config object created successfully')" &&
+            python -c "import importlib; names = ['navconfig.exceptions', 'navconfig.utils.functions', 'navconfig.utils.types', 'navconfig.loaders.parsers.toml', 'navconfig.loaders.parsers.yaml', 'navconfig.logging.logger', 'navconfig.utils.json']; mods = [importlib.import_module(n) for n in names]; bad = [n for n, m in zip(names, mods) if not m.__file__.endswith('.so')]; assert not bad, bad" &&
+            python -m pytest tests --rootdir=. -v
+            --deselect tests/test_config.py::test_environment
+            --deselect tests/test_config.py::test_settings
+            --deselect tests/test_config.py::test_local_settings
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: navconfig-${{ env.NAVCONFIG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish navconfig ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: navconfig-${{ matrix.version }}-*-manylinux_riscv64
