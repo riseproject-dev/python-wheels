@@ -19,30 +19,39 @@ so patch cmake/openvr.cmake's FetchContent_Declare to add a
 PATCH_COMMAND that rewrites the one line in its CMakeLists.txt right
 after the source is populated.
 
+The PATCH_COMMAND's python3 argument has to stay on a single logical
+line. FetchContent_Populate's own sub-build still generates a
+recursive-make project for this step regardless of the outer build's
+generator, and embeds the COMMAND argument verbatim into the
+generated CMakeFiles/openvr-populate.dir/build.make recipe; Make
+requires every physical line of a recipe to start with a tab, so a
+COMMAND argument containing literal, unescaped newlines (the original
+version of this patch, wrapped across several lines for readability)
+corrupts that generated recipe and fails configure with "build.make:
+*** missing separator. Stop." before openvr is even fetched. Using
+`\n` as a Python string escape instead of a real newline keeps the
+replacement multi-line in the patched CMakeLists.txt without putting
+a raw newline byte in the Makefile that generates it.
+
 Signed-off-by: Ludovic Henry <git@ludovic.dev>
 ---
- 3rd_party/sapien-vulkan-2/cmake/openvr.cmake | 9 +++++++++
- 1 file changed, 9 insertions(+)
+ 3rd_party/sapien-vulkan-2/cmake/openvr.cmake | 4 ++++
+ 1 file changed, 4 insertions(+)
 
 diff --git a/3rd_party/sapien-vulkan-2/cmake/openvr.cmake b/3rd_party/sapien-vulkan-2/cmake/openvr.cmake
 index 0000000..0000000 100644
 --- a/3rd_party/sapien-vulkan-2/cmake/openvr.cmake
 +++ b/3rd_party/sapien-vulkan-2/cmake/openvr.cmake
-@@ -5,6 +5,15 @@
+@@ -5,6 +5,10 @@
      GIT_TAG        v0.0.1
      GIT_SHALLOW TRUE
      GIT_PROGRESS TRUE
-+    PATCH_COMMAND python3 -c [[
-+import pathlib
-+p = pathlib.Path("CMakeLists.txt")
-+s = p.read_text()
-+old = 'elseif(PROCESSOR_ARCH MATCHES "64")'
-+new = 'elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")\n      add_definitions(-DLINUXRISCV64)\n    elseif(PROCESSOR_ARCH MATCHES "64")'
-+assert old in s
-+p.write_text(s.replace(old, new, 1))
-+]]
++    # Kept on one line: FetchContent_Populate's own sub-build generates a
++    # recursive-make project for this step and embeds this COMMAND verbatim
++    # into its build.make recipe, where a literal newline breaks "missing separator".
++    PATCH_COMMAND python3 -c [[import pathlib; p = pathlib.Path("CMakeLists.txt"); s = p.read_text(); old = 'elseif(PROCESSOR_ARCH MATCHES "64")'; new = 'elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")\n      add_definitions(-DLINUXRISCV64)\n    elseif(PROCESSOR_ARCH MATCHES "64")'; assert old in s; p.write_text(s.replace(old, new, 1))]]
  )
- 
+
  # FetchContent_MakeAvailable(openvr)
 --
 2.50.1
