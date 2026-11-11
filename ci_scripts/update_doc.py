@@ -569,8 +569,6 @@ def main(validate_only=False):
             "main",
             "--head",
             branch,
-            "--reviewer",
-            "luhenry",
             "--title",
             pr_title,
             "--body",
