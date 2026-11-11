@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-GKlib/blob/v0.0.1.c0/.github/workflows/release.yml
+name: Build cmeel-gklib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-gklib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-gklib.yml'
+      - 'docs/packages/cmeel-gklib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-gklib.yml'
+      - 'docs/packages/cmeel-gklib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-gklib
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-gklib ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_GKLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter.
+      - name: Checkout cmeel-gklib v${{ env.CMEEL_GKLIB_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-GKlib
+          ref: v${{ env.CMEEL_GKLIB_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Patch GKlib's -march=native for riscv64
+        run: |
+          # GKlib's own CMakeLists.txt keys NO_X86 off CMAKE_SYSTEM_PROCESSOR
+          # (anything not x86/amd64 gets NO_X86=ON), but that flag only gates
+          # one optional helper app (apps/gkuniq.c), not the library itself.
+          # The library's own -march=native (GKlibSystem.cmake, gated only by
+          # a PPC-specific regex, unrelated to NO_X86) breaks every C file on
+          # riscv64: this toolchain's GCC errors on native-CPU detection
+          # ("ISA string must begin with rv32 or rv64") instead of producing
+          # one. GKlib itself is fetched fresh by this wrapper's own
+          # ExternalProject_Add (not vendored here), so the fix is a
+          # PATCH_COMMAND, confirmed line-for-line against the real
+          # GKlibSystem.cmake at the pinned commit (8bd6bad750b2) before
+          # writing this sed: scope -march=native to real x86 the same way
+          # the PPC branch is already scoped, instead of leaving it as the
+          # unconditional "everything else" fallback.
+          cat > gklib-riscv64-no-march-native.sh <<'SCRIPT'
+          #!/bin/sh
+          set -e
+          sed -i '/CMAKE_SYSTEM_PROCESSOR MATCHES "power|ppc|powerpc|ppc64|powerpc64" OR (APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "ppc|ppc64"))/{n;n;s/^else()$/elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")/}' GKlibSystem.cmake
+          SCRIPT
+          chmod +x gklib-riscv64-no-march-native.sh
+          sed -i '/DOWNLOAD_EXTRACT_TIMESTAMP OFF/a\  PATCH_COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/gklib-riscv64-no-march-native.sh' CMakeLists.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # GKlib's own CMakeLists.txt declares cmake_minimum_required(VERSION 2.8)
+          # with no <max>, and cmeel[build] resolves CMake >= 4, which refuses
+          # anything below 3.5 outright ("Compatibility with CMake < 3.5 has been
+          # removed"); the cmeel backend owns the configure line, so the floor goes
+          # in the environment, same as cmeel-yaml-cpp's build (gotcha 257).
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG CMAKE_POLICY_VERSION_MINIMUM=3.5
+          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "cmeel.prefix/lib/libGKlib.so" in names, names
+          assert "cmeel.prefix/include/GKlib.h" in names, names
+          EOF
+
+      - name: Smoke-test the built library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q wheelhouse/*.whl
+          python3 -c "
+          import ctypes, pathlib, sysconfig
+          lib = pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix/lib/libGKlib.so'
+          handle = ctypes.CDLL(str(lib))
+          handle.GKDecodeBase64
+          print(lib)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-gklib-${{ env.CMEEL_GKLIB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-gklib ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: cmeel-gklib-${{ matrix.version }}-py3-none-manylinux_riscv64
