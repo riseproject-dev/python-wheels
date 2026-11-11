@@ -132,15 +132,27 @@ jobs:
                 "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/include/*.h" \
                 "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}/include/*.inc"
 
-            # build.py's --parallel passes cmake --build --parallel with no job count, which
-            # spawns one job per core with nothing to meter memory. This runner pool's own
-            # set-swap-space mitigation is a documented no-op here (gotcha 421: swapon fails
-            # silently on the overlay filesystem), and its real ceiling is ~15GB RAM. Two
-            # consecutive cp312/cp314 runs on two different physical runners both died with
-            # no recoverable log ~75-77 minutes in (job step stuck in_progress, no
-            # completed_at) -- consistent with an OOM kill during the uncapped parallel
-            # link/compile, not a one-off flake. Cap it; this is an attempt at a suspected
-            # cause, not a confirmed fix, since the runner's OOM never leaves a log to prove it.
+            # cmake/options.cmake defaults ENABLE_TELEMETRY=ON on every platform except AIX
+            # and macOS Catalyst, and build.py only turns it off when --no_telemetry is
+            # passed (cmake/telemetry.cmake otherwise FetchContents and builds from source
+            # the full Microsoft 1DS C++ SDK (cpp_client_telemetry) *and* its own vendored
+            # copies of curl 8.21.0 and mbedtls 3.6.7 as its static HTTP transport -- none
+            # of it gated behind an existing system package, all of it unrelated to genai's
+            # actual ML functionality, on top of the onnxruntime_extensions tree this build
+            # already vendors from source). That is consistent with two consecutive cp312/
+            # cp314 runs on two different physical runners both dying with no recoverable
+            # log ~75-77 minutes in (job step stuck in_progress, no completed_at, log blob
+            # 404) even after a prior attempt capped CMAKE_BUILD_PARALLEL_LEVEL=2: limiting
+            # how many compile jobs run concurrently doesn't shrink any single link's memory
+            # footprint, and this runner pool's real ceiling is ~15GB RAM with the
+            # set-swap-space mitigation a documented no-op here (gotcha 421: swapon fails
+            # silently on the overlay filesystem) -- so the death point tracks how much gets
+            # linked, not how many jobs ran in parallel to get there. Dropping the telemetry
+            # SDK (and its curl/mbedtls transport) entirely removes that extra link weight;
+            # it's also undesirable on its own terms for a wheel this project redistributes,
+            # independent of the OOM: nothing else in this build should phone home to
+            # Microsoft's 1DS ingestion endpoint by default. Keep the parallel cap too, as a
+            # harmless remaining safety margin for the rest of the link graph.
             export CMAKE_BUILD_PARALLEL_LEVEL=2
 
             "${python_exe}" /onnxruntime_genai_src/build.py \
@@ -148,6 +160,7 @@ jobs:
               --parallel \
               --skip_tests \
               --skip_examples \
+              --no_telemetry \
               --ort_home /build/ort_home \
               --cmake_extra_defines MANYLINUX=ON \
               --cmake_path /usr/bin/cmake \
