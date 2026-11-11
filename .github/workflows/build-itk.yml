@@ -150,21 +150,33 @@ jobs:
             # support and is itself another from-source ExternalProject dependency; ITK
             # already falls back to its default Pool threader without it.
             #
-            # -D_Float128=long double (forwarded to the from-source-built CastXML/Clang
+            # _Float128 -> long double (forwarded to the from-source-built CastXML/Clang
             # 18.1.3 via Wrapping's --castxml-cc-gnu "${CMAKE_CXX_FLAGS}") works around
             # that Clang not recognizing _Float128 as a type on riscv64, which this
             # image's glibc declares unconditionally in bits/mathcalls.h once it sees a
             # Clang new enough. long double is already IEEE binary128 on riscv64, so the
             # substitution is exact, and it only touches glibc's distinctly-named
             # _Float128 declarations (__atanf128 etc.), never the existing long-double
-            # overloads.
+            # overloads. The #define is put in its own header and pulled in with -include
+            # rather than passed as -D_Float128=long\ double on the command line: that
+            # flag string crosses bash (this heredoc), cmake's -D parsing, cmake's own
+            # Ninja-rule serialization, and ninja's /bin/sh -c re-invocation, and the
+            # escaped space does not survive all four - CMake re-emits CMAKE_CXX_FLAGS
+            # into build.ninja without preserving the backslash, so sh -c re-splits it
+            # into two words and "double" gets passed to the compiler as a bogus input
+            # file. A path has no embedded space to lose, so -include sidesteps the
+            # whole chain.
+            cat > /work/float128-workaround.h <<'HDREOF'
+          #define _Float128 long double
+          HDREOF
+
             "${cmake}" -S "${source_path}" -B "${build_path}" -G Ninja \
               -DCMAKE_BUILD_TYPE:STRING=Release \
               -DBUILD_TESTING:BOOL=OFF \
               -DPython3_EXECUTABLE:FILEPATH="${python_exe}" \
               -DPython3_INCLUDE_DIR:PATH="${python_include}" \
               -DCMAKE_CXX_COMPILER_TARGET:STRING="$(uname -m)-linux-gnu" \
-              -DCMAKE_CXX_FLAGS:STRING="-O3 -DNDEBUG -D_Float128=long\ double" \
+              -DCMAKE_CXX_FLAGS:STRING="-O3 -DNDEBUG -include /work/float128-workaround.h" \
               -DCMAKE_C_FLAGS:STRING="-O3 -DNDEBUG" \
               -DITK_C_OPTIMIZATION_FLAGS:STRING= \
               -DITK_CXX_OPTIMIZATION_FLAGS:STRING= \
