@@ -42,6 +42,33 @@ jobs:
       package: panda3d
       version: ${{ inputs.version }}
 
+  # TEMPORARY diagnostic job, to be removed once the real test_bam_info/
+  # test_egg_trans SIGSEGV is diagnosed. build_wheels's own strace attempt
+  # crashed the same way gdb did ("Segmentation fault (core dumped)" on
+  # `strace -f -v bam-info -h` itself, before any trace output), which could
+  # mean either ptrace is broken for ANY riscv64 binary on this runner, or
+  # something specific to the panda3d-built binary. This job answers that in
+  # minutes instead of the ~1h18m it takes build_wheels to even reach its own
+  # strace step, by tracing trivial binaries (/bin/true, /bin/echo) inside
+  # the same manylinux_riscv64 container on the same runner pool.
+  strace_sanity_check:
+    name: Diagnose whether ptrace/strace works at all on this runner
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    steps:
+      - name: Trace trivial binaries inside the manylinux container
+        run: |
+          docker run --rm -i --network=host "${MANYLINUX_RISCV64_IMAGE}" bash <<'SCRIPT'
+          set -x
+          dnf install -y --setopt=install_weak_deps=False strace
+          echo "DIAG: strace -f /bin/true"
+          strace -f -v /bin/true
+          echo "DIAG: /bin/true exit=$?"
+          echo "DIAG: strace -f /bin/echo hello"
+          strace -f -v /bin/echo hello
+          echo "DIAG: /bin/echo exit=$?"
+          SCRIPT
+
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
