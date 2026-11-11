@@ -99,7 +99,7 @@ jobs:
           dnf install -y --setopt=install_weak_deps=False \
             bison flex freetype-devel mesa-libGL-devel libjpeg-turbo-devel \
             libpng-devel openssl-devel libvorbis-devel libogg-devel \
-            libX11-devel libXcursor-devel libXrandr-devel zlib-devel gdb
+            libX11-devel libXcursor-devel libXrandr-devel zlib-devel strace
 
           # setup's matrix (every RISCV64_PYTHONS-supported target in
           # docs/packages/panda3d.yaml bar cp39) includes cp310/cp311; the publish job's
@@ -125,9 +125,12 @@ jobs:
             /tmp/test-venv/bin/pip install -q "wheelhouse/${whl}" pytest
 
             # DIAGNOSTIC ONLY (not a fix): test_bam_info SIGSEGVs on riscv64 with no
-            # captured output, so capture a real backtrace for bam-info -h and
-            # egg-trans -h before running the actual test suite, to tell whether
-            # this is specific to bam-info or shared ProgramBase/getopt CLI code.
+            # captured output. The previous gdb attempt got no backtrace at all --
+            # "During startup program terminated with signal SIGSEGV. No stack." --
+            # and gdb itself couldn't even disable ASLR ("Operation not permitted"),
+            # so the crash is too early for gdb's own ptrace-based attach to see
+            # anything. Use strace instead, which traces at the syscall level and
+            # doesn't need ptrace permissions beyond PTRACE_SYSCALL.
             TOOLS_DIR=$(/tmp/test-venv/bin/python -c "
           import os, panda3d
           try:
@@ -137,19 +140,32 @@ jobs:
               print(os.path.join(os.path.dirname(os.path.dirname(panda3d.__file__)), 'bin'))
           ")
             echo "DIAG: tools dir resolved to ${TOOLS_DIR}"
-            ls -la "${TOOLS_DIR}" || true
             for tool in bam-info egg-trans; do
               if [ -f "${TOOLS_DIR}/${tool}" ]; then
-                echo "DIAG: backtrace for ${tool} -h"
-                gdb --batch -ex run -ex bt --args "${TOOLS_DIR}/${tool}" -h || true
+                echo "DIAG: strace for ${tool} -h ($PY)"
+                strace -f -v "${TOOLS_DIR}/${tool}" -h > /tmp/strace-out.log 2>&1
+                echo "DIAG: exit=$? for ${tool}"
+                tail -40 /tmp/strace-out.log
               else
                 echo "DIAG: ${tool} not found at ${TOOLS_DIR}"
               fi
             done
 
-            /tmp/test-venv/bin/python -m pytest -x -q
+            # DIAGNOSTIC ONLY: the loop's prior unconditional `pytest -x` means a
+            # cp310 test_bam_info failure aborts the whole job before cp311-314t
+            # ever get their own test_tools.py run -- every build to date has only
+            # ever actually tested cp310 against this crash. Don't abort the loop
+            # on a test failure so every interpreter's own result is known from one
+            # CI run; still propagate failure to the job via DIAG_FAILED.
+            if ! /tmp/test-venv/bin/python -m pytest -x -q; then
+              echo "DIAG: pytest FAILED for ${pydir}"
+              DIAG_FAILED=1
+            fi
             rm -rf /tmp/test-venv
           done
+          if [ -n "${DIAG_FAILED:-}" ]; then
+            exit 1
+          fi
           SCRIPT
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
