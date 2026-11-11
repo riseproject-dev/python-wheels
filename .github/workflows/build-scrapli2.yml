@@ -2,27 +2,33 @@
 # SPDX-License-Identifier: MIT
 ---
 # This workflow is based on: https://github.com/carlmontanari/scrapli/blob/v2.0.2/.github/workflows/publish.yaml
-name: Build scrapli wheels (riscv64)
+#
+# Built from git tag v2.0.2, which upstream's own pyproject.toml publishes to
+# PyPI as the distribution `scrapli2` (semver), not `scrapli` (upstream's
+# separate, calver-released, pure-Python distribution of the same repo that
+# predates the native libscrapli rewrite) -- the package/workflow/docs names
+# here follow the real PyPI distribution this tag produces.
+name: Build scrapli2 wheels (riscv64)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version glob to (re)build; empty builds every version of docs/packages/scrapli.yaml not released yet'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scrapli2.yaml not released yet'
         required: false
         default: ''
   pull_request:
     branches: [main]
     paths:
-      - '.github/workflows/build-scrapli.yml'
-      - 'docs/packages/scrapli.yaml'
-      - 'patches/scrapli/**'
+      - '.github/workflows/build-scrapli2.yml'
+      - 'docs/packages/scrapli2.yaml'
+      - 'patches/scrapli2/**'
   push:
     branches: [main]
     paths:
-      - '.github/workflows/build-scrapli.yml'
-      - 'docs/packages/scrapli.yaml'
-      - 'patches/scrapli/**'
+      - '.github/workflows/build-scrapli2.yml'
+      - 'docs/packages/scrapli2.yaml'
+      - 'patches/scrapli2/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -39,13 +45,13 @@ jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
     with:
-      package: scrapli
+      package: scrapli2
       version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build scrapli ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build scrapli2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
@@ -53,18 +59,13 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
-      SCRAPLI_VERSION: ${{ matrix.version }}
+      SCRAPLI2_VERSION: ${{ matrix.version }}
 
     steps:
-      # Upstream's own PyPI release is calver (date of the `release` event) and
-      # carries no fixed relationship to the semver git tag it was cut from, so
-      # the mapping has to be hardcoded per released version.
+      # scrapli2's semver PyPI version is identical to its git tag name (sans
+      # the `v` prefix), unlike upstream's unrelated calver `scrapli` releases.
       - id: tag
-        run: |
-          case "${SCRAPLI_VERSION}" in
-            2026.10.14) echo "ref=v2.0.2" >> "$GITHUB_OUTPUT" ;;
-            *) echo "no known git tag for scrapli version ${SCRAPLI_VERSION}" >&2; exit 1 ;;
-          esac
+        run: echo "ref=v${SCRAPLI2_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout scrapli ${{ steps.tag.outputs.ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -81,8 +82,8 @@ jobs:
 
       - name: Patch scrapli source
         run: |
-          git apply python-wheels/patches/scrapli/${{ env.SCRAPLI_VERSION }}/0001-wheel-targets-riscv64.patch
-          git apply python-wheels/patches/scrapli/${{ env.SCRAPLI_VERSION }}/0002-ffi-arch-riscv64.patch
+          git apply python-wheels/patches/scrapli2/${{ env.SCRAPLI2_VERSION }}/0001-wheel-targets-riscv64.patch
+          git apply python-wheels/patches/scrapli2/${{ env.SCRAPLI2_VERSION }}/0002-ffi-arch-riscv64.patch
 
       # setup.py skips building libscrapli whenever LIBSCRAPLI_BUILD_PATH
       # already holds build.zig and just globs zig-out/<triple>/, so build it
@@ -157,12 +158,12 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: scrapli-${{ env.SCRAPLI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: scrapli2-${{ env.SCRAPLI2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   publish:
-    name: Publish scrapli ${{ matrix.version }}
+    name: Publish scrapli2 ${{ matrix.version }}
     needs: [setup, build_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
@@ -177,4 +178,4 @@ jobs:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       matrix: ${{ needs.setup.outputs.matrix }}
-      artifact-pattern: scrapli-${{ matrix.version }}-*-manylinux_riscv64
+      artifact-pattern: scrapli2-${{ matrix.version }}-*-manylinux_riscv64
