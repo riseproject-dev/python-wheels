@@ -99,7 +99,7 @@ jobs:
           dnf install -y --setopt=install_weak_deps=False \
             bison flex freetype-devel mesa-libGL-devel libjpeg-turbo-devel \
             libpng-devel openssl-devel libvorbis-devel libogg-devel \
-            libX11-devel libXcursor-devel libXrandr-devel zlib-devel
+            libX11-devel libXcursor-devel libXrandr-devel zlib-devel gdb
 
           # setup's matrix (every RISCV64_PYTHONS-supported target in
           # docs/packages/panda3d.yaml bar cp39) includes cp310/cp311; the publish job's
@@ -123,6 +123,30 @@ jobs:
             # unaffected, but upgrade unconditionally for all of them.
             "${PY}" -m venv --upgrade-deps /tmp/test-venv
             /tmp/test-venv/bin/pip install -q "wheelhouse/${whl}" pytest
+
+            # DIAGNOSTIC ONLY (not a fix): test_bam_info SIGSEGVs on riscv64 with no
+            # captured output, so capture a real backtrace for bam-info -h and
+            # egg-trans -h before running the actual test suite, to tell whether
+            # this is specific to bam-info or shared ProgramBase/getopt CLI code.
+            TOOLS_DIR=$(/tmp/test-venv/bin/python -c "
+          import os, panda3d
+          try:
+              import panda3d_tools
+              print(os.path.dirname(panda3d_tools.__file__))
+          except ImportError:
+              print(os.path.join(os.path.dirname(os.path.dirname(panda3d.__file__)), 'bin'))
+          ")
+            echo "DIAG: tools dir resolved to ${TOOLS_DIR}"
+            ls -la "${TOOLS_DIR}" || true
+            for tool in bam-info egg-trans; do
+              if [ -f "${TOOLS_DIR}/${tool}" ]; then
+                echo "DIAG: backtrace for ${tool} -h"
+                gdb --batch -ex run -ex bt --args "${TOOLS_DIR}/${tool}" -h || true
+              else
+                echo "DIAG: ${tool} not found at ${TOOLS_DIR}"
+              fi
+            done
+
             /tmp/test-venv/bin/python -m pytest -x -q
             rm -rf /tmp/test-venv
           done
