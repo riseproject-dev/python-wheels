@@ -155,11 +155,17 @@ jobs:
             # that Clang not recognizing _Float128 as a type on riscv64, which this
             # image's glibc declares unconditionally in bits/mathcalls.h once it sees a
             # Clang new enough. long double is already IEEE binary128 on riscv64, so the
-            # substitution is exact, and it only touches glibc's distinctly-named
-            # _Float128 declarations (__atanf128 etc.), never the existing long-double
-            # overloads. The #define is put in its own header and pulled in with -include
-            # rather than passed as -D_Float128=long\ double on the command line: that
-            # flag string crosses bash (this heredoc), cmake's -D parsing, cmake's own
+            # substitution is exact for Clang's purposes. But CMAKE_CXX_FLAGS is also the
+            # literal flags CMake hands to the real GCC build of ITK's own C++ library
+            # code (not just the forwarded castxml-cc-gnu string) - and GCC's riscv64
+            # glibc/libstdc++ headers carry separate template specializations keyed on
+            # _Float128 and on long double (e.g. __iseqsig_type, numeric_limits). Text-
+            # substituting one into the other under GCC collapses both specializations
+            # into one and fails with "redefinition of struct ...". Guarding the #define
+            # to Clang only keeps it scoped to the CastXML forwarding it was written for.
+            # The #define is put in its own header and pulled in with -include rather
+            # than passed as -D_Float128=long\ double on the command line: that flag
+            # string crosses bash (this heredoc), cmake's -D parsing, cmake's own
             # Ninja-rule serialization, and ninja's /bin/sh -c re-invocation, and the
             # escaped space does not survive all four - CMake re-emits CMAKE_CXX_FLAGS
             # into build.ninja without preserving the backslash, so sh -c re-splits it
@@ -167,7 +173,9 @@ jobs:
             # file. A path has no embedded space to lose, so -include sidesteps the
             # whole chain.
             cat > /work/float128-workaround.h <<'HDREOF'
+          #if defined(__clang__)
           #define _Float128 long double
+          #endif
           HDREOF
 
             "${cmake}" -S "${source_path}" -B "${build_path}" -G Ninja \
