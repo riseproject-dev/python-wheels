@@ -44,6 +44,10 @@ env:
   LIBXML2_VERSION: '2.13.5'
   AZURE_SDK_CPP_VERSION: 'azure-storage-blobs_12.15.0'
   AZURITE_VERSION: '3.37.0'
+  # nodejs.org ships no riscv64 build; unofficial-builds.nodejs.org does (same
+  # source nodejs-bin uses). Azurite 3.37 requires Node >=22, which Ubuntu
+  # 24.04's apt nodejs/npm (v18) silently fails to run.
+  NODE_VERSION: '22.23.4'
 
 jobs:
   setup:
@@ -423,11 +427,14 @@ jobs:
           AZURE_STORAGE_CONNECTION_STRING: 'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;'
           AZURE_CONTAINER: test-bucket
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends nodejs npm
+          curl -fsSL -o "$RUNNER_TEMP/node.tar.xz" \
+            "https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-riscv64.tar.xz"
+          mkdir -p "$RUNNER_TEMP/node"
+          tar xJf "$RUNNER_TEMP/node.tar.xz" -C "$RUNNER_TEMP/node" --strip-components=1
+          export PATH="$RUNNER_TEMP/node/bin:$PATH"
           # Clears corrupted cache state left by an earlier job on the persistent self-hosted runner.
-          sudo npm cache clean --force
-          sudo npm install -g "azurite@${AZURITE_VERSION}"
+          npm cache clean --force
+          npm install -g "azurite@${AZURITE_VERSION}"
           mkdir -p "$RUNNER_TEMP/azurite"
           azurite --silent --skipApiVersionCheck --location "$RUNNER_TEMP/azurite" --blobPort 10000 --blobHost 127.0.0.1 &
           trap 'kill $!' EXIT
