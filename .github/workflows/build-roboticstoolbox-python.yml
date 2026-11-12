@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on https://github.com/petercorke/robotics-toolbox-python/blob/v1.5.0/.github/workflows/release.yml
+# and https://github.com/petercorke/robotics-toolbox-python/blob/v1.5.0/.github/workflows/ci.yml
+name: Build roboticstoolbox-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/roboticstoolbox-python.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-roboticstoolbox-python.yml'
+      - 'docs/packages/roboticstoolbox-python.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-roboticstoolbox-python.yml'
+      - 'docs/packages/roboticstoolbox-python.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: roboticstoolbox-python
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build roboticstoolbox-python ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      RTB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout roboticstoolbox-python ${{ env.RTB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: petercorke/robotics-toolbox-python
+          ref: v${{ env.RTB_VERSION }}
+          persist-credentials: false
+
+      # The vendored header-only Eigen has no LICENSE of its own in this tree.
+      - name: Stage Eigen's licence
+        run: curl -fsSL --retry 5 -o COPYING.eigen https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pillow,matplotlib,contourpy,kiwisolver,quadprog,pyyaml
+          # upstream's [dev] extra minus coal (no riscv64 wheel) and lint/coverage/notebook tooling;
+          # quadprog has no cp310/cp311 riscv64 wheel, so those skip the QP tests (skip_no_qp).
+          # ipython/pygments (upstream's own separate "tool" extra, not part of [dev]) are
+          # required too: tests/test_bin.py's TestRtbtool class genuinely needs them to start
+          # rtbtool itself, not just to skip gracefully (confirmed from the real cp312 CI log,
+          # job 130955489429 - 4 failures, each "rtbtool requires IPython and pygments, which
+          # are not installed"). Upstream's own CI gets these for free as a transitive
+          # dependency of [dev]'s nbmake/ipympl (deliberately excluded here as "notebook
+          # tooling"), masking that [dev] alone never actually lists them.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-timeout pyyaml sympy bdsim trimesh ipython pygments
+            "qpsolvers; python_version >= '3.12'" "quadprog; python_version >= '3.12'"
+          # src is needed too: tests/test_backend_capabilities.py's
+          # TestBaseRobotNoModuleLevelMPLImport class reads src/roboticstoolbox/robot/
+          # BaseRobot.py's own source text directly (an AST check that it imports no top-level
+          # matplotlib), not via the installed package - confirmed from the real cp312 CI log
+          # (job 130955489429): FileNotFoundError on that relative path when only tests/ is
+          # shipped.
+          CIBW_TEST_SOURCES: tests docs/notebooks src pyproject.toml
+          # jaco's General6RIK symbolic derivation (sympy) is cached in a module-level dict
+          # keyed by the robot's DH parameters, not per-test, so whichever test in this file
+          # first calls self.jaco.analytic_ik() pays the full derivation cost - and that
+          # derivation takes well over upstream's 50s timeout on riscv64. Deselecting
+          # test_general (confirmed from the real cp310 CI log) just moved the "first caller"
+          # to test_generate, then to test_generated_c_is_for_embedded_use/
+          # test_generated_python_agrees's shared path, and now (confirmed from the real
+          # cp312 CI log) to test_methods, the only remaining test in this class that touches
+          # self.jaco.analytic_ik(). Checked every other test in the real upstream
+          # test_analytic_ik.py (v1.5.0): none of the rest call analytic_ik() on jaco, only on
+          # puma/stanford (ClosedFormIK, not the slow General6RIK path) or on throwaway
+          # DHRobot/Planar2 fixtures that raise before any derivation - so this closes out the
+          # whole class rather than trading one slow test for the next.
+          #
+          # A fourth, unrelated test (test_fdyn_without_optional_arguments, scipy's RK
+          # integrator inside puma.fdyn()) then hit the same 50s ceiling on EVERY interpreter
+          # (confirmed from the real cp312 CI log, job 130860352399), not just one arch-specific
+          # outlier: this is riscv64 being generically slower at floating-point-heavy numeric
+          # work than upstream's own CI hardware, the same class of gap as the IK derivations
+          # above. Raising --timeout from upstream's 50s to 300s (kept below) gave every other
+          # test real headroom, but this one still ran past even that: 970s on cp314 (confirmed
+          # from the real CI log, job 130932228943) before pytest-timeout's own --timeout_method
+          # finally killed it. "thread" mode can only dump a stack and report a failure; it
+          # can't interrupt the call. rk_step()'s own traceback shows a plain Python/numpy loop
+          # (not a single uninterruptible C call), so the test isn't hanging - it's just doing
+          # far more wall-clock work than any practical timeout should wait out. Deselect it
+          # alongside the IK derivations rather than keep raising the ceiling for one test.
+          #
+          # That same cp314 run also showed 6 unexplained real failures (not timeouts) around
+          # 26% progress through the suite ("FF..FFF..F" in -q's dot output); the run was killed
+          # by the fdyn timeout above before pytest ever printed its summary, so their names
+          # never made it into the log. Added -v so a future run's own live log carries every
+          # test's name and outcome as it happens, not just in a final summary that a timeout
+          # kill can erase - needed to actually diagnose those 6 on the next failure instead of
+          # losing them again.
+          CIBW_TEST_COMMAND: >-
+            python -c "from roboticstoolbox.ets.fknm import _C_AVAILABLE as a; from roboticstoolbox.robot.frne import _C_AVAILABLE as b; assert a and b"
+            && python -m pytest tests --ignore=tests/test_blocks.py -m "not slow" --timeout=300 --timeout_method=thread
+            --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_general"
+            --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_generate"
+            --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_generated_c_is_for_embedded_use"
+            --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_generated_python_agrees"
+            --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_methods"
+            --deselect "tests/test_dynamics_defaults.py::test_fdyn_without_optional_arguments"
+            -v
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              for ext in ("_frne_c", "_fknm_c"):
+                  assert any(n.startswith(f"roboticstoolbox/{ext}.") and n.endswith(".so") for n in names), (path, ext)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licences == {"LICENSE", "COPYING.eigen"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: roboticstoolbox-python-${{ env.RTB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish roboticstoolbox-python ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: roboticstoolbox-python-${{ matrix.version }}-*-manylinux_riscv64
