@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-spirv-tools/blob/v2025.5.c0/.github/workflows/release.yml
+name: Build cmeel-spirv-tools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-spirv-tools.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-spirv-tools.yml'
+      - 'docs/packages/cmeel-spirv-tools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-spirv-tools.yml'
+      - 'docs/packages/cmeel-spirv-tools.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-spirv-tools
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-spirv-tools ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_SPIRV_TOOLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter. Unlike cmeel-m4/cmeel-glpk/
+      # cmeel-cddlib (which use ExternalProject_Add to fetch an upstream
+      # tarball and build it under cmeel's own generic template
+      # CMakeLists.txt), this wrapper has no top-level CMakeLists.txt of its
+      # own: pyproject.toml's `source = "spirv-tools"` points straight at a
+      # real KhronosGroup/SPIRV-Tools git submodule, built with its own full
+      # CMakeLists.txt (cmake_minimum_required 3.22.1, already above
+      # cmeel[build]'s CMake >= 4 floor of 3.5; no -march=native/-mavx/-msse
+      # or other x86-specific flag anywhere in its CMake tree or source/
+      # tools/ - confirmed against the real KhronosGroup/SPIRV-Tools source
+      # at the submodule's pinned commit, not guessed). The wrapper's own
+      # cmeel.patch (applied automatically by cmeel[build] itself - confirmed
+      # against the real cmeel package source, cmeel/utils.py's patch()
+      # function) swaps the submodule's own vendored-SPIRV-Headers lookup for
+      # find_package(SPIRV-Headers REQUIRED CONFIG), resolved from
+      # cmeel-spirv-headers's build-time dependency - itself a true
+      # py3-none-any header-only wheel already installable on riscv64 with
+      # no port needed (docs/packages/cmeel-spirv-headers.yaml: not-applicable).
+      - name: Checkout cmeel-spirv-tools v${{ env.CMEEL_SPIRV_TOOLS_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-spirv-tools
+          ref: v${{ env.CMEEL_SPIRV_TOOLS_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Install upstream's LICENSE into the wheel
+        run: |
+          # The real published wheel (cmeel_spirv_tools-2025.5-0-py3-none-
+          # manylinux_2_28_x86_64.whl, confirmed via unzip -l) ships no
+          # LICENSE/COPYING file at all - the same gap already found and
+          # fixed for cmeel-m4/cmeel-glpk/cmeel-cddlib, present in the
+          # upstream cmake-wheel/cmeel-spirv-tools wrapper itself on every
+          # platform, not riscv64-specific. The wrapper's own pyproject.toml
+          # and METADATA both claim "BSD-3-Clause", but the real submodule's
+          # own top-level LICENSE file (confirmed: spirv-tools/LICENSE at the
+          # pinned commit) is the Apache License, Version 2.0 - the wrapper's
+          # declared license is simply wrong, same class of mismatch already
+          # found for cmeel-cddlib (whose pyproject.toml says generic "GPL"
+          # when the real upstream COPYING is GPLv2). docs/packages below
+          # records the real license, Apache-2.0.
+          #
+          # Unlike cmeel-m4/cmeel-glpk/cmeel-cddlib's ExternalProject_Add
+          # extraction-path indirection, the submodule's LICENSE file is
+          # already sitting in-tree at spirv-tools/LICENSE before the build
+          # even starts (no CMAKE_CURRENT_BINARY_DIR prefix lookup needed).
+          # Add a second install(FILES ...) rule beside the submodule's own
+          # existing header-install block (confirmed unique anchor line in
+          # the real source, not guessed), pointing at it.
+          sed -i '/^endif(ENABLE_SPIRV_TOOLS_INSTALL)$/a install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION share/cmeel-spirv-tools/)' spirv-tools/CMakeLists.txt
+          grep -n LICENSE spirv-tools/CMakeLists.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cmeel-spirv-headers (the only build-time dependency, via
+          # pyproject.toml's build-system.requires) is a true py3-none-any
+          # header-only wheel already published on public PyPI - pip's
+          # build-isolation install resolves it from the default index with
+          # no PIP_EXTRA_INDEX_URL needed (unlike cmeel-metis/cmeel-gklib's
+          # own riscv64-specific build-time dependency, which has no public
+          # upstream wheel at all).
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG
+          # SPIRV-Tools is an 11-binary toolchain build (spirv-as/-opt/-link/
+          # -reduce/-diff/-lint/-val/-dis/-cfg/-objdump plus a lesspipe.sh
+          # script) with no cross-package .so to repair: cmeel installs
+          # everything into its own shared prefix, and the one real .so
+          # (libSPIRV-Tools-shared.so) has no external cmeel-* runtime
+          # dependency to resolve.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for b in ("as", "opt", "link", "reduce", "diff", "lint", "val", "dis", "cfg", "objdump"):
+              assert f"cmeel.prefix/bin/spirv-{b}" in names, (b, names)
+          assert "cmeel.prefix/lib/libSPIRV-Tools-shared.so" in names, names
+          assert "cmeel.prefix/include/spirv-tools/libspirv.h" in names, names
+          assert "cmeel.prefix/share/cmeel-spirv-tools/LICENSE" in names, names
+          EOF
+
+      - name: Smoke-test the built library and tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q wheelhouse/*.whl
+          python3 -c "
+          import ctypes, pathlib, sysconfig
+          prefix = pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix'
+          handle = ctypes.CDLL(str(prefix / 'lib/libSPIRV-Tools-shared.so'))
+          handle.spvContextCreate
+          print(prefix / 'lib/libSPIRV-Tools-shared.so')
+          "
+          "$(python3 -c "import pathlib, sysconfig; print(pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix/bin/spirv-dis')")" --version
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-spirv-tools-${{ env.CMEEL_SPIRV_TOOLS_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-spirv-tools ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: cmeel-spirv-tools-${{ matrix.version }}-py3-none-manylinux_riscv64
