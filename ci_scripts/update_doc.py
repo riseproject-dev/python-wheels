@@ -32,7 +32,7 @@ from pathlib import Path
 
 import yaml
 
-REPO = "riseproject-dev/python-wheels"
+from github_issues import REPO, normalize_name
 CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
@@ -45,13 +45,6 @@ BUILD_MATRIX = json.loads(os.environ.get("BUILD_MATRIX", "[]"))
 
 def find_wheel_files(path):
     return sorted(Path(path).glob("*.whl"))
-
-
-def normalize_name(name):
-    """
-    https://packaging.python.org/en/latest/specifications/name-normalization/#name-normalization
-    """
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 # "License :: OSI Approved :: BSD License" -> "BSD"

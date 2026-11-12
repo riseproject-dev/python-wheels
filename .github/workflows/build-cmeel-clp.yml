@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-clp/blob/v1.17.11.c2/.github/workflows/release.yml
+name: Build cmeel-clp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-clp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-clp.yml'
+      - 'docs/packages/cmeel-clp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-clp.yml'
+      - 'docs/packages/cmeel-clp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-clp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-clp ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_CLP_VERSION: ${{ matrix.version }}
+
+    steps:
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter.
+      - name: Checkout cmeel-clp v${{ env.CMEEL_CLP_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-clp
+          ref: v${{ env.CMEEL_CLP_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject.toml's build-system.requires pulls in cmeel-coinutils
+          # with no version pin; without PIP_EXTRA_INDEX_URL, pip's
+          # build-isolation install only sees the default PyPI index (where
+          # cmeel-coinutils has no riscv64 wheel), so it would fall back to
+          # building cmeel-coinutils from its sdist instead of installing our
+          # already-published riscv64 wheel. Unlike cmeel-metis's own
+          # bolted-on target_link_libraries patch for GKlib, this wrapper's
+          # CMakeLists.txt resolves CoinUtils the standard way (pkg_check_modules,
+          # confirmed against the real cmake-wheel/cmeel-clp source) and bakes
+          # -Wl,-rpath,'$ORIGIN/../lib' itself, so once CoinUtils installs
+          # from a wheel at build time, the RPATH it finds is already correct
+          # for the shared cmeel.prefix/lib layout at runtime.
+          CIBW_ENVIRONMENT: >-
+            CMEEL_LOG_LEVEL=DEBUG
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets
+          # itself.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "cmeel.prefix/lib/libClp.so.1.14.11" in names, names
+          assert "cmeel.prefix/lib/libClpSolver.so.1.14.11" in names, names
+          assert "cmeel.prefix/bin/clp" in names, names
+          EOF
+
+      - name: Smoke-test the built library
+        env:
+          # cmeel-clp's requires_dist includes cmeel-coinutils with no version
+          # pin; without this, the plain venv's pip only sees the default
+          # PyPI index (no riscv64 wheel for cmeel-coinutils there) and falls
+          # back to building it from sdist.
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q --only-binary :all: wheelhouse/*.whl
+          python3 -c "
+          import ctypes, pathlib, sysconfig
+          lib = pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix/lib/libClp.so'
+          handle = ctypes.CDLL(str(lib))
+          print(lib)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-clp-${{ env.CMEEL_CLP_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-clp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: cmeel-clp-${{ matrix.version }}-py3-none-manylinux_riscv64

@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `manylinux` job of
+# https://github.com/sparckles/robyn/blob/v0.88.0/.github/workflows/release-CI.yml
+name: Build robyn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/robyn.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robyn.yml'
+      - 'docs/packages/robyn.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robyn.yml'
+      - 'docs/packages/robyn.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: robyn
+      version: ${{ inputs.version }}
+      # robyn==0.88.0 pins uvloop>=0.22.1,<0.23, and pypi.riseproject.dev only has a
+      # cp311+ riscv64 wheel for uvloop 0.22.1 (cp310 stopped at the earlier 0.21.0
+      # build) - cp310 can't even install its own test dependencies, let alone run
+      # them (gotcha 17's dep-wheel pattern, same shape as onnxruntime-genai's cp311).
+      python-exclude: 'cp39 cp310'
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build robyn ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      ROBYN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout robyn v${{ env.ROBYN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sparckles/robyn
+          ref: v${{ env.ROBYN_VERSION }}
+          persist-credentials: false
+
+      # No musl target: rustup.rs ships no riscv64 musl toolchain.
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: --release --out dist --interpreter python3.11 python3.12 python3.13 python3.14
+          rust-toolchain: stable
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Verify the wheels ship the compiled extension
+        run: |
+          set -euo pipefail
+          ls -lh dist/
+          for whl in dist/*.whl; do
+            python3 - "$whl" <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.startswith("robyn/") and n.endswith(".so")]
+          assert sos, names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") or n.endswith(".dist-info/LICENSE") for n in names), names
+          print(sys.argv[1], "->", sos)
+          EOF
+          done
+          [ "$(ls dist/*.whl | wc -l)" -eq 4 ]
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: robyn-${{ env.ROBYN_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test robyn ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+
+    env:
+      ROBYN_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+
+    steps:
+      - name: Checkout robyn v${{ env.ROBYN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sparckles/robyn
+          ref: v${{ env.ROBYN_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: robyn-${{ env.ROBYN_VERSION }}-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel and its runtime + test dependencies
+        run: |
+          # dist/ holds every interpreter's wheel (one build_wheels job, shared
+          # artifact); dist/*.whl would hand uv several robyn wheels at once and
+          # it refuses with "conflicting URLs for package robyn". Install only
+          # the one built for this leg's interpreter.
+          # jinja2 is robyn's own optional "templating" extra
+          # (pyproject.toml's [project.optional-dependencies]), not part of
+          # its pinned runtime deps or its own dependency-groups.test list,
+          # but unit_tests/test_templating.py imports robyn.templating
+          # unconditionally, which imports jinja2 at module level - so it's
+          # needed here even though upstream's own test dependency group
+          # omits it (upstream must install it via a separate `[all]`/
+          # `[templating]` extras step elsewhere in its own dev setup).
+          pytag="cp$(echo "${{ matrix.python-version }}" | tr -d '.')"
+          uv pip install --only-binary orjson,uvloop dist/robyn-*-"${pytag}"-*.whl \
+            pytest==9.1.1 requests==2.28.2 websocket-client==1.5.0 "jinja2>=3.1.6,<4.0.0"
+
+      - name: Test wheel
+        run: |
+          # The checkout above puts upstream's own uncompiled `robyn/` Python-source
+          # package (no .so, just robyn/__init__.py and friends) at the job's cwd,
+          # which every step below also runs from. CPython resolves `import robyn`
+          # against cwd before site-packages, so it silently shadowed the installed
+          # wheel and failed deeper inside with "No module named 'robyn.robyn'" (the
+          # compiled extension only exists in the wheel). unit_tests/ is a sibling
+          # directory and doesn't reach into robyn/, so removing it here is safe and
+          # makes the installed wheel - the thing actually under test - the only
+          # `robyn` on sys.path.
+          rm -rf robyn
+          python -c "import robyn.robyn as m; assert m.__file__.endswith('.so'), m.__file__"
+          pytest unit_tests -m "not benchmark"
+
+  publish:
+    name: Publish robyn ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: robyn-${{ matrix.version }}-manylinux_riscv64
