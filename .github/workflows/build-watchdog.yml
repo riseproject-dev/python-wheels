@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/gorakhargosh/watchdog/blob/v7.1.0/.github/workflows/release.yaml
+name: Build watchdog wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/watchdog.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-watchdog.yml'
+      - 'docs/packages/watchdog.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-watchdog.yml'
+      - 'docs/packages/watchdog.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: watchdog
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build watchdog ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      WATCHDOG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout watchdog v${{ env.WATCHDOG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: gorakhargosh/watchdog
+          ref: v${{ env.WATCHDOG_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          # watchdog's setup.py only builds a C extension (_watchdog_fsevents)
+          # on macOS; the Linux build is pure Python (inotify via ctypes), so
+          # there is nothing riscv64-specific to compile here - this just
+          # produces the correctly-tagged wheel cibuildwheel's manylinux
+          # policy requires.
+          CIBW_TEST_COMMAND: python -c "from watchdog.observers import Observer; Observer()"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: watchdog-${{ env.WATCHDOG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish watchdog ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: watchdog-${{ matrix.version }}-*-manylinux_riscv64
