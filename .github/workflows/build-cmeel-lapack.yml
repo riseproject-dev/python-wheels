@@ -16,11 +16,13 @@ on:
     paths:
       - '.github/workflows/build-cmeel-lapack.yml'
       - 'docs/packages/cmeel-lapack.yaml'
+      - 'patches/cmeel-lapack/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-cmeel-lapack.yml'
       - 'docs/packages/cmeel-lapack.yaml'
+      - 'patches/cmeel-lapack/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -64,6 +66,15 @@ jobs:
           submodules: true
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch LAPACK source
+        run: git -C lapack apply ../python-wheels/patches/cmeel-lapack/${{ env.CMEEL_LAPACK_VERSION }}/*.patch
+
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
@@ -76,10 +87,15 @@ jobs:
           # Fortran/C with no architecture-specific code path anywhere in its
           # own CMakeLists.txt (confirmed against the real v3.12.1 source):
           # unlike OpenBLAS's per-arch optimized kernels, this needs no patch
-          # or CMAKE_POLICY_VERSION_MINIMUM override (its own floor is 3.13,
-          # already above cmeel[build]'s CMake >= 4 floor of 3.5).
-          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets
-          # itself.
+          # for CMAKE_POLICY_VERSION_MINIMUM (its own floor is 3.13, already
+          # above cmeel[build]'s CMake >= 4 floor of 3.5). It does need our
+          # own patches/cmeel-lapack patch above, though: contrary to this
+          # comment's own earlier claim, cmeel the build-backend has no RPATH
+          # mechanism of its own (confirmed against its real source - its
+          # only runtime-path handling is an LD_LIBRARY_PATH shim for
+          # cmeel_run()-wrapped executables, not for raw .so files); without
+          # our patch, liblapack.so can't find its own sibling libblas.so at
+          # runtime once CMake's install step strips its build RPATH.
           CIBW_REPAIR_WHEEL_COMMAND: ""
 
       - name: Check wheel contents
