@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-m4/blob/v1.4.20.c0/.github/workflows/release.yml
+name: Build cmeel-m4 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-m4.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-m4.yml'
+      - 'docs/packages/cmeel-m4.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-m4.yml'
+      - 'docs/packages/cmeel-m4.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-m4
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-m4 ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_M4_VERSION: ${{ matrix.version }}
+
+    steps:
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter.
+      - name: Checkout cmeel-m4 v${{ env.CMEEL_M4_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-m4
+          ref: v${{ env.CMEEL_M4_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Install upstream's COPYING into the wheel
+        run: |
+          # The real published wheel (cmeel_m4-1.4.20-0-py3-none-manylinux_2_28_x86_64.whl,
+          # confirmed via unzip -l) ships no LICENSE/COPYING file at all - a gap against
+          # patching-and-licensing.md's "wheel carries the LICENSE file(s) from the
+          # upstream source" rule, present in the upstream cmake-wheel/cmeel-m4 wrapper
+          # itself on every platform, not riscv64-specific. GNU m4's own release tarball
+          # ships COPYING at its top level (confirmed: tar -tJf m4-1.4.20.tar.xz). This
+          # wrapper's ExternalProject_Add(m4 ...) uses BUILD_IN_SOURCE ON with no explicit
+          # SOURCE_DIR, so CMake's own default applies (confirmed against the real
+          # ExternalProject.cmake module source, not guessed): SOURCE_DIR =
+          # <CMAKE_CURRENT_BINARY_DIR>/m4-prefix/src/m4, and its single-top-level-directory
+          # extraction logic (ExternalProject/extractfile.cmake.in) renames m4-1.4.20/
+          # directly onto that SOURCE_DIR, so COPYING lands at
+          # <bin>/m4-prefix/src/m4/COPYING once the build step runs - before the top-level
+          # install() rules execute. Add a second install(FILES ...) rule beside the
+          # existing "dummy README.md" one, pointing at that path.
+          sed -i '/^install(FILES "README.md" DESTINATION "share\/cmeel-\${NAME}\/")$/a install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${NAME}-prefix/src/${NAME}/COPYING" DESTINATION "share/cmeel-${NAME}/")' CMakeLists.txt
+          grep -n COPYING CMakeLists.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG
+          # m4 is a build-time tool (bin/m4 only, no .so); cmeel installs into a
+          # shared prefix with no cross-package library linking here to repair.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "cmeel.prefix/bin/m4" in names, names
+          assert "cmeel.prefix/share/cmeel-m4/COPYING" in names, names
+          EOF
+
+      - name: Smoke-test the built binary
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q wheelhouse/*.whl
+          m4 --version
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-m4-${{ env.CMEEL_M4_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-m4 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: cmeel-m4-${{ matrix.version }}-py3-none-manylinux_riscv64
