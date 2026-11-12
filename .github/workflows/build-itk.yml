@@ -109,6 +109,16 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch ITK
+        run: git apply --directory=itk-src python-wheels/patches/itk/${{ env.ITK_VERSION }}/0001-*.patch
+
       # Same OOM guard build-vtk.yml needs for a comparably large build; ITK's wrap codegen
       # (CastXML runs over every wrapped class for every pixel type/dimension combination)
       # generates substantially more translation units than that build's, so this is sized up.
@@ -150,32 +160,28 @@ jobs:
             # support and is itself another from-source ExternalProject dependency; ITK
             # already falls back to its default Pool threader without it.
             #
-            # _Float128 -> long double (forwarded to the from-source-built CastXML/Clang
-            # 18.1.3 via Wrapping's --castxml-cc-gnu "${CMAKE_CXX_FLAGS}") works around
-            # that Clang not recognizing _Float128 as a type on riscv64, which this
+            # _Float128 -> long double works around the from-source-built CastXML/Clang
+            # 18.1.3 toolchain not recognizing _Float128 as a type on riscv64, which this
             # image's glibc declares unconditionally in bits/mathcalls.h once it sees a
             # Clang new enough. long double is already IEEE binary128 on riscv64, so the
-            # substitution is exact for Clang's purposes. But CMAKE_CXX_FLAGS is also the
-            # literal flags CMake hands to the real GCC build of ITK's own C++ library
-            # code (not just the forwarded castxml-cc-gnu string) - and GCC's riscv64
-            # glibc/libstdc++ headers carry separate template specializations keyed on
-            # _Float128 and on long double (e.g. __iseqsig_type, numeric_limits). Text-
-            # substituting one into the other under GCC collapses both specializations
-            # into one and fails with "redefinition of struct ...". Guarding the #define
-            # to Clang only keeps it scoped to the CastXML forwarding it was written for.
-            # The #define is put in its own header and pulled in with -include rather
-            # than passed as -D_Float128=long\ double on the command line: that flag
-            # string crosses bash (this heredoc), cmake's -D parsing, cmake's own
-            # Ninja-rule serialization, and ninja's /bin/sh -c re-invocation, and the
-            # escaped space does not survive all four - CMake re-emits CMAKE_CXX_FLAGS
-            # into build.ninja without preserving the backslash, so sh -c re-splits it
-            # into two words and "double" gets passed to the compiler as a bogus input
-            # file. A path has no embedded space to lose, so -include sidesteps the
-            # whole chain.
+            # substitution is exact for Clang's purposes. This used to be forwarded via
+            # CMAKE_CXX_FLAGS (the same string GCC's real build of ITK's own C++ library
+            # sources reads directly, whose riscv64 glibc/libstdc++ headers carry separate
+            # template specializations keyed on _Float128 and on long double - e.g.
+            # __iseqsig_type, numeric_limits - that the substitution collapses into one and
+            # breaks), guarded to #ifdef __clang__ to keep it off that GCC build. But
+            # Wrapping/macro_files/itk_auto_load_submodules.cmake's own castxml-cc-gnu
+            # probe copies that same CMAKE_CXX_FLAGS string and runs it through the real
+            # GNU compiler (CastXML's detectCC_GNU(), never Clang) to dump its predefined
+            # macros for its own internal Clang parse to use - so the __clang__ guard
+            # excluded it from the probe just as much as from the real build, reproducing
+            # the exact pre-workaround error one leg over. patches/itk/5.4.7's own patch
+            # moves this -include into castxml-cc-gnu's own flags specifically (right
+            # where itk_auto_load_submodules.cmake builds them up), so it reaches the
+            # probe without ever reaching GCC's real library build - the #define no longer
+            # needs the __clang__ guard, since CMAKE_CXX_FLAGS itself no longer carries it.
             cat > /work/float128-workaround.h <<'HDREOF'
-          #if defined(__clang__)
           #define _Float128 long double
-          #endif
           HDREOF
 
             "${cmake}" -S "${source_path}" -B "${build_path}" -G Ninja \
@@ -184,7 +190,7 @@ jobs:
               -DPython3_EXECUTABLE:FILEPATH="${python_exe}" \
               -DPython3_INCLUDE_DIR:PATH="${python_include}" \
               -DCMAKE_CXX_COMPILER_TARGET:STRING="$(uname -m)-linux-gnu" \
-              -DCMAKE_CXX_FLAGS:STRING="-O3 -DNDEBUG -include /work/float128-workaround.h" \
+              -DCMAKE_CXX_FLAGS:STRING="-O3 -DNDEBUG" \
               -DCMAKE_C_FLAGS:STRING="-O3 -DNDEBUG" \
               -DITK_C_OPTIMIZATION_FLAGS:STRING= \
               -DITK_CXX_OPTIMIZATION_FLAGS:STRING= \
