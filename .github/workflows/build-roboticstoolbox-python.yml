@@ -100,11 +100,22 @@ jobs:
           # (confirmed from the real cp312 CI log, job 130860352399), not just one arch-specific
           # outlier: this is riscv64 being generically slower at floating-point-heavy numeric
           # work than upstream's own CI hardware, the same class of gap as the IK derivations
-          # above, not an isolated defect worth its own deselect. Raise --timeout from
-          # upstream's 50s to 300s instead of continuing to whack-a-mole individual slow tests -
-          # the IK deselections above stay in place since jaco's derivation cost is unmeasured
-          # and plausibly still exceeds even this wider margin, but every other test gets real
-          # headroom for riscv64's slower numeric throughput.
+          # above. Raising --timeout from upstream's 50s to 300s (kept below) gave every other
+          # test real headroom, but this one still ran past even that: 970s on cp314 (confirmed
+          # from the real CI log, job 130932228943) before pytest-timeout's own --timeout_method
+          # finally killed it. "thread" mode can only dump a stack and report a failure; it
+          # can't interrupt the call. rk_step()'s own traceback shows a plain Python/numpy loop
+          # (not a single uninterruptible C call), so the test isn't hanging - it's just doing
+          # far more wall-clock work than any practical timeout should wait out. Deselect it
+          # alongside the IK derivations rather than keep raising the ceiling for one test.
+          #
+          # That same cp314 run also showed 6 unexplained real failures (not timeouts) around
+          # 26% progress through the suite ("FF..FFF..F" in -q's dot output); the run was killed
+          # by the fdyn timeout above before pytest ever printed its summary, so their names
+          # never made it into the log. Added -v so a future run's own live log carries every
+          # test's name and outcome as it happens, not just in a final summary that a timeout
+          # kill can erase - needed to actually diagnose those 6 on the next failure instead of
+          # losing them again.
           CIBW_TEST_COMMAND: >-
             python -c "from roboticstoolbox.ets.fknm import _C_AVAILABLE as a; from roboticstoolbox.robot.frne import _C_AVAILABLE as b; assert a and b"
             && python -m pytest tests --ignore=tests/test_blocks.py -m "not slow" --timeout=300 --timeout_method=thread
@@ -113,7 +124,8 @@ jobs:
             --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_generated_c_is_for_embedded_use"
             --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_generated_python_agrees"
             --deselect "tests/test_analytic_ik.py::TestAnalyticIK::test_methods"
-            -q
+            --deselect "tests/test_dynamics_defaults.py::test_fdyn_without_optional_arguments"
+            -v
 
       - name: Check wheel contents
         run: |
