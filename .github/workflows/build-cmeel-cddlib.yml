@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-cddlib/blob/v0.94.13.c2/.github/workflows/release.yml
+name: Build cmeel-cddlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-cddlib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-cddlib.yml'
+      - 'docs/packages/cmeel-cddlib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-cddlib.yml'
+      - 'docs/packages/cmeel-cddlib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-cddlib
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-cddlib ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_CDDLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter.
+      - name: Checkout cmeel-cddlib v${{ env.CMEEL_CDDLIB_VERSION }}.c2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-cddlib
+          ref: v${{ env.CMEEL_CDDLIB_VERSION }}.c2
+          submodules: true
+          persist-credentials: false
+
+      - name: Install upstream's COPYING into the wheel
+        run: |
+          # The real published wheel (cmeel_cddlib-0.94.13-2-py3-none-manylinux_2_28_x86_64.whl,
+          # confirmed via unzip -l) ships no LICENSE/COPYING file at all - the same gap
+          # already found and fixed for cmeel-m4/cmeel-glpk, present in the upstream
+          # cmake-wheel/cmeel-cddlib wrapper itself on every platform, not riscv64-specific.
+          # cddlib's own release tarball (cddlib-0.94m.tar.gz, the ORIGINAL_VERSION this
+          # tag's CMakeLists.txt pins, confirmed by reading it at this exact tag rather
+          # than the "cmeel" dev branch's newer 0.94n) ships COPYING at its top level
+          # (confirmed: tar -tzf cddlib-0.94m.tar.gz). This wrapper's
+          # ExternalProject_Add(cddlib ...) uses BUILD_IN_SOURCE ON with no explicit
+          # SOURCE_DIR, so CMake's own documented default applies (confirmed against the
+          # real ExternalProject.cmake module source and its extractfile.cmake.in
+          # single-top-level-directory-rename logic, not guessed): SOURCE_DIR =
+          # <CMAKE_CURRENT_BINARY_DIR>/cddlib-prefix/src/cddlib, so COPYING lands there
+          # once the build step runs, before the top-level install() rules execute. Add
+          # a second install(FILES ...) rule beside the wrapper's existing "dummy
+          # README.md" one, pointing at that path.
+          sed -i '/^install(FILES README.md DESTINATION share\/cmeel-\${NAME}\/)$/a install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${NAME}-prefix/src/${NAME}/COPYING" DESTINATION share/cmeel-${NAME}/)' CMakeLists.txt
+          grep -n COPYING CMakeLists.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG
+          # cddlib is a leaf dependency (requires_dist: cmeel only), no cross-package
+          # library linking here to repair; cmeel installs into a shared prefix.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "cmeel.prefix/lib/libcdd.so" in names, names
+          assert "cmeel.prefix/include/cddlib/cdd.h" in names, names
+          assert "cmeel.prefix/share/cmeel-cddlib/COPYING" in names, names
+          EOF
+
+      - name: Smoke-test the built library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q wheelhouse/*.whl
+          python3 -c "
+          import ctypes, pathlib, sysconfig
+          lib = pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix/lib/libcdd.so'
+          handle = ctypes.CDLL(str(lib))
+          handle.dd_AValue
+          print(lib)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-cddlib-${{ env.CMEEL_CDDLIB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-cddlib ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: cmeel-cddlib-${{ matrix.version }}-py3-none-manylinux_riscv64
