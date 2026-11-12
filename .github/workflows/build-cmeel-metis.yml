@@ -64,7 +64,7 @@ jobs:
           submodules: true
           persist-credentials: false
 
-      - name: Patch METIS's -march=native for riscv64
+      - name: Patch METIS's -march=native and the wrapper's broken RPATH for riscv64
         run: |
           # The wrapper's own CMakeLists.txt already PATCH_COMMANDs the
           # fetched KarypisLab/METIS v5.2.1 tarball to bump its bundled
@@ -105,7 +105,35 @@ jobs:
           )
           assert old in text, "expected cmeel-metis PATCH_COMMAND block not found; wrapper CMakeLists.txt may have changed upstream"
           new = '  PATCH_COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/metis-riscv64-patches.sh\n'
-          p.write_text(text.replace(old, new, 1))
+          text = text.replace(old, new, 1)
+
+          # The wrapper's own top-level CMakeLists.txt (this file, checked out
+          # above, not METIS's fetched tarball) sets its Linux ORIGIN variable
+          # to the CMake string literal "\$\$ORIGIN" (two literal dollar
+          # signs), on the assumption it will pass through one layer of GNU
+          # Make "$$"->"$" unescaping before reaching the linker. Confirmed
+          # against the real wrapper source (cmake-wheel/cmeel-metis v5.2.1.1.c0)
+          # and the real CI log (readelf -d on the built libmetis.so: RPATH
+          # "$$ORIGIN/../lib", baked in literally) that this never happens:
+          # CONFIGURE_COMMAND hands it to METIS's own `make config` as the
+          # LDFLAGS *environment variable*, and Make's "$$" escaping only
+          # rewrites characters written directly in Makefile source text, not
+          # the contents of an environment variable it merely forwards -- so
+          # the double dollar survives unchanged into the linker command,
+          # producing a malformed RPATH that never resolves at runtime
+          # ("libGKlib.so: cannot open shared object file"), confirmed via the
+          # diagnostic step below. This is a genuine one-character upstream
+          # wrapper bug (present for every platform, not riscv64-specific),
+          # not something either of our own patches above introduced; fix it
+          # here so the RPATH actually baked into libmetis.so is the single-
+          # dollar "$ORIGIN/../lib" every other cmeel-*-depends-on-cmeel-*
+          # package in this repo already resolves correctly (e.g. cmeel-clp).
+          old_origin = '  set(ORIGIN "\\$\\$ORIGIN")\n'
+          assert old_origin in text, "expected cmeel-metis ORIGIN variable not found; wrapper CMakeLists.txt may have changed upstream"
+          new_origin = '  set(ORIGIN "\\$ORIGIN")\n'
+          text = text.replace(old_origin, new_origin, 1)
+
+          p.write_text(text)
           PYEOF
           cat CMakeLists.txt
 
