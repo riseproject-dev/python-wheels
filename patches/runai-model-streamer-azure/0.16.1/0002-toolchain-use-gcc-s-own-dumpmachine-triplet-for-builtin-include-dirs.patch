@@ -1,0 +1,134 @@
+From 75c45793987328b8011252f0f24950e94456b336 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 08:01:06 +0000
+Subject: [PATCH] toolchain: use gcc's own -dumpmachine triplet for builtin
+ include dirs
+
+configure_toolchain()'s cxx_builtin_include_directories are built from the
+same os+arch naming-convention triplet (<arch>-linux-gnu) used to resolve
+tool paths (/usr/bin/<arch>-linux-gnu-<tool>). That equivalence holds for a
+genuine Debian cross-toolchain package (a real x86_64-linux-gnu-gcc reports
+exactly that as its own -dumpmachine), but not when the tool path is a
+same-arch *native* compiler reachable only via a symlink under the expected
+name -- its own compiled-in builtin search path (/usr/lib/gcc/<real
+triplet>/<ver>/include, etc.) still uses its real vendor triplet regardless
+of what name it is invoked under.
+
+This is exactly riscv64's manylinux_riscv64 image: gcc is Red Hat's native
+riscv64-redhat-linux build, symlinked to /usr/bin/riscv64-linux-gnu-gcc so
+runai_crosstool_tools() finds it. Bazel's own absolute-path sandboxing then
+rejects gcc's builtin headers (e.g. stddef.h) because
+/usr/lib/gcc/riscv64-redhat-linux/<ver>/include is not in the declared
+riscv64-linux-gnu-based list.
+
+Thread the compiler's actual -dumpmachine output down as gcc_machine and use
+it (falling back to the naming-convention triplet when unset, so x86_64 and
+aarch64 are unaffected) for cxx_builtin_include_directories specifically,
+while tool_paths keeps using the naming-convention triplet the workflow's
+symlinks provide.
+
+Upstream-Status: To upstream [this port does not open issues/PRs against third-party repos; making cxx_builtin_include_directories match the compiler's own reported triplet is a general robustness fix upstream would likely want]
+---
+ cpp/toolchain/configure.bzl          |  7 ++++++-
+ cpp/toolchain/template/toolchain.bzl | 23 ++++++++++++++++++++---
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/cpp/toolchain/configure.bzl b/cpp/toolchain/configure.bzl
+index 9a04125..510ef90 100644
+--- a/cpp/toolchain/configure.bzl
++++ b/cpp/toolchain/configure.bzl
+@@ -11,6 +11,10 @@ def _get_gcc_version(repository_ctx, arch):
+     gcc_tool = runai_crosstool_tools(get_target_triplet(OS, arch))["gcc"]
+     return repository_ctx.execute([gcc_tool, "-dumpversion"]).stdout.strip()
+ 
++def _get_gcc_machine(repository_ctx, arch):
++    gcc_tool = runai_crosstool_tools(get_target_triplet(OS, arch))["gcc"]
++    return repository_ctx.execute([gcc_tool, "-dumpmachine"]).stdout.strip()
++
+ def _get_host_arch(repository_ctx):
+     return repository_ctx.execute(["/usr/bin/uname", "-m"]).stdout.strip()
+ 
+@@ -18,9 +22,10 @@ def _cc_autoconf_toolchain_impl(repository_ctx):
+     define_statements = []
+     for arch in ARCHITECTURES:
+         gcc_version = _get_gcc_version(repository_ctx, arch)
++        gcc_machine = _get_gcc_machine(repository_ctx, arch)
+         host_arch = _get_host_arch(repository_ctx)
+         toolchain_name = arch
+-        define_statements.append('define_toolchain(name = "%s", os = "%s", host_arch = "%s", arch = "%s", gcc_version = "%s")' % (toolchain_name, OS, host_arch, arch, gcc_version))
++        define_statements.append('define_toolchain(name = "%s", os = "%s", host_arch = "%s", arch = "%s", gcc_version = "%s", gcc_machine = "%s")' % (toolchain_name, OS, host_arch, arch, gcc_version, gcc_machine))
+ 
+     repository_ctx.template(
+         "BUILD",
+diff --git a/cpp/toolchain/template/toolchain.bzl b/cpp/toolchain/template/toolchain.bzl
+index 6a4c6cf..36daffc 100644
+--- a/cpp/toolchain/template/toolchain.bzl
++++ b/cpp/toolchain/template/toolchain.bzl
+@@ -73,6 +73,15 @@ def _impl(ctx):
+     target_triplet = get_target_triplet(ctx.attr.os, ctx.attr.arch)
+     tool_paths = [tool_path(name = k, path = v) for k, v in runai_crosstool_tools(target_triplet).items()]
+ 
++    # gcc_machine is the triplet gcc itself reports (`gcc -dumpmachine`), which is
++    # what its own builtin include search path is actually built from. It is
++    # normally identical to target_triplet (a real x86_64-linux-gnu/aarch64-linux-gnu
++    # cross-gcc reports exactly that), but differs when the "gcc" behind
++    # target_triplet's tool path is a same-arch native compiler under a different
++    # vendor triplet (e.g. Red Hat's riscv64-redhat-linux) made reachable only by a
++    # symlink under the expected name.
++    include_triplet = ctx.attr.gcc_machine if ctx.attr.gcc_machine else target_triplet
++
+     # Documented at
+     # https://docs.bazel.build/versions/main/skylark/lib/cc_common.html#create_cc_toolchain_config_info.
+     #
+@@ -89,7 +98,7 @@ def _impl(ctx):
+         abi_version = "unknown",
+         abi_libc_version = "unknown",
+         tool_paths = tool_paths,
+-        cxx_builtin_include_directories = _get_include_directories(target_triplet, ctx.attr.gcc_version, ctx.attr.use_cross),
++        cxx_builtin_include_directories = _get_include_directories(include_triplet, ctx.attr.gcc_version, ctx.attr.use_cross),
+         features = features
+     )
+ 
+@@ -111,6 +120,11 @@ _toolchain_config = rule(
+             mandatory = True,
+             doc = "GCC major version to use (eg: 9)",
+         ),
++        "gcc_machine": attr.string(
++            mandatory = False,
++            default = "",
++            doc = "The triplet `gcc -dumpmachine` reports, if it differs from os/arch's own naming convention",
++        ),
+         "use_cross": attr.bool(
+             mandatory = False,
+             default = False,
+@@ -121,7 +135,7 @@ _toolchain_config = rule(
+ )
+ 
+ 
+-def define_toolchain(name, os, host_arch, arch, gcc_version):
++def define_toolchain(name, os, host_arch, arch, gcc_version, gcc_machine = ""):
+     """"define_toolchain creates rules for a cc_toolchain.
+ 
+     This expects toolchain tools to exist at a canonical path.
+@@ -134,6 +148,9 @@ def define_toolchain(name, os, host_arch, arch, gcc_version):
+       host_arch: The host architecture for this toolchain
+       arch: The target architecture for this toochain
+       gcc_version: The GCC version of this toolchain
++      gcc_machine: The triplet `gcc -dumpmachine` reports for this toolchain's
++        compiler, if it differs from the os/arch naming convention used for
++        the tool paths themselves
+     """
+ 
+     native.platform(
+@@ -145,7 +162,7 @@ def define_toolchain(name, os, host_arch, arch, gcc_version):
+     )
+ 
+     toolchain_config_name = "%s_toolchain_config" % name
+-    _toolchain_config(name = toolchain_config_name, os = os, arch = arch, gcc_version = gcc_version, use_cross = host_arch != arch)
++    _toolchain_config(name = toolchain_config_name, os = os, arch = arch, gcc_version = gcc_version, gcc_machine = gcc_machine, use_cross = host_arch != arch)
+ 
+     empty_target_name = "%s_empty" % name
+     empty_target_label = ":%s" % empty_target_name
+-- 
+2.43.0
+
