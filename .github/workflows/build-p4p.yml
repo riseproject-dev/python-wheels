@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the manylinux leg of upstream's own
+#   https://github.com/epics-base/p4p/blob/4.2.2/.github/workflows/build.yml
+name: Build p4p wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/p4p.yaml not released yet'
+        required: false
+        default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-p4p.yml'
+      - 'docs/packages/p4p.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-p4p.yml'
+      - 'docs/packages/p4p.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  P4P_REPO: epics-base/p4p
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: p4p
+      version: ${{ inputs.version }}
+
+  python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    # p4p's own setup.py cythonizes its two Extensions (p4p._p4p, p4p._gw) at
+    # parse time (setuptools_dso's cythonize()), and nothing in that source
+    # tree is arch-specific, so build the sdist once on x86 rather than on a
+    # scarce riscv runner (same shape as pvxslibs'/epicscorelibs' own
+    # python_sdist job).
+    name: Build p4p ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    env:
+      P4P_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout p4p v${{ env.P4P_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ env.P4P_REPO }}
+          ref: ${{ env.P4P_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # setup.py imports epicscorelibs.path/version and pvxslibs.path/version
+      # at parse time (to locate their headers/compiled libs and read their
+      # ABI-compatible version pins), and setuptools_dso's cythonize() needs
+      # Cython present too - all four must be importable before `sdist` can
+      # even run, same as pvxslibs needing setuptools_dso+epicscorelibs.
+      - name: Build sdist
+        run: |
+          set -euo pipefail
+          uv pip install setuptools wheel numpy 'setuptools_dso>=2.11a2' Cython epicscorelibs pvxslibs
+          python setup.py sdist --formats=gztar
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: p4p-${{ env.P4P_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build p4p ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      P4P_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: p4p-${{ env.P4P_VERSION }}-sdist
+
+      - name: Extract sdist
+        run: |
+          set -euo pipefail
+          mkdir p4p
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}"/*.tar.gz \
+            --strip-components=1 -C p4p
+
+      # Upstream's own manylinux job (build.yml) resolves setuptools_dso,
+      # Cython, numpy, epicscorelibs and pvxslibs from PyPI before building;
+      # point pip at our own registry too so epicscorelibs/pvxslibs (which
+      # have no riscv64 sdist build story of their own) resolve as the
+      # already-published wheels instead of falling back to source.
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          package-dir: p4p
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=${{ env.PIP_EXTRA_INDEX_URL }}
+            PIP_ONLY_BINARY=epicscorelibs,pvxslibs
+          # p4p._p4p and p4p._gw both link pvxslibs.lib.pvxs and
+          # epicscorelibs.lib.Com directly (setup.py's dsos=[...]), and
+          # libpvxs.so itself links libCom/libdbCore/libdbRecStd from
+          # epicscorelibs transitively - exclude all four from auditwheel
+          # repair, same as pvxslibs' own build excludes the epicscorelibs
+          # trio (gotcha 17's dep-wheel pattern); they resolve at runtime via
+          # the pvxslibs/epicscorelibs wheels' own $ORIGIN RPATH.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude 'libpvxs.so*' --exclude 'libCom.so*'
+            --exclude 'libdbCore.so*' --exclude 'libdbRecStd.so*'
+          CIBW_TEST_REQUIRES: nose2
+          CIBW_TEST_COMMAND: >-
+            python -c "import p4p; print('IMPORT', p4p.__file__)"
+            && python -m nose2 -v p4p
+
+      - name: Check the wheel ships both extensions and the licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              for ext in ("_p4p", "_gw"):
+                  assert any(n.startswith(f"p4p/{ext}.") and n.endswith(".so") for n in names), (whl, ext)
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert "LICENSE" in licences, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: p4p-${{ env.P4P_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish p4p ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: p4p-${{ matrix.version }}-*-manylinux_riscv64
