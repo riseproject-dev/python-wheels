@@ -180,8 +180,36 @@ jobs:
             # where itk_auto_load_submodules.cmake builds them up), so it reaches the
             # probe without ever reaching GCC's real library build - the #define no longer
             # needs the __clang__ guard, since CMAKE_CXX_FLAGS itself no longer carries it.
+            #
+            # __clang__ 1: CastXML's --castxml-cc-gnu mode (src/RunClang.cxx's
+            # detectCC_GNU()) passes -undef to its own internal Clang and splices in the
+            # real GCC probe's captured predefines as the complete builtin set, so that
+            # internal Clang parses every header with __clang__ undefined - indistinguishable
+            # from real GCC to any !defined(__clang__) guard, even though Clang is the one
+            # actually parsing. This image's GCC 14 libstdc++ (bits/stl_bvector.h) guards
+            # __attribute__((__assume__(expr))) - an arbitrary-expression GNU attribute no
+            # Clang release has ever implemented under that spelling - with exactly
+            # "#if __has_attribute(__assume__) && !defined(__clang__)", written by
+            # libstdc++'s own authors to protect Clang from this exact false-positive
+            # (Clang's __has_attribute(__assume__) recognizes the name but not GCC's
+            # semantics for it). Restoring __clang__ here is not a suppression hack: it
+            # corrects the compiler identity CastXML's own substitution logic erases, so
+            # this and every other #ifdef __clang__/__has_attribute guard in the headers
+            # sees the parser's true identity again.
+            #
+            # This does NOT make the build succeed on its own. _Float128 -> long double
+            # (above) still collides with a SEPARATE specialization glibc's math.h keeps
+            # for genuine Float128 support (__iseqsig_type<_Float128>, gated by
+            # __HAVE_FLOAT128_UNLIKE_LDBL/__GNUC_PREREQ - plain GCC-version macros, true
+            # under the spliced GCC predefines regardless of __clang__, so this fix doesn't
+            # touch it), and _Float32's own numeric_limits/literal-suffix/builtin support is
+            # simply absent from Clang 18.1.3's riscv64 TargetInfo (clang/lib/Basic/Targets/
+            # RISCV.h never sets HasFloat128/_Float32 support) - a missing target capability,
+            # not a macro-guard problem, with no flag to enable it. Both remain open; this
+            # commit resolves only the stl_bvector.h parse failure.
             cat > /work/float128-workaround.h <<'HDREOF'
           #define _Float128 long double
+          #define __clang__ 1
           HDREOF
 
             "${cmake}" -S "${source_path}" -B "${build_path}" -G Ninja \
