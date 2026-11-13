@@ -1,0 +1,498 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# ITKPythonPackage (github.com/InsightSoftwareConsortium/ITKPythonPackage, tag v5.4.7)
+# builds ITK's full Python wrapping ONCE per interpreter and then carves every wheel in
+# scripts/WHEEL_NAMES.txt out of that same tree with -DITKPythonPackage_ITK_BINARY_REUSE=ON
+# (its CMakeLists.txt's ipp_wheel_to_group logic decides which module goes in which wheel
+# from the whole ITK module graph, so the split cannot be reproduced per-wheel). This mirrors
+# scripts/internal/manylinux-build-wheels.sh's "multiple wheels" path directly rather than
+# running that script verbatim, since it has no riscv64 case for ARCH/doxygen (CLAUDE.md
+# gotcha 382, same shape as pyside6/pyside6-essentials/pyside6-addons). docs/packages/itk.yaml,
+# itk-numerics.yaml, itk-io.yaml, itk-filtering.yaml, itk-registration.yaml and
+# itk-segmentation.yaml are kept in lockstep with itk-core.yaml's versions (same build, same
+# single `setup` job), the same way build-mlx.yml keeps docs/packages/mlx-cpu.yaml in lockstep
+# with mlx.yaml.
+name: Build itk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/itk-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-itk.yml'
+      - 'docs/packages/itk-core.yaml'
+      - 'docs/packages/itk-numerics.yaml'
+      - 'docs/packages/itk-io.yaml'
+      - 'docs/packages/itk-filtering.yaml'
+      - 'docs/packages/itk-registration.yaml'
+      - 'docs/packages/itk-segmentation.yaml'
+      - 'docs/packages/itk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-itk.yml'
+      - 'docs/packages/itk-core.yaml'
+      - 'docs/packages/itk-numerics.yaml'
+      - 'docs/packages/itk-io.yaml'
+      - 'docs/packages/itk-filtering.yaml'
+      - 'docs/packages/itk-registration.yaml'
+      - 'docs/packages/itk-segmentation.yaml'
+      - 'docs/packages/itk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: itk-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build itk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # 5 days: the hard ceiling GitHub enforces for jobs on self-hosted runners. ITK's own
+    # Azure LinuxPython CI (2-core, default wrap only) is ~2h35-2h50
+    # (open.cdash.org, project Insight); this config adds unsigned_short/double/complex_double
+    # pixel types and 4-D wrapping on top of that, and has to ExternalProject-build CastXML
+    # 0.6.5 + LLVM/Clang 18.1.3 from source first since Wrapping/Generators/CastXML/CMakeLists.txt
+    # ships no riscv64 prebuilt binary (only Linux x86_64/aarch64, Windows, macOS). build-vtk.yml's
+    # comparable full-module C++ build needed most of its 48h budget on these 4-core runners;
+    # ITK's compiled payload is ~5x build-simpleitk.yml's (which itself took ~15h here, wrapping
+    # SimpleITK only, not ITK's own Python layer) - a single 48h job is not expected to be enough,
+    # but self-hosted jobs aren't capped there like build-vtk.yml's GitHub-visible precedent is;
+    # there is no cross-job checkpoint mechanism in this repo to split it further, so this uses
+    # the real ceiling instead.
+    timeout-minutes: 7000
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      ITK_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Checked out to the workspace root (no `path:`) so it lands at /work itself once the
+      # whole workspace is mounted below - pyproject_configure.py's --output-dir defaults to
+      # /work, and `python -m build .` needs that pyproject.toml next to the source it is
+      # pointed at.
+      - name: Checkout ITKPythonPackage v${{ env.ITK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: InsightSoftwareConsortium/ITKPythonPackage
+          ref: v${{ env.ITK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout ITK v${{ env.ITK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: InsightSoftwareConsortium/ITK
+          ref: v${{ env.ITK_VERSION }}
+          path: itk-src
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch ITK
+        run: git apply --directory=itk-src python-wheels/patches/itk/${{ env.ITK_VERSION }}/0001-*.patch
+
+      # Same OOM guard build-vtk.yml needs for a comparably large build; ITK's wrap codegen
+      # (CastXML runs over every wrapped class for every pixel type/dimension combination)
+      # generates substantially more translation units than that build's, so this is sized up.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 20
+
+      - name: Write container script
+        run: |
+          mkdir -p build/wheelhouse
+          cat > riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "${PYTHON_TAG}" in
+            *t) python_prefix="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}" ;;
+            *) python_prefix="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}" ;;
+          esac
+          python_exe="${python_prefix}/bin/python"
+
+          case "$1" in
+          build)
+            dnf install -y --setopt=install_weak_deps=False cmake ninja-build doxygen
+
+            # ITK's vendored third-party trees declare cmake_minimum_required below 3.5,
+            # which the image's own cmake 4.x - ahead of /usr/bin on PATH - rejects
+            # (gotcha 358). Only this standalone ITK configure/build touches those trees;
+            # the per-wheel scikit-build-core carve below only installs already-built
+            # components and never reconfigures them, so it is left to pick up whichever
+            # cmake is already on PATH.
+            cmake=/usr/bin/cmake
+            python_include=$(find -L "${python_prefix}/include" -name Python.h -printf '%h\n')
+
+            source_path=/work/itk-src
+            build_path=/work/itk-build
+
+            # Module_ITKTBB/TBB_DIR are omitted: oneTBB 2021.9.0 has no verified riscv64
+            # support and is itself another from-source ExternalProject dependency; ITK
+            # already falls back to its default Pool threader without it.
+            #
+            # _Float128 -> long double works around the from-source-built CastXML/Clang
+            # 18.1.3 toolchain not recognizing _Float128 as a type on riscv64, which this
+            # image's glibc declares unconditionally in bits/mathcalls.h once it sees a
+            # Clang new enough. long double is already IEEE binary128 on riscv64, so the
+            # substitution is exact for Clang's purposes. This used to be forwarded via
+            # CMAKE_CXX_FLAGS (the same string GCC's real build of ITK's own C++ library
+            # sources reads directly, whose riscv64 glibc/libstdc++ headers carry separate
+            # template specializations keyed on _Float128 and on long double - e.g.
+            # __iseqsig_type, numeric_limits - that the substitution collapses into one and
+            # breaks), guarded to #ifdef __clang__ to keep it off that GCC build. But
+            # Wrapping/macro_files/itk_auto_load_submodules.cmake's own castxml-cc-gnu
+            # probe copies that same CMAKE_CXX_FLAGS string and runs it through the real
+            # GNU compiler (CastXML's detectCC_GNU(), never Clang) to dump its predefined
+            # macros for its own internal Clang parse to use - so the __clang__ guard
+            # excluded it from the probe just as much as from the real build, reproducing
+            # the exact pre-workaround error one leg over. patches/itk/5.4.7's own patch
+            # moves this -include into castxml-cc-gnu's own flags specifically (right
+            # where itk_auto_load_submodules.cmake builds them up), so it reaches the
+            # probe without ever reaching GCC's real library build - the #define no longer
+            # needs the __clang__ guard, since CMAKE_CXX_FLAGS itself no longer carries it.
+            #
+            # __clang__ 1: CastXML's --castxml-cc-gnu mode (src/RunClang.cxx's
+            # detectCC_GNU()) passes -undef to its own internal Clang and splices in the
+            # real GCC probe's captured predefines as the complete builtin set, so that
+            # internal Clang parses every header with __clang__ undefined - indistinguishable
+            # from real GCC to any !defined(__clang__) guard, even though Clang is the one
+            # actually parsing. This image's GCC 14 libstdc++ (bits/stl_bvector.h) guards
+            # __attribute__((__assume__(expr))) - an arbitrary-expression GNU attribute no
+            # Clang release has ever implemented under that spelling - with exactly
+            # "#if __has_attribute(__assume__) && !defined(__clang__)", written by
+            # libstdc++'s own authors to protect Clang from this exact false-positive
+            # (Clang's __has_attribute(__assume__) recognizes the name but not GCC's
+            # semantics for it). Restoring __clang__ here is not a suppression hack: it
+            # corrects the compiler identity CastXML's own substitution logic erases, so
+            # this and every other #ifdef __clang__/__has_attribute guard in the headers
+            # sees the parser's true identity again.
+            #
+            # This does NOT make the build succeed on its own. _Float128 -> long double
+            # (above) still collides with a SEPARATE specialization glibc's math.h keeps
+            # for genuine Float128 support (__iseqsig_type<_Float128>, gated by
+            # __HAVE_FLOAT128_UNLIKE_LDBL/__GNUC_PREREQ - plain GCC-version macros, true
+            # under the spliced GCC predefines regardless of __clang__, so this fix doesn't
+            # touch it), and _Float32's own numeric_limits/literal-suffix/builtin support is
+            # simply absent from Clang 18.1.3's riscv64 TargetInfo (clang/lib/Basic/Targets/
+            # RISCV.h never sets HasFloat128/_Float32 support) - a missing target capability,
+            # not a macro-guard problem, with no flag to enable it. Both remain open; this
+            # commit resolves only the stl_bvector.h parse failure.
+            cat > /work/float128-workaround.h <<'HDREOF'
+          #define _Float128 long double
+          #define __clang__ 1
+          HDREOF
+
+            "${cmake}" -S "${source_path}" -B "${build_path}" -G Ninja \
+              -DCMAKE_BUILD_TYPE:STRING=Release \
+              -DBUILD_TESTING:BOOL=OFF \
+              -DPython3_EXECUTABLE:FILEPATH="${python_exe}" \
+              -DPython3_INCLUDE_DIR:PATH="${python_include}" \
+              -DCMAKE_CXX_COMPILER_TARGET:STRING="$(uname -m)-linux-gnu" \
+              -DCMAKE_CXX_FLAGS:STRING="-O3 -DNDEBUG" \
+              -DCMAKE_C_FLAGS:STRING="-O3 -DNDEBUG" \
+              -DITK_C_OPTIMIZATION_FLAGS:STRING= \
+              -DITK_CXX_OPTIMIZATION_FLAGS:STRING= \
+              -DWRAP_ITK_INSTALL_COMPONENT_IDENTIFIER:STRING=PythonWheel \
+              -DWRAP_ITK_INSTALL_COMPONENT_PER_MODULE:BOOL=ON \
+              -DITK_WRAP_unsigned_short:BOOL=ON \
+              -DITK_WRAP_double:BOOL=ON \
+              -DITK_WRAP_complex_double:BOOL=ON \
+              -DITK_WRAP_IMAGE_DIMS:STRING="2;3;4" \
+              -DPY_SITE_PACKAGES_PATH:PATH=. \
+              -DITK_LEGACY_SILENT:BOOL=ON \
+              -DITK_WRAP_PYTHON:BOOL=ON \
+              -DITK_WRAP_DOC:BOOL=ON \
+              -DModule_ITKTBB:BOOL=OFF \
+              -DWITH_RVV:BOOL=OFF
+            "${cmake}" --build "${build_path}" --parallel "$(nproc)"
+
+            # Pinned to upstream's own scripts/../requirements-dev.txt (v5.4.7) rather than
+            # latest, since ITKPythonPackage's CMakeLists.txt/pyproject templates are only
+            # tested against this scikit-build-core release.
+            "${python_exe}" -m pip install -U \
+              ninja==1.11.1.1 scikit-build-core==0.10.7 build==1.2.1 \
+              pyproject-metadata pathspec setuptools_scm==8.1.0
+
+            cd /work
+            mkdir -p /work/dist
+            while read -r wheel_name; do
+              [ -z "${wheel_name}" ] && continue
+              "${python_exe}" scripts/pyproject_configure.py "${wheel_name}"
+              "${python_exe}" -m build \
+                --wheel \
+                --outdir /work/dist \
+                --no-isolation \
+                --skip-dependency-check \
+                --config-setting=cmake.define.ITK_SOURCE_DIR:PATH="${source_path}" \
+                --config-setting=cmake.define.ITK_BINARY_DIR:PATH="${build_path}" \
+                --config-setting=cmake.define.ITKPythonPackage_ITK_BINARY_REUSE:BOOL=ON \
+                --config-setting=cmake.define.ITKPythonPackage_WHEEL_NAME:STRING="${wheel_name}" \
+                --config-setting=cmake.define.Python3_EXECUTABLE:FILEPATH="${python_exe}" \
+                --config-setting=cmake.define.Python3_INCLUDE_DIR:PATH="${python_include}" \
+                --config-setting=cmake.define.CMAKE_CXX_FLAGS:STRING="-O3 -DNDEBUG" \
+                --config-setting=cmake.define.CMAKE_C_FLAGS:STRING="-O3 -DNDEBUG" \
+                .
+            done < scripts/WHEEL_NAMES.txt
+
+            mkdir -p /work/build/wheelhouse
+            for whl in /work/dist/itk_*"$(uname -m)"*.whl; do
+              auditwheel show "${whl}"
+              auditwheel repair "${whl}" -w /work/build/wheelhouse
+            done
+
+            # auditwheel skips the pure-Python "itk" metawheel (itk-meta in
+            # WHEEL_NAMES.txt) since it carries no .so; retag it manylinux_riscv64 by
+            # hand the same way upstream's own manylinux-build-wheels.sh does.
+            for whl in /work/dist/itk-*linux_*.whl; do
+              "${python_exe}" -m wheel unpack --dest /work/metawheel "${whl}"
+              new_tag=$(basename "${whl/linux/manylinux_2_39}" .whl)
+              sed -i "s/^Tag: .*/Tag: ${new_tag}/" /work/metawheel/itk-*/itk*.dist-info/WHEEL
+              "${python_exe}" -m wheel pack --dest /work/build/wheelhouse /work/metawheel/itk-*
+            done
+            ;;
+          test)
+            "${python_exe}" -m venv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install -U pip
+            pip install numpy
+            pip install itk --no-index -f /work/build/wheelhouse
+
+            python -c "from itk import ITKCommon"
+            python -c "import itk; image = itk.Image[itk.UC, 2].New()"
+            python -c "import itkConfig; itkConfig.LazyLoading = False; import itk"
+            python /work/docs/code/test.py
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheels
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/work \
+            --workdir /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /work/riscv64-build-and-test.sh build
+
+      # One artifact per wheel: _publish-wheel.yml asserts exactly one normalized package
+      # name and version across whatever its own artifact-pattern matches (gotcha 380), so
+      # the 7 wheels this one build produces cannot share a single artifact.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk_core-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk_core-*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk_numerics-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk_numerics-*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk_io-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk_io-*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk_filtering-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk_filtering-*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk_registration-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk_registration-*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk_segmentation-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk_segmentation-*.whl
+          if-no-files-found: error
+
+      # The metawheel is "itk-<version>-...": anchored so it doesn't also match
+      # itk_core/itk_numerics/.../itk_segmentation above (gotcha 380's mlx precedent).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: itk-${{ env.ITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/itk-[0-9]*.whl
+          if-no-files-found: error
+
+      - name: Test wheels
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/work \
+            --workdir /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /work/riscv64-build-and-test.sh test
+
+  publish_core:
+    name: Publish itk-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk_core-${{ matrix.version }}-*-manylinux_riscv64
+
+  publish_numerics:
+    name: Publish itk-numerics ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk_numerics-${{ matrix.version }}-*-manylinux_riscv64
+
+  publish_io:
+    name: Publish itk-io ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk_io-${{ matrix.version }}-*-manylinux_riscv64
+
+  publish_filtering:
+    name: Publish itk-filtering ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk_filtering-${{ matrix.version }}-*-manylinux_riscv64
+
+  publish_registration:
+    name: Publish itk-registration ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk_registration-${{ matrix.version }}-*-manylinux_riscv64
+
+  publish_segmentation:
+    name: Publish itk-segmentation ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk_segmentation-${{ matrix.version }}-*-manylinux_riscv64
+
+  publish_meta:
+    name: Publish itk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: itk-${{ matrix.version }}-*-manylinux_riscv64

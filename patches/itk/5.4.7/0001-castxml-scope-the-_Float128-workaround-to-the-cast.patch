@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 2 Nov 2026 00:00:00 +0000
+Subject: [PATCH] castxml: scope the _Float128 workaround to the castxml-cc-gnu
+ probe, not CMAKE_CXX_FLAGS
+
+Upstream-Status: Inappropriate [riscv64 CastXML/Clang 18.1.3 toolchain gap; not relevant to other platforms]
+
+build-itk.yml forces `#define _Float128 long double` via `-include` into the
+global CMAKE_CXX_FLAGS, guarded to `#ifdef __clang__` so it only affects the
+CastXML/Clang toolchain this -include was written for, not GCC's real build
+of ITK's own C++ library sources (which also reads CMAKE_CXX_FLAGS directly
+and collides with glibc/libstdc++'s own distinct template specializations
+for _Float128 vs long double under GCC).
+
+That guard broke the castxml-cc-gnu probe this same flags string also feeds:
+this macro's own `set(_castxml_cc_flags ${CMAKE_CXX_FLAGS})` forwards it
+into `--castxml-cc-gnu ("${CMAKE_CXX_COMPILER}" ${_castxml_cc_flags})`, and
+CastXML's own detectCC_GNU() (src/Detect.cxx) runs exactly that compiler and
+flags array - appending only `-E -dM -v <empty file>` - through the REAL
+GNU compiler to dump its predefined macros, never through Clang. GCC never
+defines __clang__, so the probe's macro dump never captures the _Float128
+override, and castxml's own internal Clang then parses the real wrapping
+input files (confirmed on ITKCommonBase.cxx) using that macro set, where
+_Float128 is still undefined - reproducing the exact pre-workaround error
+("unknown type name '_Float128'" in bits/mathcalls.h) a later commit on
+this same branch already fixed once, this time via the fix meant to guard
+against the GCC collision instead.
+
+Move the -include out of the string GCC's real library build consumes
+(CMAKE_CXX_FLAGS, left alone in the workflow) and into castxml's own
+_castxml_cc_flags specifically, right where it is built up, guarded on the
+workaround header file actually existing (so an unrelated platform/build
+calling this same macro is unaffected either way). This reaches both the
+GCC-run probe (whose dumped macros castxml's own internal Clang then
+parses the real file with) and, if castxml ever runs its internal Clang
+directly against this flags string instead, that path too - without ever
+reaching the real GCC compile of ITK's own .cxx sources, so the header's
+#define no longer needs the __clang__ guard that defeated the probe.
+---
+ Wrapping/macro_files/itk_auto_load_submodules.cmake | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/Wrapping/macro_files/itk_auto_load_submodules.cmake b/Wrapping/macro_files/itk_auto_load_submodules.cmake
+index 0bb618f..4427bc1 100644
+--- a/Wrapping/macro_files/itk_auto_load_submodules.cmake
++++ b/Wrapping/macro_files/itk_auto_load_submodules.cmake
+@@ -19,6 +19,18 @@ function(generate_castxml_commandline_flags)
+
+   # Avoid missing omp.h include
+   set(_castxml_cc_flags ${CMAKE_CXX_FLAGS})
++  # riscv64: this image's glibc declares _Float128 math functions unconditionally once
++  # it sees a Clang new enough, but the CastXML/Clang 18.1.3 toolchain this castxml-cc-gnu
++  # probe (and castxml's own internal parse, which configures itself from this probe's
++  # output) ends up invoking does not recognize _Float128 as a type on riscv64. Force-
++  # including a long-double substitute here, rather than into CMAKE_CXX_FLAGS itself,
++  # keeps it out of GCC's real build of ITK's own C++ library sources, which reads
++  # CMAKE_CXX_FLAGS directly and whose riscv64 glibc/libstdc++ headers carry separate
++  # template specializations keyed on _Float128 and on long double (e.g. __iseqsig_type,
++  # numeric_limits) that the same substitution would collapse into one and break.
++  if(EXISTS "/work/float128-workaround.h")
++    set(_castxml_cc_flags "${_castxml_cc_flags} -include /work/float128-workaround.h")
++  endif()
+   if(CMAKE_CXX_EXTENSIONS)
+     set(_castxml_cc_flags "${_castxml_cc_flags} ${CMAKE_CXX${CMAKE_CXX_STANDARD}_EXTENSION_COMPILE_OPTION}")
+   else()
+--
+2.43.0
