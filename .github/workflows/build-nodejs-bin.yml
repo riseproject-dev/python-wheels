@@ -1,0 +1,193 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on https://github.com/samwillis/nodejs-pypi/blob/main/.github/workflows/test.yaml:
+# make_wheels.py repackages a prebuilt Node.js release archive into a py3-none-<platform> wheel.
+name: Build nodejs-bin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nodejs-bin.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nodejs-bin.yml'
+      - 'docs/packages/nodejs-bin.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nodejs-bin.yml'
+      - 'docs/packages/nodejs-bin.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream publishes no git tags; this is the main commit that produced the 18.4.0a4 release.
+  NODEJS_PYPI_REF: 07c084532141fa47cd4b9c2d711fd3f68eeb7bf5
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nodejs-bin
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build nodejs-bin ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      NODEJS_BIN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout samwillis/nodejs-pypi
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: samwillis/nodejs-pypi
+          ref: ${{ env.NODEJS_PYPI_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/nodejs-bin/${{ env.NODEJS_BIN_VERSION }}/00*.patch
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build Wheels
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e NODEJS_BIN_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf install -y libarchive
+            pybin=/opt/python/cp310-cp310/bin
+            # wheel>=0.40 has WheelFile.close() pass a plain path to writestr()
+            # instead of a ZipInfo; make_wheels.py ReproducibleWheelFile.writestr()
+            # requires a ZipInfo and raises ValueError("ZipInfo required") otherwise.
+            "$pybin/pip" install "wheel<0.40" libarchive-c
+            node_version="${NODEJS_BIN_VERSION%a*}"
+            suffix="${NODEJS_BIN_VERSION#"$node_version"}"
+            mkdir dist
+            "$pybin/python" -c "
+          import sys, make_wheels
+          make_wheels.PLATFORMS = {\"linux-riscv64\": make_wheels.PLATFORMS[\"linux-riscv64\"]}
+          make_wheels.make_nodejs_version(sys.argv[1], suffix=sys.argv[2])
+          " "$node_version" "$suffix"
+          '
+          ls -l dist/*
+
+      - name: Check the wheel ships the riscv64 node binary
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith("-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              assert "nodejs/LICENSE" in names
+              header = zf.read("nodejs/bin/node")[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nodejs-bin-${{ env.NODEJS_BIN_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test nodejs-bin ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      NODEJS_BIN_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout samwillis/nodejs-pypi (tests)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: samwillis/nodejs-pypi
+          ref: ${{ env.NODEJS_PYPI_REF }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: nodejs-bin-${{ env.NODEJS_BIN_VERSION }}-py3-none-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install Package
+        run: |
+          uv pip install --reinstall --no-index --find-links dist --prerelease=allow nodejs-bin
+          uv pip install pytest
+
+      - name: Test Package
+        env:
+          # test_npm.py/test_comand_line.py's test_install_package does a real
+          # `npm install is-even` against registry.npmjs.org. Its Cloudflare
+          # front times out over IPv6 on this runner fleet (confirmed in the
+          # real cp3.12 CI log: "connect ETIMEDOUT 2606:4700::6810:322:443",
+          # a Cloudflare address) - force Node's DNS resolver to prefer IPv4
+          # for this step, on the hypothesis that IPv4 egress is unaffected.
+          NODE_OPTIONS: --dns-result-order=ipv4first
+        run: |
+          python -W error -m nodejs --version
+          python -W error -m nodejs.npm --version
+          python -W error -m nodejs.npx --version
+          python -W error -m nodejs.corepack --version
+          python -m pytest tests -v
+
+  publish:
+    name: Publish nodejs-bin ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: nodejs-bin-${{ matrix.version }}-py3-none-manylinux_riscv64
