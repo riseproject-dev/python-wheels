@@ -10,6 +10,11 @@ on:
         description: 'Version glob to (re)build; empty builds every version of docs/packages/<pkg>.yaml not released yet'
         required: false
         default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
     paths: ['.github/workflows/build-<pkg>.yml', 'docs/packages/<pkg>.yaml']
@@ -18,9 +23,15 @@ on:
     paths: ['.github/workflows/build-<pkg>.yml', 'docs/packages/<pkg>.yaml']
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
 ```
+
+The concurrency key serializes runs of the same workflow and branch. Manual dispatches
+cancel the previous run by default, matching push and pull request behavior. Pass
+`cancel-in-progress=false` when dispatching a queue so the active run can finish first.
+GitHub retains at most one pending run per concurrency group, so a third dispatch can still
+replace the pending run even when cancellation is disabled.
 
 **All three triggers, always.** `pull_request: paths` is not optional and is not redundant
 with `workflow_dispatch`: it is the only thing that can produce a new workflow's first run,

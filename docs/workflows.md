@@ -78,6 +78,11 @@ on:
         description: 'Version glob to (re)build; empty builds every version of docs/packages/<pkg>.yaml not released yet'
         required: false
         default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
     paths:
@@ -88,7 +93,16 @@ on:
     paths:
       - '.github/workflows/build-<pkg>.yml'
       - 'docs/packages/<pkg>.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
 ```
+
+The concurrency key serializes runs of the same workflow and branch. Manual runs cancel an
+existing run by default. Set `cancel-in-progress` to `false` when queueing a rebuild that
+must wait for the active run. GitHub retains at most one pending run in a concurrency group,
+so another dispatch can replace that pending run even when the active run is preserved.
 
 They have distinct purposes:
 
@@ -375,6 +389,19 @@ Use `workflow_dispatch` only when intentionally rebuilding a declared version:
 
 ```sh
 gh workflow run build-<pkg>.yml --ref main -f version='<glob>'
+```
+
+To preserve an active run and wait behind it, disable cancellation:
+
+```sh
+gh workflow run build-<pkg>.yml --ref main -f version='<glob>' -f cancel-in-progress=false
+```
+
+For pending versions across multiple packages, the queue helper disables cancellation by
+default and limits the number of dispatches made by one invocation:
+
+```sh
+uv run ci_scripts/queue-pending-versions.py --batch 10
 ```
 
 A glob can select released versions as well as pending ones. On `main`, each

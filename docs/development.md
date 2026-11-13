@@ -230,6 +230,11 @@ on:
         description: 'Version glob to (re)build; empty builds every version of docs/packages/numpy.yaml not released yet'
         required: false
         default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
     paths:
@@ -240,6 +245,10 @@ on:
     paths:
       - '.github/workflows/build-numpy.yml'
       - 'docs/packages/numpy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
 
 jobs:
   setup:
