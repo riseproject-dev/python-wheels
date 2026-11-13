@@ -1,0 +1,256 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `makepanda` job of
+# https://github.com/panda3d/panda3d/blob/v1.10.16/.github/workflows/ci.yml
+name: Build panda3d wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/panda3d.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-panda3d.yml'
+      - 'docs/packages/panda3d.yaml'
+      - 'patches/panda3d/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-panda3d.yml'
+      - 'docs/packages/panda3d.yaml'
+      - 'patches/panda3d/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: panda3d
+      version: ${{ inputs.version }}
+
+  # TEMPORARY diagnostic job, to be removed once the real test_bam_info/
+  # test_egg_trans SIGSEGV is diagnosed. build_wheels's own strace attempt
+  # crashed the same way gdb did ("Segmentation fault (core dumped)" on
+  # `strace -f -v bam-info -h` itself, before any trace output), which could
+  # mean either ptrace is broken for ANY riscv64 binary on this runner, or
+  # something specific to the panda3d-built binary. This job answers that in
+  # minutes instead of the ~1h18m it takes build_wheels to even reach its own
+  # strace step, by tracing trivial binaries (/bin/true, /bin/echo) inside
+  # the same manylinux_riscv64 container on the same runner pool.
+  strace_sanity_check:
+    name: Diagnose whether ptrace/strace works at all on this runner
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    steps:
+      - name: Trace trivial binaries inside the manylinux container
+        run: |
+          docker run --rm -i --network=host "${MANYLINUX_RISCV64_IMAGE}" bash <<'SCRIPT'
+          set -x
+          dnf install -y --setopt=install_weak_deps=False strace
+          echo "DIAG: strace -f /bin/true"
+          strace -f -v /bin/true
+          echo "DIAG: /bin/true exit=$?"
+          echo "DIAG: strace -f /bin/echo hello"
+          strace -f -v /bin/echo hello
+          echo "DIAG: /bin/echo exit=$?"
+          SCRIPT
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build panda3d ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+
+    env:
+      PANDA3D_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout panda3d v${{ env.PANDA3D_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: panda3d/panda3d
+          ref: v${{ env.PANDA3D_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/panda3d/${{ env.PANDA3D_VERSION }}/*.patch
+
+      - name: Build and test wheels
+        run: |
+          mkdir -p wheelhouse
+          docker run --rm -i --network=host \
+            -v "$(pwd):/work" \
+            -w /work \
+            -e PANDA3D_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          # Matches upstream's own Ubuntu apt-get list (build-essential bison flex
+          # libfreetype6-dev libgl1-mesa-dev libjpeg-dev libode-dev libopenal-dev
+          # libpng-dev libssl-dev libvorbis-dev libx11-dev libxcursor-dev
+          # libxrandr-dev nvidia-cg-toolkit zlib1g-dev), minus ode-devel (not
+          # packaged for Rocky 10), nvidia-cg-toolkit (x86-only, no riscv64
+          # build ever existed), and openal-soft-devel (EPEL-only on RHEL
+          # derivatives -- manylinux installs no EPEL on riscv64 -- and not
+          # present under any name in Rocky 10's own BaseOS/AppStream/CRB for
+          # riscv64 either) -- makepanda's SmartPkgEnable probes for each
+          # package and silently drops the feature (ODE physics, Cg shaders,
+          # OpenAL audio) rather than failing when one is missing, the same
+          # way it already does for Bullet on upstream's own Linux CI.
+          dnf install -y --setopt=install_weak_deps=False \
+            bison flex freetype-devel mesa-libGL-devel libjpeg-turbo-devel \
+            libpng-devel openssl-devel libvorbis-devel libogg-devel \
+            libX11-devel libXcursor-devel libXrandr-devel zlib-devel strace
+
+          # setup's matrix (every RISCV64_PYTHONS-supported target in
+          # docs/packages/panda3d.yaml bar cp39) includes cp310/cp311; the publish job's
+          # completeness check requires a wheel for every matrix entry, so they must be
+          # built here too.
+          for pydir in cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            PY="/opt/python/${pydir}/bin/python3"
+            "${PY}" makepanda/makepanda.py --everything --no-eigen --wheel \
+              --python-incdir="/opt/python/${pydir}/include" \
+              --python-libdir="/opt/python/${pydir}/lib" \
+              --outputdir=built --version="${PANDA3D_VERSION}" \
+              --threads="$(nproc)" --verbose
+
+            whl=$(ls panda3d-*.whl)
+            mv "${whl}" wheelhouse/
+
+            # cp310/cp311's venv seeds pip from ensurepip's bundled wheel (23.0.1/24.0),
+            # which vendors packaging 21.3 and recognizes no manylinux_*_riscv64 tag at
+            # all (gotcha 640), so it rejects our own correctly tagged wheel with "is not
+            # a supported wheel on this platform". cp312+ bundle a newer pip and are
+            # unaffected, but upgrade unconditionally for all of them.
+            "${PY}" -m venv --upgrade-deps /tmp/test-venv
+            /tmp/test-venv/bin/pip install -q "wheelhouse/${whl}" pytest
+
+            # DIAGNOSTIC ONLY (not a fix): test_bam_info SIGSEGVs on riscv64 with no
+            # captured output. The previous gdb attempt got no backtrace at all --
+            # "During startup program terminated with signal SIGSEGV. No stack." --
+            # and gdb itself couldn't even disable ASLR ("Operation not permitted"),
+            # so the crash is too early for gdb's own ptrace-based attach to see
+            # anything. Use strace instead, which traces at the syscall level and
+            # doesn't need ptrace permissions beyond PTRACE_SYSCALL.
+            TOOLS_DIR=$(/tmp/test-venv/bin/python -c "
+          import os, panda3d
+          try:
+              import panda3d_tools
+              print(os.path.dirname(panda3d_tools.__file__))
+          except ImportError:
+              print(os.path.join(os.path.dirname(os.path.dirname(panda3d.__file__)), 'bin'))
+          ")
+            echo "DIAG: tools dir resolved to ${TOOLS_DIR}"
+            for tool in bam-info egg-trans; do
+              if [ -f "${TOOLS_DIR}/${tool}" ]; then
+                echo "DIAG: strace for ${tool} -h ($PY)"
+                strace -f -v "${TOOLS_DIR}/${tool}" -h > /tmp/strace-out.log 2>&1
+                echo "DIAG: exit=$? for ${tool}"
+                tail -40 /tmp/strace-out.log
+              else
+                echo "DIAG: ${tool} not found at ${TOOLS_DIR}"
+              fi
+            done
+
+            # DIAGNOSTIC ONLY: the loop's prior unconditional `pytest -x` means a
+            # cp310 test_bam_info failure aborts the whole job before cp311-314t
+            # ever get their own test_tools.py run -- every build to date has only
+            # ever actually tested cp310 against this crash. Don't abort the loop
+            # on a test failure so every interpreter's own result is known from one
+            # CI run; still propagate failure to the job via DIAG_FAILED.
+            if ! /tmp/test-venv/bin/python -m pytest -x -q; then
+              echo "DIAG: pytest FAILED for ${pydir}"
+              DIAG_FAILED=1
+            fi
+            rm -rf /tmp/test-venv
+          done
+          if [ -n "${DIAG_FAILED:-}" ]; then
+            exit 1
+          fi
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: panda3d-${{ env.PANDA3D_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for panda3d ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PANDA3D_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The engine is compiled with the image's GCC and links its libstdc++;
+      # freetype's Rocky 10 build resolves to its GPLv2 option (same as
+      # build-pygame.yml's freetype entry, from the same image).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc freetype
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: panda3d-${{ env.PANDA3D_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish panda3d ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: panda3d-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: panda3d-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and freetype
