@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] physx/foundation: add riscv64 to PX_P64_FAMILY
+
+Upstream-Status: To upstream [no riscv64 CI to validate against yet]
+
+PxPreprocessor.h's architecture block recognizes x86_64, i386, arm64,
+arm32 and ppc only; any other __riscv/__riscv_xlen==64 target falls
+through to `#error "Unknown architecture"`, which is a real compile
+blocker for riscv64 (not an untested-upstream SIMD path: this file
+never reaches a SIMD choice at all without first defining an arch).
+
+Add PX_RISCV64 as its own define, give it the usual `#ifndef ... 0
+#endif` default like every other arch macro, and fold it into
+PX_P64_FAMILY only (the 64-bit-pointer shortcut used by serialization
+and struct layout code) -- not PX_ARM_FAMILY or PX_INTEL_FAMILY, which
+riscv64 is neither. Downstream, COMPILE_VECTOR_INTRINSICS
+(PxVecMath.h) is gated on PX_INTEL_FAMILY || PX_SWITCH only, so once
+PX_RISCV64 exists, riscv64 automatically lands on PxVecMathAoSScalar.h
+-- the same scalar fallback aarch64's own precompiled Linux build
+already ships in production, not a new/untested code path.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ physx/include/foundation/PxPreprocessor.h | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/physx/include/foundation/PxPreprocessor.h b/physx/include/foundation/PxPreprocessor.h
+index 0000000..0000000 100644
+--- a/physx/include/foundation/PxPreprocessor.h
++++ b/physx/include/foundation/PxPreprocessor.h
+@@ -116,6 +116,8 @@
+ 	#define PX_ARM 1
+ #elif defined(__ppc__) || defined(_M_PPC) || defined(__CELLOS_LV2__)
+ 	#define PX_PPC 1
++#elif defined(__riscv) && (__riscv_xlen == 64)
++	#define PX_RISCV64 1
+ #else
+ 	#error "Unknown architecture"
+ #endif
+@@ -177,6 +179,9 @@
+ #ifndef PX_PPC
+ 	#define PX_PPC 0
+ #endif
++#ifndef PX_RISCV64
++	#define PX_RISCV64 0
++#endif
+ #ifndef PX_SSE2
+ 	#define PX_SSE2 0
+ #endif
+@@ -227,7 +232,7 @@
+ // architecture
+ #define PX_INTEL_FAMILY (PX_X64 || PX_X86)
+ #define PX_ARM_FAMILY (PX_ARM || PX_A64)
+-#define PX_P64_FAMILY (PX_X64 || PX_A64) // shortcut for 64-bit architectures
++#define PX_P64_FAMILY (PX_X64 || PX_A64 || PX_RISCV64) // shortcut for 64-bit architectures
+
+ /**
+ C++ standard library defines
+--
+2.50.1

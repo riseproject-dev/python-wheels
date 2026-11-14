@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 8 Nov 2026 00:00:00 +0000
+Subject: [PATCH] physx: treat riscv64 like linux-aarch64 in arch guards
+
+Upstream-Status: To upstream [no riscv64 CI to validate against yet]
+
+Three Linux code paths are split as "ARM" vs "everything else", where
+"everything else" silently means x86_64. riscv64 (PX_RISCV64, added by
+0001) lands on the scalar PxVecMathAoSScalar.h fallback like
+linux-aarch64, but takes the x86_64 side of each of these:
+
+- PxSIMDHelpers.h: PxMat33Padded stores its Vec3V columns with
+  V4StoreU unless PX_SIMD_DISABLED or linux-ARM. On the scalar
+  fallback Vec3V and Vec4V are distinct types, so this is a hard
+  compile error ("could not convert 'column0V' from Vec3V to Vec4V").
+  Take the V3StoreU branch, as linux-aarch64 does.
+- PxMath.h: pins expf/powf to the x86_64-only GLIBC_2.2.5 symbol
+  version on every non-ARM Linux; that version does not exist on
+  riscv64 (whose baseline is GLIBC_2.27), so linking would fail.
+- FdUnixThread.cpp: yieldProcessor() emits the x86 `pause` mnemonic on
+  every non-ARM target. Emit the RISC-V Zihintpause PAUSE hint via its
+  raw encoding (as the Linux kernel's cpu_relax() does), which executes
+  as a no-op FENCE on cores without the extension and assembles without
+  requiring zihintpause in -march.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ physx/include/foundation/PxMath.h             | 2 +-
+ physx/include/foundation/PxSIMDHelpers.h      | 2 +-
+ physx/source/foundation/unix/FdUnixThread.cpp | 2 ++
+ 3 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/physx/include/foundation/PxMath.h b/physx/include/foundation/PxMath.h
+index 0000000..0000000 100644
+--- a/physx/include/foundation/PxMath.h
++++ b/physx/include/foundation/PxMath.h
+@@ -45,7 +45,7 @@
+ #pragma warning(pop)
+ #endif
+
+-#if (PX_LINUX_FAMILY && !PX_ARM_FAMILY)
++#if (PX_LINUX_FAMILY && !PX_ARM_FAMILY && !PX_RISCV64)
+ // Force linking against nothing newer than glibc v2.17 to remain compatible with platforms with older glibc versions
+ __asm__(".symver expf,expf@GLIBC_2.2.5");
+ __asm__(".symver powf,powf@GLIBC_2.2.5");
+diff --git a/physx/include/foundation/PxSIMDHelpers.h b/physx/include/foundation/PxSIMDHelpers.h
+index 0000000..0000000 100644
+--- a/physx/include/foundation/PxSIMDHelpers.h
++++ b/physx/include/foundation/PxSIMDHelpers.h
+@@ -48,7 +48,7 @@ namespace physx
+ 			const QuatV qV = V4LoadU(&q.x);
+ 			Vec3V column0V, column1V, column2V;
+ 			QuatGetMat33V(qV, column0V, column1V, column2V);
+-#if defined(PX_SIMD_DISABLED) || (PX_LINUX && (PX_ARM || PX_A64))
++#if defined(PX_SIMD_DISABLED) || (PX_LINUX && (PX_ARM || PX_A64 || PX_RISCV64))
+ 			V3StoreU(column0V, column0);
+ 			V3StoreU(column1V, column1);
+ 			V3StoreU(column2V, column2);
+diff --git a/physx/source/foundation/unix/FdUnixThread.cpp b/physx/source/foundation/unix/FdUnixThread.cpp
+index 0000000..0000000 100644
+--- a/physx/source/foundation/unix/FdUnixThread.cpp
++++ b/physx/source/foundation/unix/FdUnixThread.cpp
+@@ -269,6 +269,8 @@ void PxThreadImpl::yieldProcessor()
+ {
+ #if (PX_ARM || PX_A64)
+ 	__asm__ __volatile__("yield");
++#elif PX_RISCV64
++	__asm__ __volatile__(".insn i 0x0F, 0, x0, x0, 0x010");
+ #else
+ 	__asm__ __volatile__("pause");
+ #endif
+--
+2.50.1
