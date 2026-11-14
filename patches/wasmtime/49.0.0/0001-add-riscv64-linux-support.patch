@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] add riscv64-linux support
+
+Wasmtime itself already publishes an official riscv64gc-linux C-API
+release tarball (ziglang.org's build wouldn't matter here, but
+bytecodealliance/wasmtime's own release process has shipped one since
+well before this tag); wasmtime-py just never learned to ask for it.
+
+plat_name_to_download_args() has no manylinux_2_39_riscv64 entry, so
+`python -m build --wheel -C=--build-option=--plat-name
+-C=--build-option=manylinux_2_39_riscv64` fails outright. Add one,
+mapping to the ci/download-wasmtime.py arch "riscv64" - matching
+`platform.machine()` on a riscv64 host, not Rust's "riscv64gc" triple
+component - because wasmtime/_ffi.py's runtime loader looks up
+`<sys_platform>-<platform.machine()>` to find the bundled shared
+library directory.
+
+download-wasmtime.py then needs its own translation the other way:
+Wasmtime names the release asset
+wasmtime-<version>-riscv64gc-linux-c-api.tar.xz, not
+...-riscv64-linux-..., so the download step substitutes "riscv64gc"
+into the asset filename while still extracting into the "linux-riscv64"
+directory _ffi.py expects.
+
+Finally, _ffi.py's own machine allow-list hard-fails on anything but
+x86_64/aarch64; add riscv64 so the loader actually reaches the
+directory the wheel now ships.
+
+Upstream-Status: To upstream [not yet submitted to bytecodealliance/wasmtime-py]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/_custom_build/backend.py b/ci/_custom_build/backend.py
+index 78dbb12..8a96ff8 100644
+--- a/ci/_custom_build/backend.py
++++ b/ci/_custom_build/backend.py
+@@ -58,6 +58,7 @@ def plat_name_to_download_args(plat_name:str) -> list[str]:
+         'macosx-11-0-arm64':            ['darwin', 'arm64'],
+         'manylinux1-x86_64':            ['linux', 'x86_64'],
+         'manylinux2014_aarch64':        ['linux', 'aarch64'],
++        'manylinux_2_39_riscv64':       ['linux', 'riscv64'],
+         'musllinux_1_2_x86_64':         ['musl', 'x86_64'],
+         'musllinux_1_2_aarch64':        ['musl', 'aarch64'],
+         'win-amd64':                    ['win32', 'x86_64'],
+diff --git a/ci/download-wasmtime.py b/ci/download-wasmtime.py
+index dc933d7..df03cf8 100644
+--- a/ci/download-wasmtime.py
++++ b/ci/download-wasmtime.py
+@@ -25,7 +25,12 @@ def main(platform, arch):
+         arch = 'aarch64'
+     dirname = '{}-{}'.format(platform, arch)
+     if platform == 'linux' or platform == 'musl':
+-        filename = 'wasmtime-{}-{}-{}-c-api.tar.xz'.format(version, arch, platform)
++        # Wasmtime's own release assets name the riscv64 Linux build after
++        # the Rust target triple's architecture component, "riscv64gc", not
++        # "riscv64" (what `uname -m`/`platform.machine()` report and what
++        # the wheel's directory name must match - see wasmtime/_ffi.py).
++        download_arch = 'riscv64gc' if arch == 'riscv64' else arch
++        filename = 'wasmtime-{}-{}-{}-c-api.tar.xz'.format(version, download_arch, platform)
+         libname = '_libwasmtime.so'
+         dirname = 'linux-{}'.format(arch)
+     elif platform == 'win32':
+diff --git a/wasmtime/_ffi.py b/wasmtime/_ffi.py
+index c24a747..6763399 100644
+--- a/wasmtime/_ffi.py
++++ b/wasmtime/_ffi.py
+@@ -30,7 +30,7 @@ if machine == 'AMD64':
+     machine = 'x86_64'
+ if machine == 'arm64' or machine == 'ARM64':
+     machine = 'aarch64'
+-if machine != 'x86_64' and machine != 'aarch64':
++if machine != 'x86_64' and machine != 'aarch64' and machine != 'riscv64':
+     raise RuntimeError("unsupported architecture for wasmtime: {}".format(machine))
+ 
+ filename = Path(__file__).parent / (sys_platform + '-' + machine) / libname
+-- 
+2.43.0
+
