@@ -253,6 +253,19 @@ jobs:
       # (etcd/v3/Member.hpp) uses uint64_t relying on a transitive <cstdint> include
       # that GCC 13+'s libstdc++ no longer provides, same as Arrow above (gotcha
       # unfiled; "error: 'uint64_t' has not been declared" in Member.hpp/.cpp).
+      # -DGLOG_USE_GLOG_EXPORT: v6d's own cmake/FindGlog.cmake is a legacy
+      # Find-module (include_directories(${GLOG_INCLUDE_DIR}) + raw
+      # ${GLOG_LIBRARIES} linking), not a find_package(glog CONFIG) import of
+      # the glog::glog target - so it never picks up the INTERFACE compile
+      # definition glog's own CMake package normally propagates to real
+      # consumers. Without it, glog/flags.h's own guard
+      # (`#if defined(GLOG_USE_GLOG_EXPORT) #include "glog/export.h" #endif`)
+      # skips export.h entirely, leaving GLOG_EXPORT completely undefined -
+      # confirmed in the real log: "error: 'GLOG_EXPORT' does not name a
+      # type; did you mean 'ARROW_EXPORT'?" at /opt/vineyard-deps/include/
+      # glog/flags.h:137, cascading through every DECLARE_bool/DECLARE_int32
+      # in that header. Defining it ourselves on the command line reproduces
+      # what a proper CMake-target consumer would already get for free.
       - name: Configure and build vineyardd
         run: |
           set -eux
@@ -260,7 +273,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_FLAGS="-include cstdint" \
+            -DCMAKE_CXX_FLAGS="-include cstdint -DGLOG_USE_GLOG_EXPORT" \
             -DBUILD_SHARED_LIBS=OFF \
             -DUSE_STATIC_BOOST_LIBS=ON \
             -DBoost_USE_STATIC_RUNTIME=OFF \
