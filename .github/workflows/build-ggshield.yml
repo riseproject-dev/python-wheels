@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/GitGuardian/ggshield/blob/v1.56.1/.github/workflows/wheels.yml
+name: Build ggshield wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ggshield.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ggshield.yml'
+      - 'docs/packages/ggshield.yaml'
+      - 'patches/ggshield/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ggshield.yml'
+      - 'docs/packages/ggshield.yaml'
+      - 'patches/ggshield/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_VERSION: 1.29.0
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ggshield
+      version: ${{ inputs.version }}
+
+  # musllinux is dropped: the smoke test installs ggshield's deps, and rfc3161-client and
+  # pydantic-core have no musllinux riscv64 wheel.
+  linux:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ggshield ${{ matrix.version }} py3-none-${{ matrix.tag }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          - tag: manylinux_2_39_riscv64
+            rustup_triple: riscv64gc-unknown-linux-gnu
+            rustup_sha256: 7e43f2b2e6307d61da17a4dff61e6bceef408b8189822df64e1094590d2a70f9
+
+    env:
+      GGSHIELD_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ggshield v${{ env.GGSHIELD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: GitGuardian/ggshield
+          ref: v${{ env.GGSHIELD_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          git apply -v python-wheels/patches/ggshield/${{ env.GGSHIELD_VERSION }}/*.patch
+          rm -rf python-wheels
+
+      - name: Build, relabel and smoke test the wheel in ${{ matrix.tag }}
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io -e GGSHIELD_BUILD_RUST=1 \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" bash -euo pipefail -c '
+              scripts/download \
+                "https://static.rust-lang.org/rustup/archive/${{ env.RUSTUP_VERSION }}/${{ matrix.rustup_triple }}/rustup-init" \
+                /tmp/rustup-init \
+                "${{ matrix.rustup_sha256 }}"
+              chmod +x /tmp/rustup-init
+              # A default toolchain (not "none") is needed beyond building
+              # ggshield itself: rust/rust-toolchain.toml pins the dispatcher
+              # build to 1.96.0 via its own directory-scoped override, but
+              # smoke-test-wheel installs the built wheel in a fresh venv
+              # outside that tree, and pydantic-core/rfc3161-client can
+              # resolve to a newer release than pypi.riseproject.dev has a
+              # riscv64 wheel for, falling back to a cargo build with no
+              # project-local override in scope - "rustup could not choose a
+              # version of cargo to run" without one.
+              /tmp/rustup-init -y --profile minimal --default-toolchain stable \
+                --no-modify-path
+              source "$HOME/.cargo/env"
+
+              PY=/opt/python/cp311-cp311/bin/python
+              "$PY" -m pip install --upgrade build wheel
+              "$PY" -m build --wheel --outdir dist_raw
+              "$PY" -m wheel tags --remove \
+                --platform-tag "${{ matrix.tag }}" dist_raw/*.whl
+              mkdir -p dist && mv dist_raw/*.whl dist/
+
+              # The cp311 venv gets ensurepip pip 24.0, which has no riscv64 manylinux tags (gotcha 640).
+              PYTHON=/opt/python/cp312-cp312/bin/python scripts/smoke-test-wheel dist/*.whl
+            '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ggshield-${{ env.GGSHIELD_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ggshield ${{ matrix.version }}
+    needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: ggshield-${{ matrix.version }}-py3-none-manylinux_riscv64
