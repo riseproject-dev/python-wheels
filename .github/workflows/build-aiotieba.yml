@@ -87,11 +87,24 @@ jobs:
           only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # aiotieba's own cibuildwheel.toml has no before-all Rust install (gotcha 10), and the
+          # test venv's cryptography install can resolve to a version/interpreter combo this
+          # registry has no riscv64 wheel for, falling back to a source build via maturin. That
+          # build then fails on its own: maturin's target-triple auto-detection computes
+          # "riscv64-unknown-linux-gnu" (missing the "gc" suffix) from the SOABI, which rustup
+          # does not recognize, so maturin's on-demand rustup auto-install also fails. Installing
+          # rustup ourselves up front sidesteps that broken auto-detection entirely, since rustup's
+          # own default install correctly targets the host's real riscv64gc-unknown-linux-gnu.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           # The test venv needs riscv64 wheels only PyPI has (aiohttp>=3.13.1 for cp314, lxml for cp313/cp314); uv's default
           # first-index strategy stops at pypi.riseproject.dev, which only has aiohttp<=3.12.14 and lxml 5.3.0 cp39-cp312.
+          # CIBW_ENVIRONMENT applies to both build and test, so the cargo PATH entry covers the
+          # cryptography source-build fallback in the test step too.
           CIBW_ENVIRONMENT: >-
             UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             UV_INDEX_STRATEGY=unsafe-best-match
+            PATH="$PATH:$HOME/.cargo/bin"
 
       # auditwheel repair adds a bare `.dist-info/licenses/` directory entry; the trailing `.` skips it.
       - name: Check wheel licences
