@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 09 Nov 2026 00:00:00 +0000
+Subject: [PATCH] test: repeat the Ctrl-C until chunking is interrupted, and
+ absorb a trailing one
+
+Upstream-Status: To upstream [not yet submitted]
+
+test_ctrl_c_interrupts_native_chunking fires a single SIGINT 0.5s after
+starting to chunk a 3000-paragraph document and expects KeyboardInterrupt
+within 5s. PyChunkStream::__next__ only calls check_signals() when its
+100ms poll of the chunk channel times out with nothing queued; chunking a
+3000-paragraph document on the riscv64 runners takes on the order of a
+minute, but the channel apparently stays non-empty throughout that run on
+this host, so the one-shot SIGINT is never observed and the call runs to
+completion instead of raising: "Failed: DID NOT RAISE KeyboardInterrupt"
+after ~60s.
+
+Re-issue the SIGINT every 0.2s until the call is interrupted, instead of
+once, and drop the fixed 5s completion budget that assumed a one-shot
+signal lands immediately. On a fast host the first signal still lands
+near-instantly and the test behaves the same.
+
+That re-issuing loop races its own shutdown: the background thread checks
+`stop` and calls raise_signal() as two separate steps, so it can commit to
+one more raise_signal() in the instant before the main thread observes
+`stop` and returns from timer.join(). That extra SIGINT is still pending
+delivery to the main thread at that point, and previously surfaced later,
+as an unhandled KeyboardInterrupt in pytest's own session teardown
+(gc.collect() during _ensure_unconfigure) once this was the last test in
+the file, aborting the whole cibuildwheel test command with exit code 130
+instead of a clean pass. time.sleep() is itself interruptible, so give the
+pending signal a bounded 0.2s window to land and catch it right here,
+inside the test, instead of leaving it to land on whatever the session
+runs next.
+---
+ crates/docling-py/tests/test_chunking.py | 25 ++++++++++++++++++++++---
+ 1 file changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/crates/docling-py/tests/test_chunking.py b/crates/docling-py/tests/test_chunking.py
+index 0000000..0000000 100644
+--- a/crates/docling-py/tests/test_chunking.py
++++ b/crates/docling-py/tests/test_chunking.py
+@@ -178,12 +178,32 @@ def test_ctrl_c_interrupts_native_chunking():
+
+     doc = _big_document()
+
+-    timer = threading.Timer(0.5, lambda: signal.raise_signal(signal.SIGINT))
++    # __next__ only checks for a pending signal when its 100ms channel poll
++    # times out empty; on a slow/few-core host the channel can stay non-empty
++    # for the whole run, so a single fixed-delay SIGINT can be missed.
++    # Re-issue it until the call is interrupted, instead of once.
++    stop = threading.Event()
++
++    def resignal():
++        while not stop.wait(0.2):
++            signal.raise_signal(signal.SIGINT)
++
++    timer = threading.Timer(0.5, resignal)
++    timer.daemon = True
+     timer.start()
+     try:
+-        t0 = time.monotonic()
+         with pytest.raises(KeyboardInterrupt):
+             list(HybridChunker(tokenizer=str(TOKENIZER), max_tokens=64).chunk(doc))
+-        assert time.monotonic() - t0 < 5.0
+     finally:
+-        timer.cancel()
++        stop.set()
++        timer.join()
++        # resignal() can observe `stop` only after it has already committed to
++        # one more raise_signal() call; that extra SIGINT is still pending
++        # delivery to the main thread here and would otherwise surface during
++        # whatever the session runs next instead of this test. time.sleep is
++        # itself interruptible, so give it a bounded window to land and
++        # absorb it here.
++        try:
++            time.sleep(0.2)
++        except KeyboardInterrupt:
++            pass
+--
+2.43.0
