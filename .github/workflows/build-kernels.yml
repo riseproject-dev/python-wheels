@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/huggingface/kernels/blob/v0.18.0/.github/workflows/publish_kernels.yml
+# and the test steps of its test_kernels.yaml.
+name: Build kernels wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/kernels.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kernels.yml'
+      - 'docs/packages/kernels.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kernels.yml'
+      - 'docs/packages/kernels.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: kernels
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build kernels ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp38-abi3, cp314t]
+        include:
+          # kernels/Cargo.toml declares pyo3 with abi3-py38 unconditionally, so one
+          # abi3 wheel (built on this repo's cp312 floor) is re-tested on each newer
+          # interpreter; free-threaded CPython gets its own wheel, as upstream's does.
+          - tag: cp38-abi3
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            # kernels.variants drops every arch kernel on free-threaded Python <3.15,
+            # which these tests' hard-coded x86_64/aarch64 systems don't account for;
+            # upstream's test CI never runs a free-threaded interpreter.
+            test-deselect: >-
+              --deselect 'tests/test_cli_describe_api.py::test_selects_system_variant[variant_names1-'
+              --deselect 'tests/test_cli_describe_api.py::test_selects_system_variant[variant_names2-'
+              --deselect tests/test_cli_describe_api.py::test_hub_missing_symbols_does_not_try_another_variant
+              --deselect tests/test_cli_describe_api.py::test_local_missing_symbols_does_not_try_another_variant
+              --deselect tests/test_cli_variants.py::test_latest_version
+              --deselect tests/test_cli_variants.py::test_only_compatible
+              --deselect 'tests/test_cli_variants.py::test_json['
+              --deselect 'tests/test_cli_variants.py::test_json_no_compatible_variants[False-variants1]'
+              --deselect tests/test_cli_variants.py::test_versions_deprecated
+              --deselect tests/test_variants.py::test_resolve_cuda_
+              --deselect tests/test_variants.py::test_resolve_rocm
+              --deselect tests/test_variants.py::test_resolve_cpu_
+              --deselect tests/test_variants.py::test_resolve_metal_darwin
+              --deselect tests/test_variants.py::test_resolve_noarch_fallback
+              --deselect tests/test_variants.py::test_resolve_no_match
+              --deselect tests/test_variants.py::test_resolve_universal_
+              --deselect tests/test_variants.py::test_resolve_stable_abi_
+              --deselect tests/test_variants.py::test_resolve_tagless_preferred_over_abi_tagged
+              --deselect tests/test_variants.py::test_resolve_mixed_abi_tags
+
+    env:
+      KERNELS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout kernels v${{ env.KERNELS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: huggingface/kernels
+          ref: v${{ env.KERNELS_VERSION }}
+          persist-credentials: false
+
+      # maturin globs LICEN[CS]E* relative to kernels/pyproject.toml, so upstream's
+      # own wheels carry no licence file at all.
+      - name: Stage the licence beside kernels' pyproject.toml
+        run: cp LICENSE kernels/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: kernels
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # sigstore's Rust deps, and matplotlib's pillow dependency: without this
+          # pip picks a newer PyPI sdist over the registry's riscv64 wheel and
+          # builds it from source (pillow's needs libjpeg-devel, which this image
+          # doesn't have: RequiredDependencyException: jpeg).
+          CIBW_TEST_ENVIRONMENT: >-
+            HF_HUB_DOWNLOAD_TIMEOUT=60
+            PIP_ONLY_BINARY=cryptography,rfc3161-client,pillow
+          # upstream's uv.lock tests against huggingface-hub 1.x, whose httpx
+          # dependency tests/test_cli_describe_api.py imports; 2.x moved to httpx2.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-benchmark mktestdocs mypy setuptools torch
+            einops matplotlib numpy tabulate "huggingface-hub<2"
+          CIBW_TEST_SOURCES: kernels/tests kernels/pytest.ini kernels/pyproject.toml
+          # test_tvm_ffi.py is ignored: kernels-test/relu-tvm-ffi has x86_64 builds
+          # only, and apache-tvm-ffi has no riscv64 wheel for cp313/cp314. The
+          # deselected tests download Hub kernels (kernels-community/relu,
+          # kernels-test-untrusted/ci-test-kernel) published only for x86_64/aarch64
+          # or CUDA, or kernelize on "cuda": upstream runs them on GPU runners only.
+          # pytest exercises torch enough that it writes files into its own
+          # site-packages/torch tree; pip's uninstall only removes what it
+          # installed, leaving that tree as an empty-but-importable namespace
+          # package and breaking the "no torch" check below with AttributeError:
+          # module 'torch' has no attribute 'version'. Force it gone first.
+          CIBW_TEST_COMMAND: >-
+            python -c "import kernels._rust as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            files = md.files('kernels');
+            assert any(str(p).endswith('licenses/LICENSE') for p in files), files" &&
+            cd kernels &&
+            python -m mypy.stubtest kernels._rust &&
+            python -m pytest -v -rfEs tests --ignore tests/test_tvm_ffi.py
+            --deselect tests/test_basic.py::test_local_overrides
+            --deselect tests/test_basic.py::test_install_kernel_offline_with_revision
+            --deselect tests/test_basic.py::test_install_kernel_offline_avoids_network
+            --deselect tests/test_basic.py::test_install_kernel_offline_with_version
+            --deselect tests/test_basic.py::test_trust_remote_code_allows_trusted_org
+            --deselect tests/test_basic.py::test_trust_remote_code_flag_allows_untrusted
+            --deselect tests/test_basic.py::test_trust_remote_code_allowlist_allows_untrusted
+            --deselect tests/test_layer.py::test_missing_kernel_build_falls_back
+            --deselect tests/test_loaded_kernels.py::test_get_loaded_kernels_returns_copy
+            --deselect tests/test_loaded_kernels.py::test_get_kernel_registers_loaded_kernel
+            --deselect tests/test_loaded_kernels.py::test_repeated_get_kernel_is_cached
+            --deselect tests/test_loaded_kernels.py::test_get_local_kernel_registers_with_null_repo_info
+            --deselect tests/test_loaded_kernels.py::test_install_kernel_plus_import_does_not_set_repo_info
+            --deselect tests/test_resolver.py::test_hub_resolver_resolves_remote_kernel
+            --deselect tests/test_resolver.py::test_hub_resolver_resolves_revision_to_commit
+            --deselect tests/test_resolver.py::test_hub_cache_resolver_resolves_cached_kernel
+            --deselect tests/test_resolver.py::test_hub_cache_resolver_revision_passthrough
+            --deselect tests/test_resolver.py::test_locked_hub_cache_resolver_resolves_locked_kernel
+            --deselect tests/test_resolver.py::test_locked_hub_resolver_resolves_locked_revision
+            --deselect tests/test_verify.py::test_correctly_signed_kernel_passes_with_default_policy
+            --deselect tests/test_versions.py::test_a_downloaded_revision_resolves_offline
+            --deselect tests/test_versions.py::test_a_downloaded_version_resolves_offline
+            ${{ matrix.test-deselect }} &&
+            python -m pip uninstall -y torch &&
+            python -c "import pathlib, shutil, sysconfig;
+            shutil.rmtree(pathlib.Path(sysconfig.get_paths()['purelib'], 'torch'), ignore_errors=True)" &&
+            python -c "import kernels" &&
+            kernels versions kernels-community/activation
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kernels-${{ env.KERNELS_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish kernels ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: kernels-${{ matrix.version }}-*-manylinux_riscv64
