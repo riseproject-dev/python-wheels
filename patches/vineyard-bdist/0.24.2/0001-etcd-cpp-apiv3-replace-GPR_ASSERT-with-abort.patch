@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 10 Sep 2026 00:00:00 +0000
+Subject: [PATCH] etcd-cpp-apiv3: replace GPR_ASSERT with abort()
+
+Upstream-Status: Inappropriate [this port builds gRPC 1.83.1 from source for riscv64, newer than grpc/support/log.h still defines GPR_ASSERT in]
+
+thirdparty/etcd-cpp-apiv3/src/v3/Action.cpp's waitForResponse()
+calls GPR_ASSERT(got_tag == (void*) this), relying on
+<grpc/support/log.h> to define that macro. gRPC's 2024 migration off
+gpr logging onto absl (gpr_to_absl_logging) dropped GPR_ASSERT from
+that header starting somewhere before the 1.83.1 release this
+workflow builds from source, so the include still resolves but the
+macro use fails with "'GPR_ASSERT' was not declared in this scope".
+
+v6d's own CI never hits this: it builds vineyardd against a much
+older, prebuilt gRPC (CentOS 7 alpine-builder / conda), not one we
+compile ourselves, so upstream has no reason to carry a fix. Inline
+the same abort-on-mismatch behavior GPR_ASSERT provided, using
+<cstdlib>'s abort() (already pulled in transitively, but included
+explicitly here), instead of patching around gRPC's own API removal.
+
+diff --git a/thirdparty/etcd-cpp-apiv3/src/v3/Action.cpp b/thirdparty/etcd-cpp-apiv3/src/v3/Action.cpp
+index fff45e4..2b6e7c0 100644
+--- a/thirdparty/etcd-cpp-apiv3/src/v3/Action.cpp
++++ b/thirdparty/etcd-cpp-apiv3/src/v3/Action.cpp
+@@ -2,6 +2,7 @@
+ #include <grpc/support/log.h>
+ #include <grpcpp/support/status.h>
+ #include "etcd/v3/action_constants.hpp"
++#include <cstdlib>
+ 
+ etcdv3::Action::Action(etcdv3::ActionParameters const& params) {
+   parameters = params;
+@@ -98,7 +99,9 @@ void etcdv3::Action::waitForResponse() {
+     }
+   } else {
+     cq_.Next(&got_tag, &ok);
+-    GPR_ASSERT(got_tag == (void*) this);
++    if (got_tag != (void*) this) {
++      abort();
++    }
+   }
+ }
+ 
+--
+2.43.0
