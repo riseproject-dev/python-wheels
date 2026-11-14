@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/carlmontanari/scrapli/blob/v2.0.2/.github/workflows/publish.yaml
+#
+# Built from git tag v2.0.2, which upstream's own pyproject.toml publishes to
+# PyPI as the distribution `scrapli2` (semver), not `scrapli` (upstream's
+# separate, calver-released, pure-Python distribution of the same repo that
+# predates the native libscrapli rewrite) -- the package/workflow/docs names
+# here follow the real PyPI distribution this tag produces.
+name: Build scrapli2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scrapli2.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scrapli2.yml'
+      - 'docs/packages/scrapli2.yaml'
+      - 'patches/scrapli2/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scrapli2.yml'
+      - 'docs/packages/scrapli2.yaml'
+      - 'patches/scrapli2/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  LIBSCRAPLI_VERSION: 0.0.6
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: scrapli2
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scrapli2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      SCRAPLI2_VERSION: ${{ matrix.version }}
+
+    steps:
+      # scrapli2's semver PyPI version is identical to its git tag name (sans
+      # the `v` prefix), unlike upstream's unrelated calver `scrapli` releases.
+      - id: tag
+        run: echo "ref=v${SCRAPLI2_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout scrapli ${{ steps.tag.outputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: carlmontanari/scrapli
+          ref: ${{ steps.tag.outputs.ref }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch scrapli source
+        run: |
+          git apply python-wheels/patches/scrapli2/${{ env.SCRAPLI2_VERSION }}/0001-wheel-targets-riscv64.patch
+          git apply python-wheels/patches/scrapli2/${{ env.SCRAPLI2_VERSION }}/0002-ffi-arch-riscv64.patch
+
+      # setup.py skips building libscrapli whenever LIBSCRAPLI_BUILD_PATH
+      # already holds build.zig and just globs zig-out/<triple>/, so build it
+      # here the way libscrapli's own `make build-release` does, narrowed to
+      # riscv64-linux-gnu.
+      - name: Fetch and build libscrapli ${{ env.LIBSCRAPLI_VERSION }}
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          git clone --branch "v${LIBSCRAPLI_VERSION}" --depth 1 --single-branch \
+            https://github.com/scrapli/libscrapli "${{ github.workspace }}/libscrapli-src"
+          cd "${{ github.workspace }}/libscrapli-src"
+          # This step runs directly on the ubuntu-24.04-riscv host runner, not
+          # inside the manylinux container, and its system Python is PEP 668
+          # externally-managed -- `pip install` there dies with
+          # "error: externally-managed-environment". A venv sidesteps that
+          # instead of --break-system-packages (same precedent as
+          # build-decord.yml's "Retag the wheel py3-none" step and
+          # build-pylerc.yml's "Install the built wheel" step).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv "${{ github.workspace }}/.venv-ziglang"
+          . "${{ github.workspace }}/.venv-ziglang/bin/activate"
+          # The runner's stock pip (seeded into the venv by ensurepip, not
+          # the image's own upgraded pip -- gotcha 640) predates riscv64
+          # manylinux tag support, so it silently ignores both our own
+          # riscv64 wheel on pypi.riseproject.dev and upstream's, leaving
+          # only the unrelated ziglang-0.0.0-py3-none-any.whl placeholder
+          # release as "available" and failing with "Could not find a
+          # version that satisfies the requirement ziglang==0.17.0 (from
+          # versions: 0.0.0)" -- same fix as build-pylerc.yml's
+          # "Install the built wheel" step.
+          pip install -q --upgrade pip
+          pip install -q ziglang==0.17.0
+          # `zig build` fetches build.zig.zon's zig-yaml/zig-xml deps straight
+          # from codeberg.org/github.com with no retry of its own, and each
+          # matrix leg hits this independently -- intermittent
+          # TlsInitializationFailed/HttpConnectionClosing there otherwise fails
+          # the job (same shape as build-polyscope.yml's submodule fetch).
+          for attempt in 1 2 3 4 5; do
+            python3 -m ziglang build ffi \
+              -Doptimize=ReleaseSafe \
+              -freference-trace=4 \
+              -Ddependency-linkage=static \
+              -Dtarget=riscv64-linux-gnu \
+              --summary all && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep $((attempt * 30))
+          done
+          ls -l zig-out/riscv64-linux-gnu/libscrapli.*
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py lies to bdist_wheel about plat_name whenever
+          # LIBSCRAPLI_ZIG_TRIPLE is set (otherwise it ships py3-none-any
+          # despite bundling an arch-specific .so); ALWAYS_BUILD skips its
+          # download-a-release-asset path, since libscrapli publishes no
+          # riscv64 asset to download. /host is cibuildwheel's bind mount of
+          # the whole runner filesystem, reaching the patched clone above.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            LIBSCRAPLI_ALWAYS_BUILD=1
+            LIBSCRAPLI_ZIG_TRIPLE=riscv64-linux-gnu
+            LIBSCRAPLI_BUILD_PATH=/host${{ github.workspace }}/libscrapli-src
+          CIBW_BEFORE_BUILD: pip install ziglang==0.17.0
+          CIBW_TEST_COMMAND: >-
+            python -c "from scrapli.ffi_mapping import LibScrapliMapping; LibScrapliMapping()"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scrapli2-${{ env.SCRAPLI2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scrapli2 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: scrapli2-${{ matrix.version }}-*-manylinux_riscv64
