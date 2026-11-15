@@ -22,8 +22,12 @@ riscv64 has), so turn those three off instead of upstream's CI default
 of on, and skip QD_BUILD_TESTS (a CPU-only riscv64 leg doesn't need
 the GPU-aware cpp test binary) and the gcc-toolset-14 include-path
 workaround (that SCL package is x86_64/aarch64-only on the manylinux
-images; riscv64 needs no such workaround since it only ever uses the
-clang we ourselves just built).
+images); riscv64 instead sets CPLUS_INCLUDE_PATH from the image's own
+native system GCC under /usr (via `gcc -dumpversion`, not a hardcoded
+version), since our from-source riscv64 clang has no baked-in knowledge
+of this image's GCC install and otherwise fails every direct clang
+invocation (e.g. the LLVM runtime-bitcode generate_llvm_runtime_riscv64
+custom command) with "fatal error: 'atomic' file not found".
 
 Upstream-Status: Inappropriate [no riscv64 LLVM/sccache release exists to point at; this wires our own from-source riscv64 LLVM build in instead]
 
@@ -31,8 +35,8 @@ Signed-off-by: RISE Project CI <ci@riseproject.dev>
 ---
  .github/workflows/scripts/qd_build/llvm.py    |  7 +++++++
  .github/workflows/scripts/qd_build/sccache.py |  8 ++++++++
- .../scripts_new/manylinux_wheel/2_build.sh    | 20 ++++++++++++-------
- 3 files changed, 28 insertions(+), 7 deletions(-)
+ .../scripts_new/manylinux_wheel/2_build.sh    | 32 +++++++++++++++++++++++++++++-------
+ 3 files changed, 40 insertions(+), 7 deletions(-)
 
 diff --git a/.github/workflows/scripts/qd_build/llvm.py b/.github/workflows/scripts/qd_build/llvm.py
 index dbb9891..487c487 100644
@@ -84,7 +88,7 @@ index 3c030bb..3561a10 100644
      echo "Unsupported architecture: $PLATFORM"
      exit 1
  fi
-@@ -18,13 +18,19 @@ echo "Detected platform: $PLATFORM"
+@@ -18,13 +18,31 @@ echo "Detected platform: $PLATFORM"
  # Add Taichi LLVM toolchain to PATH
  export PATH="$PWD/taichi-llvm-15.0.7-linux-${PLATFORM}/bin:$PATH"
  
@@ -94,6 +98,18 @@ index 3c030bb..3561a10 100644
 +    # No riscv64 CUDA/AMDGPU/Vulkan backend exists; the LLVM CPU JIT is the only one riscv64
 +    # needs (gotcha "Add a riscv64 CPU arch" patch).
 +    export CMAKE_ARGS="-DQD_WITH_VULKAN:BOOL=OFF -DQD_WITH_CUDA:BOOL=OFF -DQD_WITH_AMDGPU:BOOL=OFF -DQD_BUILD_TESTS:BOOL=OFF"
++
++    # Our own from-source riscv64 clang has no baked-in knowledge of this image's system GCC
++    # install, so point it at the real libstdc++ headers the same way the x86_64/aarch64 branch
++    # below does for its SCL gcc-toolset -- without this, any direct clang invocation (e.g. the
++    # LLVM runtime-bitcode generate_llvm_runtime_riscv64 custom command) fails with "fatal
++    # error: 'atomic' file not found". There is no gcc-toolset SCL package on riscv64; use the
++    # image's native system GCC under /usr instead (gcc's own -dumpversion keeps this correct
++    # across manylinux image updates rather than hardcoding a version number).
++    gcc_ver=$(gcc -dumpversion | cut -d. -f1)
++    inc_base="/usr/include/c++/$gcc_ver"
++    extra="$inc_base:$inc_base/${PLATFORM}-redhat-linux:$inc_base/backward"
++    export CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:+$CPLUS_INCLUDE_PATH:}$extra"
 +else
 +    # Taichi build options
 +    export CMAKE_ARGS="-DQD_WITH_VULKAN:BOOL=ON -DQD_WITH_CUDA:BOOL=ON -DQD_WITH_AMDGPU:BOOL=ON -DQD_BUILD_TESTS:BOOL=ON"
