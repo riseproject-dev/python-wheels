@@ -348,8 +348,25 @@ jobs:
         # sagemath-repl (the real test extra) is unported, so this exercises
         # the module this split actually provides: basic rings (ZZ/QQ),
         # univariate polynomials and the categories framework underneath.
+        #
+        # `from sage.rings.integer import Integer` must run before
+        # `sage.rings.integer_ring` is ever touched: sage/rings/integer.pyx
+        # (module scope, line ~317) reads `integer_ring.ZZ` eagerly at its
+        # own init time, while sage/rings/integer_ring.pyx cimports Integer
+        # from sage.rings.integer -- so importing integer_ring cold, before
+        # anything else has loaded sage.rings.integer, always re-enters
+        # integer_ring's own not-yet-finished init and dies with
+        # "AttributeError: partially initialized module 'sage.rings.
+        # integer_ring' ... has no attribute 'ZZ'". This is upstream's own
+        # pre-existing ordering, not a riscv64 or packaging issue: the
+        # official PyPI passagemath-categories==10.8.13 manylinux_x86_64
+        # wheel reproduces the identical traceback for the identical cold
+        # `from sage.rings.integer_ring import ZZ` (confirmed by installing
+        # it locally and running this exact test), and is fixed there the
+        # same way, by importing Integer first.
         CIBW_TEST_COMMAND: >-
-          python -c "from sage.rings.integer_ring import ZZ;
+          python -c "from sage.rings.integer import Integer;
+          from sage.rings.integer_ring import ZZ;
           from sage.rings.rational_field import QQ;
           from sage.rings.polynomial.polynomial_ring_constructor import PolynomialRing;
           assert ZZ(2) + ZZ(3) == ZZ(5);
