@@ -3,16 +3,26 @@
 ---
 # Based on upstream's own wheel build (the `posix` job), reusing its
 # pyproject.toml [tool.cibuildwheel] hooks (before-build/test-command/
-# repair-wheel-command) as-is:
+# repair-wheel-command), with one patch:
 #   https://github.com/MacPython/openblas-libs/blob/v0.3.34.106.0/.github/workflows/posix.yml
 #
 # Upstream only ever builds riscv64 for manylinux (via QEMU emulation on an
-# arm64 runner, since they have no native riscv64 hardware). This repo has
-# real native riscv64 runners, so this workflow builds musllinux too - a
-# target scipy-openblas32 has never had anywhere, upstream included. That gap
-# is the actual reason numpy's own musllinux riscv64 build fails: numpy pins
-# an exact scipy-openblas32/64 version as a build-time dependency, and no
-# musllinux riscv64 wheel for it exists on PyPI or this registry.
+# arm64 runner, since they have no native riscv64 hardware), and never
+# musllinux at all. This repo has real native riscv64 runners and builds
+# both. That musllinux gap is the actual reason numpy's own musllinux
+# riscv64 build fails: numpy pins an exact scipy-openblas32/64 version as a
+# build-time dependency, and no musllinux riscv64 wheel for it exists on
+# PyPI or this registry.
+#
+# patches/scipy-openblas32/<version>/0001-riscv64-build-with-gcc-instead-of-clang.patch:
+# ci-before-build.sh's before_build hook tries to install a static clang
+# toolchain for riscv64 (added since RISE's last GitLab-built version), but
+# neither quay.io/pypa/manylinux_2_39_riscv64 nor .../musllinux_1_2_riscv64
+# ships one - confirmed from real job logs, identically on both platforms.
+# riscv64 here runs on real native hardware (unlike upstream's QEMU-emulated
+# CI), so it builds with the gcc toolchain already in both images instead,
+# the same one every other riscv64 package in this repo already builds
+# OpenBLAS-dependent Fortran/C code with.
 #
 # scipy-openblas32 and scipy-openblas64 are the same upstream source; only
 # the INTERFACE64 env var differs (build-time sed hack renaming the project,
@@ -37,11 +47,13 @@ on:
     paths:
       - '.github/workflows/build-scipy-openblas32.yml'
       - 'docs/packages/scipy-openblas32.yaml'
+      - 'patches/scipy-openblas32/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-scipy-openblas32.yml'
       - 'docs/packages/scipy-openblas32.yaml'
+      - 'patches/scipy-openblas32/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -84,6 +96,11 @@ jobs:
       PLAT: riscv64
 
     steps:
+      # cibuildwheel's `{project}` template (and this package's own
+      # pyproject.toml-relative hooks) resolve against the workspace root,
+      # so openblas-libs is checked out there and python-wheels (needed only
+      # for its patches/ dir) is placed under a subdir instead - same layout
+      # build-numpy.yml and build-ai-edge-litert.yml already use for this.
       - name: Checkout openblas-libs v${{ env.OPENBLAS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -91,6 +108,15 @@ jobs:
           ref: v${{ env.OPENBLAS_VERSION }}
           submodules: recursive
           persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels-repo
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels-repo/patches/scipy-openblas32/${{ env.OPENBLAS_VERSION }}/*.patch
 
       - name: Build wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
