@@ -68,13 +68,23 @@ jobs:
       # --no-default-features drops the default mimalloc allocator (matches upstream's
       # own aarch64/musl legs) but is NOT what fixes the test failures below: runs
       # 42887194565 (mimalloc on), 42940422871 and 43082799628 (mimalloc off) all show
-      # the identical "83 failed, 35 passed". The real cause is Cargo.toml's
-      # lto=true/codegen-units=1/opt-level=3 release profile miscompiling
-      # handle_request's 3-tuple return on riscv64 (ValueError: not enough values to
-      # unpack (expected 3, got 0) in wsgi.py) - only routes going through an extra
-      # middleware/hook layer are hit, and the same wheel/test code is fine on x86_64 -
-      # so override the profile for this target via CARGO_PROFILE_RELEASE_* (gotcha 188)
-      # instead of patching upstream's Cargo.toml.
+      # the identical "83 failed, 35 passed" (ValueError: not enough values to unpack
+      # (expected 3, got 0) at wsgi.py, handle_request's compiled 3-tuple return coming
+      # back empty on riscv64 only - the same wheel/test code is fine on x86_64).
+      # CARGO_PROFILE_RELEASE_LTO/CODEGEN_UNITS/OPT_LEVEL below was a second hypothesis
+      # (an LLVM riscv64 backend miscompile under Cargo.toml's aggressive release
+      # profile) - also DISPROVEN: run 43864759733 with this override in place shows
+      # the exact same "83 failed, 35 passed, 1 skipped" again. Left in place for now
+      # (harmless either way) while the real cause - invariant to both the allocator
+      # and the optimizer, so more likely an architecture/logic difference than a
+      # codegen bug - is still under investigation.
+      # DIAGNOSTIC, not a shipped change: dropping --release (full debug profile, no
+      # optimization, no LTO, debug assertions on) tests whether the corruption above
+      # survives with the optimizer entirely out of the picture. If it does, that rules
+      # out codegen/optimizer miscompiles altogether (gotcha 188's class of bug) and
+      # points at an architecture/logic difference instead (e.g. an insufficiently
+      # ordered atomic in the lock-free arc-swap route-table snapshot). To be reverted
+      # once this one diagnostic run's result is read, regardless of outcome.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         env:
@@ -83,7 +93,7 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: '0'
         with:
           target: riscv64gc-unknown-linux-gnu
-          args: --release --out dist -i python3.12 --no-default-features
+          args: --out dist -i python3.12 --no-default-features
           manylinux: '2_39'
 
       - name: Install Python
