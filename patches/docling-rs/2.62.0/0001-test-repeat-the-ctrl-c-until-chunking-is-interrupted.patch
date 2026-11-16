@@ -52,15 +52,28 @@ returns without being interrupted, the thread has genuinely exited (join
 only returns normally when the thread is dead) and can never call
 raise_signal() again, so the loop is guaranteed to terminate regardless
 of host timing, with no window to race at all.
+
+That revision still left one statement outside the retry: `stop.set()`
+ran before the `try`, on the theory that a plain attribute flip can't
+meaningfully be "interrupted". A real riscv64 run (job 133288954921)
+disproved that: CPython checks for a pending signal at any bytecode
+boundary, not only inside a blocking call, so the trailing SIGINT raised
+KeyboardInterrupt out of `stop.set()` itself - a statement that sat
+outside the try/except entirely, so nothing in this function caught it
+and it escaped the whole test (pytest's own "KeyboardInterrupt" session
+banner, traceback rooted in threading.py). Move `stop.set()` inside the
+retried block alongside `timer.join()`, so every statement this cleanup
+needs is covered by the same except, and calling it again on a retry is
+harmless (Event.set() is idempotent).
 ---
- crates/docling-py/tests/test_chunking.py | 29 ++++++++++++++++++++++----
- 1 file changed, 25 insertions(+), 4 deletions(-)
+ crates/docling-py/tests/test_chunking.py | 31 ++++++++++++++++++++++----
+ 1 file changed, 27 insertions(+), 4 deletions(-)
 
 diff --git a/crates/docling-py/tests/test_chunking.py b/crates/docling-py/tests/test_chunking.py
 index 0000000..0000000 100644
 --- a/crates/docling-py/tests/test_chunking.py
 +++ b/crates/docling-py/tests/test_chunking.py
-@@ -178,12 +178,37 @@ def test_ctrl_c_interrupts_native_chunking():
+@@ -178,12 +178,39 @@ def test_ctrl_c_interrupts_native_chunking():
 
      doc = _big_document()
 
@@ -87,16 +100,18 @@ index 0000000..0000000 100644
 -        timer.cancel()
 +        # resignal() can commit to one more raise_signal() after observing
 +        # `stop` only on its next 0.2s poll, so a SIGINT can still be pending
-+        # delivery to this thread right here. timer.join() itself can then
-+        # raise that KeyboardInterrupt instead of returning normally - no
-+        # fixed-duration mask (SIG_IGN, a sleep) closes this, since nothing
-+        # bounds the signal's actual delivery latency under load. Set `stop`
-+        # and keep retrying the join until it completes without being
-+        # interrupted: once that happens the thread has actually exited and
-+        # can raise no further signal, so the loop is guaranteed to end.
-+        stop.set()
++        # delivery to this thread right here - including to the very next
++        # statement run, whichever one that is. A real riscv64 run proved
++        # that the hard way: wrapping only timer.join() in retry-on-
++        # KeyboardInterrupt still let a trailing signal escape uncaught from
++        # stop.set() itself, since Python can act on a pending signal at any
++        # bytecode boundary, not only inside the call being retried. Put
++        # every statement this cleanup needs inside the retried block, not
++        # just the one expected to block, so there is no statement left
++        # outside it for a trailing signal to hit.
 +        while True:
 +            try:
++                stop.set()
 +                timer.join()
 +            except KeyboardInterrupt:
 +                continue
