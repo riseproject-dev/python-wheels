@@ -226,7 +226,16 @@ jobs:
             -DgRPC_PROTOBUF_PROVIDER=module \
             -DgRPC_ABSL_PROVIDER=module \
             -DOPENSSL_ROOT_DIR="${DEPS_PREFIX}"
-          cmake --build build -j"$(nproc)" --target install
+          # gotcha 421: this fleet's riscv64 runners really only have the 15Gi
+          # free -h shows, swap included (a swapfile can't be created on the
+          # container's overlay filesystem) - and -j"$(nproc)" silently OOM-
+          # killed this step on the full build (run 43653568533, job
+          # 132627149125: "Build static gRPC" stuck in_progress forever, the
+          # job conclusion failure, the log itself ending mid-compile with no
+          # error line at all). libprotoc's generated-codegen sources are the
+          # heaviest individual TUs in this tree; cap concurrency the same way
+          # build-cadquery-ocp-novtk.yml already does for its own OOM.
+          cmake --build build -j"$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))" --target install
 
       - name: Save compilation cache
         if: always() && github.ref == 'refs/heads/main'
