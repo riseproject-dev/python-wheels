@@ -65,12 +65,22 @@ jobs:
           swap-size-gb: 10
 
       # No musl target: rustup.rs ships no riscv64 musl toolchain.
-      # --no-default-features drops the default `mimalloc` global allocator, the same
-      # way upstream's own ci.yml already does for its aarch64-unknown-linux-gnu/musl
-      # legs; mimalloc's riscv64 support corrupts near every request's response tuple
-      # under this release profile, which is what upstream's own test suite caught here.
+      # --no-default-features drops the default mimalloc allocator (matches upstream's
+      # own aarch64/musl legs) but is NOT what fixes the test failures below: runs
+      # 42887194565 (mimalloc on), 42940422871 and 43082799628 (mimalloc off) all show
+      # the identical "83 failed, 35 passed". The real cause is Cargo.toml's
+      # lto=true/codegen-units=1/opt-level=3 release profile miscompiling
+      # handle_request's 3-tuple return on riscv64 (ValueError: not enough values to
+      # unpack (expected 3, got 0) in wsgi.py) - only routes going through an extra
+      # middleware/hook layer are hit, and the same wheel/test code is fine on x86_64 -
+      # so override the profile for this target via CARGO_PROFILE_RELEASE_* (gotcha 188)
+      # instead of patching upstream's Cargo.toml.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'off'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '0'
         with:
           target: riscv64gc-unknown-linux-gnu
           args: --release --out dist -i python3.12 --no-default-features
