@@ -25,29 +25,42 @@ That re-issuing loop races its own shutdown: the background thread checks
 `stop` and calls raise_signal() as two separate steps, so it can commit to
 one more raise_signal() in the instant before the main thread observes
 `stop` and returns from timer.join(). That extra SIGINT is still pending
-delivery to the main thread at that point. An earlier revision of this
-patch tried to absorb it with a bounded 0.2s time.sleep() right here, but
-that only narrows the race to a timing window: resignal()'s own 0.2s poll
-period means the trailing signal's actual delivery isn't bounded by any
-fixed sleep duration under load, so it can still land after the window
-closes - confirmed from a real riscv64 run where it surfaced instead
-inside the *next* test's threading.Thread.start() call.
+delivery to the main thread at that point.
 
-Install SIG_IGN before telling resignal() to stop and joining it, instead
-of racing a sleep against the signal's delivery: while SIGINT is ignored,
-the kernel drops any SIGINT raised by that thread unconditionally, rather
-than queuing it for later delivery, so no trailing signal can survive
-timer.join() regardless of host timing. Restore the previous handler only
-once the thread has fully exited and can no longer call raise_signal().
+Two earlier revisions tried to absorb that trailing signal with a
+fixed-duration mask around the join: first a bounded 0.2s time.sleep(),
+then installing signal.SIG_IGN before stop.set()/timer.join() and
+restoring the old handler after. Both failed on real riscv64 runs, in two
+different places: the sleep()-based one inside the *next* test's
+threading.Thread.start() call, and the SIG_IGN-based one inside the
+signal.signal(SIGINT, SIG_IGN) call itself, with the traceback showing a
+plain KeyboardInterrupt raised from _signal.signal() - CPython had
+already latched the pending signal and ran the Python-level handler at
+the next bytecode-safe point, which landed inside that very C call,
+before SIG_IGN could take effect. Neither a sleep nor a handler swap can
+close this: there is no instant at which "mask it" and "the thread might
+signal" are mutually exclusive, because the thread's raise_signal() and
+the main thread's cleanup code run concurrently right up to the point the
+thread has actually exited.
+
+Stop trying to pre-empt the signal and instead just keep retrying the
+join across it: set `stop`, then loop on timer.join(), catching and
+discarding any KeyboardInterrupt it raises and immediately joining again.
+POSIX signals of the same number do not queue, so each retry can be
+interrupted at most once per outstanding signal; once a join() call
+returns without being interrupted, the thread has genuinely exited (join
+only returns normally when the thread is dead) and can never call
+raise_signal() again, so the loop is guaranteed to terminate regardless
+of host timing, with no window to race at all.
 ---
- crates/docling-py/tests/test_chunking.py | 26 ++++++++++++++++++++++-----
- 1 file changed, 22 insertions(+), 4 deletions(-)
+ crates/docling-py/tests/test_chunking.py | 29 ++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
 
 diff --git a/crates/docling-py/tests/test_chunking.py b/crates/docling-py/tests/test_chunking.py
 index 0000000..0000000 100644
 --- a/crates/docling-py/tests/test_chunking.py
 +++ b/crates/docling-py/tests/test_chunking.py
-@@ -178,12 +178,30 @@ def test_ctrl_c_interrupts_native_chunking():
+@@ -178,12 +178,37 @@ def test_ctrl_c_interrupts_native_chunking():
 
      doc = _big_document()
 
@@ -73,14 +86,21 @@ index 0000000..0000000 100644
      finally:
 -        timer.cancel()
 +        # resignal() can commit to one more raise_signal() after observing
-+        # `stop` only on its next 0.2s poll; ignore SIGINT before stopping
-+        # it so the kernel drops that trailing signal unconditionally
-+        # instead of queuing it for delivery after this test returns.
-+        old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
-+        try:
-+            stop.set()
-+            timer.join()
-+        finally:
-+            signal.signal(signal.SIGINT, old_handler)
++        # `stop` only on its next 0.2s poll, so a SIGINT can still be pending
++        # delivery to this thread right here. timer.join() itself can then
++        # raise that KeyboardInterrupt instead of returning normally - no
++        # fixed-duration mask (SIG_IGN, a sleep) closes this, since nothing
++        # bounds the signal's actual delivery latency under load. Set `stop`
++        # and keep retrying the join until it completes without being
++        # interrupted: once that happens the thread has actually exited and
++        # can raise no further signal, so the loop is guaranteed to end.
++        stop.set()
++        while True:
++            try:
++                timer.join()
++            except KeyboardInterrupt:
++                continue
++            else:
++                break
 --
 2.43.0
