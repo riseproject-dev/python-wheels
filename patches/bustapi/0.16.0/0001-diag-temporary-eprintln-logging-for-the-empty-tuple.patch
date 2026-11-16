@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 16 Nov 2026 00:00:00 +0000
+Subject: [PATCH] diag: temporary eprintln! logging around the riscv64
+ empty-tuple bug
+
+Upstream-Status: Inappropriate [temporary riscv64 CI diagnostic, to be reverted once read]
+
+Every riscv64 CI run of this port shows the identical "83 failed, 35
+passed, 1 skipped" with the dominant symptom being wsgi.py's
+`body_resp, status_code, headers_map = result` unpacking a genuinely
+empty tuple from handle_request - confirmed NOT caused by the mimalloc
+allocator, and NOT caused by the release/LTO/opt-level profile (a full
+debug build with no optimization at all reproduces the exact same
+result). Source reading narrowed this to the "full pipeline" path
+(session/make_response/_response_to_rust_format), which for a session
+test calls into this crate's Rust-backed Signer::sign for cookie
+signing - a separate failure cluster ("quote_from_bytes() expected
+bytes") plausibly shares this same root cause if sign() is not handing
+back a clean value on riscv64.
+
+Adds eprintln! (not tracing::error!, since the test client calls
+handle_request directly without ever starting the server or
+initializing tracing_subscriber) at two points: right where
+Signer::sign returns (input/output lengths and a prefix of the signed
+value), and in handle_request both right after process_request returns
+and right before the final tuple is constructed (status/body/headers
+lengths at each point). This is diagnostic only - to be reverted once
+the next real CI log is read, never meant to ship.
+---
+ src/bindings/app.rs | 19 +++++++++++++++++--
+ src/crypto.rs       | 11 ++++++++++-
+ 2 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/src/bindings/app.rs b/src/bindings/app.rs
+index d95843c..dced8b2 100644
+--- a/src/bindings/app.rs
++++ b/src/bindings/app.rs
+@@ -413,14 +413,29 @@ impl PyBustApp {
+         let routes = state.routes.load_full();
+         let response_data = routes.process_request(req_data);
+
++        eprintln!(
++            "RISCV64_DIAG handle_request: path={:?} status={} body_len={} headers_count={}",
++            path,
++            response_data.status.as_u16(),
++            response_data.body.len(),
++            response_data.headers.len()
++        );
++
+         let body_str = response_data
+             .body_as_string()
+             .unwrap_or_else(|_| String::from_utf8_lossy(&response_data.body).to_string());
+
+-        Ok((
++        let out = (
+             body_str,
+             response_data.status.as_u16(),
+             response_data.headers,
+-        ))
++        );
++        eprintln!(
++            "RISCV64_DIAG handle_request: returning tuple body_str_len={} status={} headers_vec_len={}",
++            out.0.len(),
++            out.1,
++            out.2.len()
++        );
++        Ok(out)
+     }
+ }
+diff --git a/src/crypto.rs b/src/crypto.rs
+index b4c4bf9..b47e6ab 100644
+--- a/src/crypto.rs
++++ b/src/crypto.rs
+@@ -42,8 +42,17 @@ impl Signer {
+         jar.signed_mut(&self.key).add(c);
+
+         if let Some(cookie) = jar.get(name) {
+-            Ok(cookie.value().to_string())
++            let signed = cookie.value().to_string();
++            eprintln!(
++                "RISCV64_DIAG sign: name={:?} in_len={} out_len={} out_prefix={:?}",
++                name,
++                value.len(),
++                signed.len(),
++                &signed[..signed.len().min(24)]
++            );
++            Ok(signed)
+         } else {
++            eprintln!("RISCV64_DIAG sign: name={:?} FAILED jar.get returned None", name);
+             Err(pyo3::exceptions::PyValueError::new_err(
+                 "Failed to sign cookie",
+             ))
+--
+2.43.0
