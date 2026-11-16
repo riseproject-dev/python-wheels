@@ -66,34 +66,29 @@ jobs:
 
       # No musl target: rustup.rs ships no riscv64 musl toolchain.
       # --no-default-features drops the default mimalloc allocator (matches upstream's
-      # own aarch64/musl legs) but is NOT what fixes the test failures below: runs
-      # 42887194565 (mimalloc on), 42940422871 and 43082799628 (mimalloc off) all show
-      # the identical "83 failed, 35 passed" (ValueError: not enough values to unpack
-      # (expected 3, got 0) at wsgi.py, handle_request's compiled 3-tuple return coming
-      # back empty on riscv64 only - the same wheel/test code is fine on x86_64).
-      # CARGO_PROFILE_RELEASE_LTO/CODEGEN_UNITS/OPT_LEVEL below was a second hypothesis
-      # (an LLVM riscv64 backend miscompile under Cargo.toml's aggressive release
-      # profile) - also DISPROVEN: run 43864759733 with this override in place shows
-      # the exact same "83 failed, 35 passed, 1 skipped" again. Left in place for now
-      # (harmless either way) while the real cause - invariant to both the allocator
-      # and the optimizer, so more likely an architecture/logic difference than a
-      # codegen bug - is still under investigation.
-      # DIAGNOSTIC, not a shipped change: dropping --release (full debug profile, no
-      # optimization, no LTO, debug assertions on) tests whether the corruption above
-      # survives with the optimizer entirely out of the picture. If it does, that rules
-      # out codegen/optimizer miscompiles altogether (gotcha 188's class of bug) and
-      # points at an architecture/logic difference instead (e.g. an insufficiently
-      # ordered atomic in the lock-free arc-swap route-table snapshot). To be reverted
-      # once this one diagnostic run's result is read, regardless of outcome.
+      # own aarch64/musl legs); kept as it's harmless and matches that precedent, but
+      # it is NOT what's behind the test failures below. Investigation so far, all on
+      # the same "83 failed, 35 passed, 1 skipped" (ValueError: not enough values to
+      # unpack (expected 3, got 0) at wsgi.py, handle_request's compiled 3-tuple return
+      # coming back empty on riscv64 only - the identical wheel/test code is fine on
+      # x86_64):
+      #   - mimalloc on vs off (runs 42887194565 vs 42940422871/43082799628): no change.
+      #   - full release (lto=true/codegen-units=1/opt-level=3) vs that profile
+      #     overridden off (run 43864759733): no change.
+      #   - release vs a full debug build, --release dropped entirely - no
+      #     optimization, no LTO, debug assertions on (run 43868520406): no change,
+      #     same 83/35/1 split to the test, down to the second (73.9x s).
+      # That rules out the optimizer/codegen as the cause outright - this is a genuine
+      # architecture/logic difference, not a miscompile. Next places to look: the
+      # lock-free arc-swap route-table snapshot (an insufficiently-ordered atomic would
+      # behave identically regardless of optimization level) or the
+      # Vec<(String,String)>/3-tuple conversion PyO3 hands back to Python. Not yet
+      # patched.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
-        env:
-          CARGO_PROFILE_RELEASE_LTO: 'off'
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: '0'
         with:
           target: riscv64gc-unknown-linux-gnu
-          args: --out dist -i python3.12 --no-default-features
+          args: --release --out dist -i python3.12 --no-default-features
           manylinux: '2_39'
 
       - name: Install Python
