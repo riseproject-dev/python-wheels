@@ -772,6 +772,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `CIBW_BEFORE_ALL_LINUX`/`CIBW_BEFORE_BUILD_LINUX`, which run inside the container, not on
   the runner — forward it explicitly with `CIBW_ENVIRONMENT_PASS_LINUX`, or the container's
   shell dies with "unbound variable" under `set -u` (the netgen-mesher OCCT case).
+- **714** — A dependency compiled fresh in `CIBW_BEFORE_ALL_LINUX` with no RPATH of its own
+  needs `LD_LIBRARY_PATH` set via `CIBW_ENVIRONMENT_LINUX` for `auditwheel repair` (a
+  separate container invocation) to find it, even though `-L` found it fine at link time
+  (the piper-phonemize case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
