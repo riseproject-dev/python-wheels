@@ -90,7 +90,22 @@ jobs:
       # That rules out the optimizer/codegen as the cause outright - this is a genuine
       # architecture/logic difference, not a miscompile, for the dominant cluster
       # (sessions/middleware/the full _make_response-to-_response_to_rust_format
-      # pipeline) - still open.
+      # pipeline) - still open as a hypothesis... except it wasn't a separate bug at
+      # all: copying the compiled bustapi_core*.so into the checkout (see below) made
+      # ALL 83 failures disappear in one run (run 43899709434: "118 passed, 1
+      # skipped"), not just the 10-test multiprocess/examples cluster. The real
+      # explanation: without that copy, `python/bustapi/` in the checked-out source
+      # tree had no compiled extension at all, but Python's import path still favors
+      # a same-named directory on `sys.path`/cwd over the venv's installed package in
+      # some of these tests' import order - so the *entire* suite was quietly running
+      # against whatever partial/stub state was on disk in `python/bustapi/`, not the
+      # freshly built wheel, which produced the empty-tuple/MagicMock symptoms
+      # throughout. Every mimalloc/LTO/debug-build/eprintln diagnostic above varied
+      # the wheel that was never actually being exercised by most tests - hence
+      # "identical regardless of optimization level". Lesson for future ports using
+      # `pip install dist/*.whl` instead of `maturin develop`: always copy the built
+      # extension into the checkout's package dir before testing, not just for
+      # subprocess-based tests.
       #
       # A second, separate and fully explained cluster (test_multiprocess_stability,
       # test_new_examples - 10 of the 83): both spawn a fresh subprocess with
@@ -101,9 +116,19 @@ jobs:
       # instead (`pip install dist/*.whl`), never touching the checkout. Real log
       # confirms it: `ModuleNotFoundError: No module named 'bustapi.bustapi_core'` in
       # the spawned subprocess, before it ever binds a port - which is also why
-      # test_new_examples sees "Connection refused". Not riscv64-specific at all; the
-      # fix (below) copies the installed .so into the checkout so both the installed
-      # wheel and these PYTHONPATH-based subprocess tests find it.
+      # test_new_examples sees "Connection refused". The fix (below) copies the
+      # installed .so into the checkout so both the installed wheel and these
+      # PYTHONPATH-based subprocess tests find it - and, per above, so does every
+      # other test.
+      #
+      # Separately: docs/packages/bustapi.yaml originally declared both a manylinux
+      # and a musllinux target, but this job only ever builds manylinux (no riscv64
+      # musl Rust toolchain exists - see above). That made the publish job's release-
+      # completeness check fail every run with "release is incomplete; no wheel was
+      # built for: 3.10-abi3:musllinux" (run 43899709434's publish job), even once
+      # the test step above was all-green. Fixed by dropping the musllinux entry from
+      # the YAML, matching every other package that only lists platforms it actually
+      # builds.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
