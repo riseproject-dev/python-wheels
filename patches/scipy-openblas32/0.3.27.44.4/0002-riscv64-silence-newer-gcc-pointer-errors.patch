@@ -27,6 +27,23 @@ RISE's own GitLab pipeline that last built this line ever used.
 
 Scoped to $plat == riscv64 only, so every other platform's CFLAGS (and
 whichever GCC built them) stay untouched.
+
+This version's do_build_lib additionally runs a second, standalone
+`make ... tests` step (compiling OpenBLAS's own ctest C programs,
+unique to this version among 0.3.27.44.{3,4,6} - 44.3 never builds
+them and 44.6 dropped the step again), which has no inline CFLAGS=
+prefix of its own and hit the exact same error class there too, on
+real riscv64 CI (PR #4888):
+
+    c_zblat1c.c:650:41: error: passing argument 2 of 'zaxpytest_' from
+    incompatible pointer type [-Wincompatible-pointer-types]
+            zaxpytest_(&combla_1.n, &ca, cx, &combla_1.incx, cy, &
+    c_zblat1c.c:598:54: note: expected 'doublereal *' {aka 'double *'}
+    but argument is of type 'doublecomplex *'
+
+CFLAGS is exported, not just a local shell assignment, so this one
+override reaches that separate make invocation too instead of needing
+a second, duplicated fix for it.
 ---
  tools/build_steps.sh | 3 +++
  1 file changed, 3 insertions(+)
@@ -40,7 +57,7 @@ index 01d71ab..b191da1 100644
          *) echo "Strange plat value $plat"; exit 1 ;;
      esac
 +    if [ "$plat" == "riscv64" ]; then
-+        CFLAGS="$CFLAGS -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration"
++        export CFLAGS="$CFLAGS -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration"
 +    fi
      case $interface64 in
          1)
