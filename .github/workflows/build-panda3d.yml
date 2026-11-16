@@ -42,33 +42,6 @@ jobs:
       package: panda3d
       version: ${{ inputs.version }}
 
-  # TEMPORARY diagnostic job, to be removed once the real test_bam_info/
-  # test_egg_trans SIGSEGV is diagnosed. build_wheels's own strace attempt
-  # crashed the same way gdb did ("Segmentation fault (core dumped)" on
-  # `strace -f -v bam-info -h` itself, before any trace output), which could
-  # mean either ptrace is broken for ANY riscv64 binary on this runner, or
-  # something specific to the panda3d-built binary. This job answers that in
-  # minutes instead of the ~1h18m it takes build_wheels to even reach its own
-  # strace step, by tracing trivial binaries (/bin/true, /bin/echo) inside
-  # the same manylinux_riscv64 container on the same runner pool.
-  strace_sanity_check:
-    name: Diagnose whether ptrace/strace works at all on this runner
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 15
-    steps:
-      - name: Trace trivial binaries inside the manylinux container
-        run: |
-          docker run --rm -i --network=host "${MANYLINUX_RISCV64_IMAGE}" bash <<'SCRIPT'
-          set -x
-          dnf install -y --setopt=install_weak_deps=False strace
-          echo "DIAG: strace -f /bin/true"
-          strace -f -v /bin/true
-          echo "DIAG: /bin/true exit=$?"
-          echo "DIAG: strace -f /bin/echo hello"
-          strace -f -v /bin/echo hello
-          echo "DIAG: /bin/echo exit=$?"
-          SCRIPT
-
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
@@ -126,7 +99,18 @@ jobs:
           dnf install -y --setopt=install_weak_deps=False \
             bison flex freetype-devel mesa-libGL-devel libjpeg-turbo-devel \
             libpng-devel openssl-devel libvorbis-devel libogg-devel \
-            libX11-devel libXcursor-devel libXrandr-devel zlib-devel strace
+            libX11-devel libXcursor-devel libXrandr-devel zlib-devel
+
+          # GNU ld's default riscv64 linker script puts a non-PIE executable's first
+          # PT_LOAD at 0x10000, which is also this image's vm.mmap_min_addr: pandatool's
+          # CLI binaries (bam-info, egg-trans, ...) link non-PIE and crashed at exec with
+          # a bare SIGSEGV and no output (gdb: "During startup program terminated with
+          # signal SIGSEGV. No stack."; strace itself also segfaulted attaching, too early
+          # for ptrace to see anything -- same shape as CLAUDE.md gotcha 595, minus the
+          # patchelf step that usually triggers it). makepanda.py reads LDFLAGS from the
+          # environment and appends it to every link; raise the base instead of linking
+          # PIE, matching build-pygraphviz.yml/build-perf-analyzer.yml.
+          export LDFLAGS="-Wl,-Ttext-segment=0x200000"
 
           # setup's matrix (every RISCV64_PYTHONS-supported target in
           # docs/packages/panda3d.yaml bar cp39) includes cp310/cp311; the publish job's
@@ -151,46 +135,15 @@ jobs:
             "${PY}" -m venv --upgrade-deps /tmp/test-venv
             /tmp/test-venv/bin/pip install -q "wheelhouse/${whl}" pytest
 
-            # DIAGNOSTIC ONLY (not a fix): test_bam_info SIGSEGVs on riscv64 with no
-            # captured output. The previous gdb attempt got no backtrace at all --
-            # "During startup program terminated with signal SIGSEGV. No stack." --
-            # and gdb itself couldn't even disable ASLR ("Operation not permitted"),
-            # so the crash is too early for gdb's own ptrace-based attach to see
-            # anything. Use strace instead, which traces at the syscall level and
-            # doesn't need ptrace permissions beyond PTRACE_SYSCALL.
-            TOOLS_DIR=$(/tmp/test-venv/bin/python -c "
-          import os, panda3d
-          try:
-              import panda3d_tools
-              print(os.path.dirname(panda3d_tools.__file__))
-          except ImportError:
-              print(os.path.join(os.path.dirname(os.path.dirname(panda3d.__file__)), 'bin'))
-          ")
-            echo "DIAG: tools dir resolved to ${TOOLS_DIR}"
-            for tool in bam-info egg-trans; do
-              if [ -f "${TOOLS_DIR}/${tool}" ]; then
-                echo "DIAG: strace for ${tool} -h ($PY)"
-                strace -f -v "${TOOLS_DIR}/${tool}" -h > /tmp/strace-out.log 2>&1
-                echo "DIAG: exit=$? for ${tool}"
-                tail -40 /tmp/strace-out.log
-              else
-                echo "DIAG: ${tool} not found at ${TOOLS_DIR}"
-              fi
-            done
-
-            # DIAGNOSTIC ONLY: the loop's prior unconditional `pytest -x` means a
-            # cp310 test_bam_info failure aborts the whole job before cp311-314t
-            # ever get their own test_tools.py run -- every build to date has only
-            # ever actually tested cp310 against this crash. Don't abort the loop
-            # on a test failure so every interpreter's own result is known from one
-            # CI run; still propagate failure to the job via DIAG_FAILED.
-            if ! /tmp/test-venv/bin/python -m pytest -x -q; then
-              echo "DIAG: pytest FAILED for ${pydir}"
-              DIAG_FAILED=1
+            # Run every interpreter's suite even if one fails, so a single CI run
+            # reports every interpreter's own result instead of stopping at the first.
+            if ! /tmp/test-venv/bin/python -m pytest -q; then
+              echo "pytest FAILED for ${pydir}"
+              TEST_FAILED=1
             fi
             rm -rf /tmp/test-venv
           done
-          if [ -n "${DIAG_FAILED:-}" ]; then
+          if [ -n "${TEST_FAILED:-}" ]; then
             exit 1
           fi
           SCRIPT
