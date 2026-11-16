@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream triton-lang/triton is triaged not-feasible on riscv64 (gotcha 41): it is
+# a GPU-only compiler with proprietary NVIDIA/AMD vendor blobs and no riscv64
+# target anywhere in the stack. This workflow instead builds the
+# RuyiAI-Stack/triton-riscv fork, which replaces the GPU codegen with a real
+# LLVM/MLIR-native path (TTIR -> Linalg via triton-shared, Linalg -> LLVM IR via
+# Buddy Compiler, then riscv64 `llc` codegen) and ships it as a `triton.backends`
+# plugin, so no part of upstream's own build is patched.
+#
+# triton-riscv's own scripts/release.sh is reused directly rather than
+# reimplemented: given a `<py-tag> <arch>` pair it does the whole job itself --
+# docker-runs the riscv64 manylinux image, installs its own clang/lld toolchain,
+# clones the pinned triton-lang/triton commit (triton-hash.txt), downloads
+# prebuilt riscv64 LLVM and buddy-mlir toolchains (buddy-hash.txt, as GitHub
+# release tarballs -- no from-source LLVM build), builds Triton with the
+# triton-shared plugin against the stable Python ABI (TRITON_STABLE_ABI=ON, so
+# the wheel is tagged cp312-abi3), strips the bundled LLVM/buddy tool binaries,
+# and runs auditwheel repair. TRITON_RISCV_REF below pins their release tag
+# independently of docs/packages/triton.yaml's version (which tracks triton's own
+# __version__, not triton-riscv's release cadence).
+name: Build triton wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/triton.yaml not released yet'
+        required: false
+        default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-triton.yml'
+      - 'docs/packages/triton.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-triton.yml'
+      - 'docs/packages/triton.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # The triton-riscv tag this workflow builds, independent of the triton version
+  # matrix below (see the header comment).
+  TRITON_RISCV_REF: release/20261115-e99c326
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: triton
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build triton ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # A full Triton + triton-shared C++ build (plus the one-time LLVM/buddy-mlir
+    # toolchain download) comfortably clears an hour; leave generous headroom
+    # rather than guess from upstream's own x86_64 CI timing.
+    timeout-minutes: 360
+
+    env:
+      TRITON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout triton-riscv ${{ env.TRITON_RISCV_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: RuyiAI-Stack/triton-riscv
+          ref: ${{ env.TRITON_RISCV_REF }}
+          path: triton-riscv
+          persist-credentials: false
+
+      - name: Build wheel
+        working-directory: triton-riscv
+        env:
+          # Anonymous git from this fleet's self-hosted runners gets a 401 on
+          # some hosts (their own ci.yml carries the same workaround); setup.sh
+          # clones triton-lang/triton and Triton's own cmake clones googletest.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # release.sh docker-runs quay.io/pypa/manylinux_2_39_riscv64 itself when
+          # IN_DOCKER is unset, so nothing here needs to set up that container.
+          #
+          # NB: if this OOMs, it's the same root cause as gotcha 421 (this
+          # fleet's riscv64 runners have ~15GB RAM and no usable swap) -
+          # release.sh's docker run does not forward MAX_JOBS/
+          # CMAKE_BUILD_PARALLEL_LEVEL into the container the way their own
+          # ci.yml sets them on the host, so a fix would need to cap
+          # concurrency inside the container rather than in this step's env.
+          ./scripts/release.sh cp312-cp312 riscv64
+          ls -la build/release/riscv64/cp312-cp312/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: triton-${{ env.TRITON_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: triton-riscv/build/release/riscv64/cp312-cp312/*.whl
+          if-no-files-found: error
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test triton wheel
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          # torch is this registry's own riscv64 CPU build (docs/packages/torch.yaml);
+          # Triton's kernel launch path expects torch tensors, and installing it from
+          # the registry here (rather than triton-riscv's own external
+          # ruyirepo.ruyicommunity.cn index, used only by their own CI) keeps this
+          # entirely within this repo's normal wheel supply.
+          uv pip install --only-binary=:all: torch
+          uv pip install triton-riscv/build/release/riscv64/cp312-cp312/*.whl
+          python3 -c "
+          import torch
+          import triton
+          import triton.language as tl
+
+          @triton.jit
+          def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+              pid = tl.program_id(axis=0)
+              offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+              mask = offsets < n_elements
+              x = tl.load(x_ptr + offsets, mask=mask)
+              y = tl.load(y_ptr + offsets, mask=mask)
+              tl.store(out_ptr + offsets, x + y, mask=mask)
+
+          x = torch.rand(98432)
+          y = torch.rand(98432)
+          out = torch.empty_like(x)
+          n_elements = out.numel()
+          grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+          add_kernel[grid](x, y, out, n_elements, BLOCK_SIZE=1024)
+          expected = x + y
+          assert torch.allclose(out, expected), (out, expected)
+          print('triton riscv64/triton_shared kernel OK, max abs diff',
+                (out - expected).abs().max().item())
+          "
+
+  publish:
+    name: Publish triton ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: triton-${{ matrix.version }}-*-manylinux_riscv64
