@@ -96,13 +96,15 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 ```
 
-The concurrency key serializes runs of the same workflow and branch. Manual runs cancel an
-existing run by default. Set `cancel-in-progress` to `false` when queueing a rebuild that
-must wait for the active run. GitHub retains at most one pending run in a concurrency group,
-so another dispatch can replace that pending run even when the active run is preserved.
+The concurrency key serializes runs of the same workflow and branch. Push runs never cancel
+an existing run, because a later push may have no pending versions to build. Pull request and
+manual runs cancel an existing run by default. Set `cancel-in-progress` to `false` when
+queueing a rebuild that must wait for the active run. GitHub retains at most one pending run
+in a concurrency group, so another dispatch can replace that pending run even when the
+active run is preserved.
 
 They have distinct purposes:
 

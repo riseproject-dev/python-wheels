@@ -24,14 +24,15 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 ```
 
-The concurrency key serializes runs of the same workflow and branch. Manual dispatches
-cancel the previous run by default, matching push and pull request behavior. Pass
-`cancel-in-progress=false` when dispatching a queue so the active run can finish first.
-GitHub retains at most one pending run per concurrency group, so a third dispatch can still
-replace the pending run even when cancellation is disabled.
+The concurrency key serializes runs of the same workflow and branch. Push runs never cancel
+the previous run, because a later push may have no pending versions to build. Pull request
+and manual runs cancel the previous run by default. Pass `cancel-in-progress=false` when
+dispatching a queue so the active run can finish first. GitHub retains at most one pending
+run per concurrency group, so a third dispatch can still replace the pending run even when
+cancellation is disabled.
 
 **All three triggers, always.** `pull_request: paths` is not optional and is not redundant
 with `workflow_dispatch`: it is the only thing that can produce a new workflow's first run,
