@@ -36,12 +36,14 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  # Upstream's own Dockerfile builds eSpeak NG with autotools against a
-  # floating rhasspy/espeak-ng master branch. Real upstream espeak-ng has
-  # shipped a native CMake build since well before this pinned release and
-  # exposes the same libespeak-ng.so + espeak-ng/speak_lib.h setup.py expects,
-  # so build that instead of an unpinned, untested-on-riscv64 autotools path.
-  ESPEAK_NG_VERSION: 1.52.0
+  # phonemize.cpp calls espeak_TextToPhonemesWithTerminator(), which exists
+  # only on this fork (real upstream espeak-ng/espeak-ng tops out at the
+  # older espeak_TextToPhonemes() even at its newest 1.52.0 release) - the
+  # same fork upstream's own Dockerfile fetches, pinned to a commit instead
+  # of its floating master branch (gotcha 23's fix for a floating dep). This
+  # commit also carries CMake build support, so it is built that way instead
+  # of upstream's own autotools recipe, untested on riscv64.
+  ESPEAK_NG_REF: 8593723f10cfd9befd50de447f14bf0a9d2a14a4
   # Microsoft ships no riscv64 onnxruntime release; use our own published
   # riscv64 wheel's .so (gotcha 17's dep-wheel pattern) plus the matching
   # public headers from the real release tarball (architecture-independent).
@@ -83,13 +85,13 @@ jobs:
           only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          ESPEAK_NG_VERSION: ${{ env.ESPEAK_NG_VERSION }}
+          ESPEAK_NG_REF: ${{ env.ESPEAK_NG_REF }}
           ONNXRUNTIME_VERSION: ${{ env.ONNXRUNTIME_VERSION }}
           # CIBW_BEFORE_ALL_LINUX runs inside the manylinux container, a separate
           # process environment that only sees what cibuildwheel explicitly
           # forwards (gotcha 707) - without this, both vars above are unset inside
           # it and every reference below silently expands to the empty string.
-          CIBW_ENVIRONMENT_PASS_LINUX: ESPEAK_NG_VERSION ONNXRUNTIME_VERSION
+          CIBW_ENVIRONMENT_PASS_LINUX: ESPEAK_NG_REF ONNXRUNTIME_VERSION
           # Stages the same on-disk layout (lib/Linux-<machine>/onnxruntime,
           # espeak-ng/build, piper_phonemize/{espeak-ng-data,libtashkeel_model.ort})
           # setup.py's hard-coded paths expect, matching upstream's own Makefile
@@ -100,10 +102,13 @@ jobs:
           # works).
           CIBW_BEFORE_ALL_LINUX: >-
             dnf install -y cmake unzip git &&
-            git clone --depth 1 --branch "${ESPEAK_NG_VERSION}"
-            https://github.com/espeak-ng/espeak-ng.git /tmp/espeak-ng-src &&
+            mkdir -p /tmp/espeak-ng-src && cd /tmp/espeak-ng-src &&
+            git init -q && git remote add origin https://github.com/rhasspy/espeak-ng.git &&
+            git fetch -q --depth 1 origin "${ESPEAK_NG_REF}" && git checkout -q FETCH_HEAD &&
+            cd - &&
             cmake -S /tmp/espeak-ng-src -B /tmp/espeak-ng-build
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib
+            -DBUILD_ESPEAK_NG_EXE=OFF -DBUILD_ESPEAK_NG_TESTS=OFF
             -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF -DUSE_LIBPCAUDIO=OFF
             -DUSE_KLATT=OFF -DUSE_SPEECHPLAYER=OFF
             -DCMAKE_INSTALL_PREFIX="$(pwd)/espeak-ng/build" &&
@@ -149,11 +154,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout eSpeak NG v${{ env.ESPEAK_NG_VERSION }}
+      - name: Checkout eSpeak NG ${{ env.ESPEAK_NG_REF }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: espeak-ng/espeak-ng
-          ref: ${{ env.ESPEAK_NG_VERSION }}
+          repository: rhasspy/espeak-ng
+          ref: ${{ env.ESPEAK_NG_REF }}
           path: espeak-ng
           persist-credentials: false
 
