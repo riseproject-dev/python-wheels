@@ -88,15 +88,15 @@ jobs:
           # Stages the same on-disk layout (lib/Linux-<machine>/onnxruntime,
           # espeak-ng/build, piper_phonemize/{espeak-ng-data,libtashkeel_model.ort})
           # setup.py's hard-coded paths expect, matching upstream's own Makefile
-          # `python`/`python-wheel` targets. The -A on every curl is gotcha 713's
-          # fix (rust-maturin-and-pyo3.md): GitHub's codeload/raw endpoints reject
-          # a plain default-UA curl.
+          # `python`/`python-wheel` targets. eSpeak NG comes via `git clone`, not
+          # GitHub's `/archive/refs/tags/*.tar.gz` snapshot endpoint: that endpoint
+          # lazily (re)generates the tarball on first request and 404s outright
+          # when the cache has expired, which a plain `curl --retry` never retries
+          # (curl only retries transient 5xx/408/429, never a 404).
           CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y cmake unzip &&
-            curl -fsSL --retry 5 -A "python-wheels-riscv64-port" -o /tmp/espeak-ng.tar.gz
-            "https://github.com/espeak-ng/espeak-ng/archive/refs/tags/${ESPEAK_NG_VERSION}.tar.gz" &&
-            mkdir -p /tmp/espeak-ng-src &&
-            tar xzf /tmp/espeak-ng.tar.gz -C /tmp/espeak-ng-src --strip-components=1 &&
+            dnf install -y cmake unzip git &&
+            git clone --depth 1 --branch "${ESPEAK_NG_VERSION}"
+            https://github.com/espeak-ng/espeak-ng.git /tmp/espeak-ng-src &&
             cmake -S /tmp/espeak-ng-src -B /tmp/espeak-ng-build
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib
             -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF -DUSE_LIBPCAUDIO=OFF
@@ -113,14 +113,14 @@ jobs:
             "lib/Linux-$(uname -m)/onnxruntime/lib/libonnxruntime.so" &&
             cp /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime_providers_shared.so
             "lib/Linux-$(uname -m)/onnxruntime/lib/" &&
-            curl -fsSL --retry 5 -A "python-wheels-riscv64-port"
+            curl -fsSL --retry 5
             "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
             | tar xz -C "lib/Linux-$(uname -m)/onnxruntime" --wildcards --strip-components=1
             "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/include/*.h" &&
             cp -R espeak-ng/build/share/espeak-ng-data piper_phonemize/espeak-ng-data &&
             cp etc/libtashkeel_model.ort piper_phonemize/libtashkeel_model.ort &&
-            curl -fsSL --retry 5 -A "python-wheels-riscv64-port" "https://raw.githubusercontent.com/espeak-ng/espeak-ng/${ESPEAK_NG_VERSION}/COPYING" -o COPYING.espeak-ng &&
-            curl -fsSL --retry 5 -A "python-wheels-riscv64-port" "https://raw.githubusercontent.com/microsoft/onnxruntime/v${ONNXRUNTIME_VERSION}/LICENSE" -o LICENSE.onnxruntime
+            cp /tmp/espeak-ng-src/COPYING COPYING.espeak-ng &&
+            curl -fsSL --retry 5 "https://raw.githubusercontent.com/microsoft/onnxruntime/v${ONNXRUNTIME_VERSION}/LICENSE" -o LICENSE.onnxruntime
           # Upstream's released wheel ships no licence text for either bundled
           # library (verified against the real PyPI 1.1.0 wheel); setuptools'
           # default file-list glob (COPYING*/LICEN[CS]E*) picks the two files
