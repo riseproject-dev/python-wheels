@@ -73,13 +73,39 @@ jobs:
       package: scipy-openblas32
       version: ${{ inputs.version }}
 
-  build_wheels:
+  # 0.3.27.44.{3,4,6} predate upstream's own cibuildwheel/pyproject.toml build
+  # entirely (the old multibuild docker scripts below); split them out of
+  # build_wheels' matrix here rather than teaching build_wheels two build
+  # shapes.
+  setup_legacy:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      legacy: ${{ steps.split.outputs.legacy }}
+      modern: ${{ steps.split.outputs.modern }}
+    steps:
+      - id: split
+        env:
+          VERSIONS: ${{ needs.setup.outputs.versions }}
+        run: |
+          python3 -c "
+          import fnmatch, json, os
+          versions = json.loads(os.environ['VERSIONS'])
+          legacy = [v for v in versions if fnmatch.fnmatch(v, '0.3.27.44.*')]
+          modern = [v for v in versions if v not in legacy]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'legacy={json.dumps(legacy)}\n')
+              f.write(f'modern={json.dumps(modern)}\n')
+          "
+
+  build_wheels:
+    needs: [setup, setup_legacy]
+    if: needs.setup_legacy.outputs.modern != '[]'
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        version: ${{ fromJSON(needs.setup_legacy.outputs.modern) }}
         libc: [manylinux, musllinux]
     name: Build scipy-openblas32 ${{ matrix.version }} py3-none-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
@@ -149,6 +175,85 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build_wheels_legacy:
+    needs: [setup, setup_legacy]
+    if: needs.setup_legacy.outputs.legacy != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup_legacy.outputs.legacy) }}
+        libc: [manylinux, musllinux]
+    name: Build scipy-openblas32 ${{ matrix.version }} py3-none-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      OPENBLAS_VERSION: ${{ matrix.version }}
+      MB_ML_LIBC: ${{ matrix.libc }}
+      MB_ML_VER: ${{ matrix.libc == 'manylinux' && '_2_39' || '_1_2' }}
+      INTERFACE64: '0'
+      PLAT: riscv64
+
+    steps:
+      # These versions predate upstream's own cibuildwheel/pyproject.toml
+      # build by about two years; this drives the old tools/build_steps.sh +
+      # tools/build_wheel.sh multibuild scripts directly (its own posix.yml's
+      # Linux job, minus the OSX/i686/aarch64/etc legs) instead.
+      # v0.3.27.44.4 and v0.3.27.44.6 were never tagged - MacPython/openblas-libs
+      # bumped the version on its maintenance/v0.3.27.44 branch without tagging
+      # most commits. Confirmed from that branch's history: 44.4 is acfae33's
+      # direct parent of 44.3 with no other change on this build path (its real
+      # PyPI wheel is byte-identical to 44.3's own save for the version string);
+      # 44.6 is fca3050, three commits later, after a DYNAMIC_LIST x86_64/i686-only
+      # wheel-shrink refactor (irrelevant to riscv64, confirmed by diffing their
+      # real PyPI x86_64 wheels) - both pinned by commit, same as any other
+      # untagged-release port (gotcha 103/319).
+      - name: Determine upstream ref for ${{ env.OPENBLAS_VERSION }}
+        run: |
+          case "$OPENBLAS_VERSION" in
+            0.3.27.44.4) echo "OPENBLAS_REF=acfae339810e47dacb33f378a5ba1f9390d907a9" >> "$GITHUB_ENV" ;;
+            0.3.27.44.6) echo "OPENBLAS_REF=fca3050fbd57028c1a67ca6817daa318ad54ead5" >> "$GITHUB_ENV" ;;
+            *) echo "OPENBLAS_REF=v$OPENBLAS_VERSION" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Checkout openblas-libs ${{ env.OPENBLAS_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MacPython/openblas-libs
+          ref: ${{ env.OPENBLAS_REF }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels-repo
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels-repo/patches/scipy-openblas32/${{ env.OPENBLAS_VERSION }}/*.patch
+
+      - name: Build OpenBLAS
+        run: |
+          set -xeo pipefail
+          source tools/build_steps.sh
+          before_build
+          clean_code OpenBLAS v0.3.27
+          build_lib "$PLAT" "$INTERFACE64" "0"
+
+      - name: Build and test wheel
+        run: |
+          set -xeo pipefail
+          docker_image="quay.io/pypa/${MB_ML_LIBC}${MB_ML_VER}_${PLAT}"
+          docker run --rm -e INTERFACE64="$INTERFACE64" -e MB_ML_LIBC="$MB_ML_LIBC" \
+            -v "$(pwd)":/openblas "$docker_image" /bin/bash -xe /openblas/tools/build_wheel.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scipy-openblas32-${{ env.OPENBLAS_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
   gpl_sources:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
@@ -184,8 +289,11 @@ jobs:
 
   publish:
     name: Publish scipy-openblas32 ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
-    if: needs.setup.outputs.versions != '[]'
+    needs: [setup, build_wheels, build_wheels_legacy, gpl_sources]
+    # build_wheels/build_wheels_legacy each skip when setup_legacy routes no
+    # version their way; !failure() (not the default implicit needs-success
+    # check) is what lets publish still run on the other one.
+    if: needs.setup.outputs.versions != '[]' && !cancelled() && !failure()
     strategy:
       fail-fast: false
       matrix:
