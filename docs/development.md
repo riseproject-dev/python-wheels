@@ -73,8 +73,8 @@ pending versions to the build jobs as a matrix, so:
 - a run with nothing pending (typically the push that lands `tag:`/`files:`)
   skips every job and stays green.
 
-Publishing fills in `tag:`/`files:` under that entry through the documentation
-PR (`ci_scripts/update_doc.py`), which retires it from the pending set. The
+Publishing fills in `tag:`/`files:` under that entry and pushes the publication
+commit directly to `main` (`ci_scripts/update_doc.py`), which retires it from the pending set. The
 wheel's version must match a declared entry byte for byte, or the publish
 fails: a `setuptools_scm` dev version (`1.0.1.dev0+g...`) where `1.0.0` was
 declared is a bug in the build, not something to document.
@@ -83,9 +83,7 @@ To **upgrade** an existing package, append a `- version: <new version>` line to
 its YAML and open a PR; no workflow change is needed unless the new version
 needs one. The nightly `check_versions.py --declare` run opens one draft PR
 per package from `package/<package>`, so each upgrade is built, reviewed and merged on its
-own. Publication uses the same package-specific branch, allowing a nightly
-version declaration and its release metadata to share one PR without mixing
-unrelated packages.
+own. Publication subsequently records release metadata directly on `main`.
 
 ## Workflow Customizations for riscv64
 
@@ -288,8 +286,8 @@ which performs the following steps:
 
 1. Downloads the built wheel(s) from the previous job
 2. Creates an immutable GitHub Release containing the wheels
-3. Opens a PR against `docs/packages/<name>.yaml` recording the release under
-   the version's entry (via `ci_scripts/update_doc.py`), which
+3. Pushes an update to `docs/packages/<name>.yaml` directly to `main`, recording
+   the release under the version's entry (via `ci_scripts/update_doc.py`), which
    `ci_scripts/generate_packages_doc.py` later renders into the published
    Markdown page. With it in place, the `build-numpy.yml` script's `publish`
    job looks like this:
@@ -305,15 +303,13 @@ publish:
       version: ${{ fromJSON(needs.setup.outputs.versions) }}
   permissions:
     contents: write
-    pull-requests: write
   uses: $/.github/workflows/_publish-wheel.yml
   with:
     artifact-pattern: numpy-${{ matrix.version }}-*-manylinux_riscv64
 ```
 
-`permissions` needs `contents: write` and `pull-requests: write` here (not just
-`contents: read`) since the docs step pushes a branch and opens a PR with the
-default `GITHUB_TOKEN`.
+`permissions` needs `contents: write` here (not just `contents: read`) since the
+docs step pushes the publication commit directly to `main`.
 
 Other workflows follow the same process, modifying `artifact-pattern` to match
 their own artifact naming scheme and otherwise reusing `_publish-wheel.yml` like
@@ -381,7 +377,7 @@ user experience when consuming wheels from RISE's package index.**
 A pull request run builds and tests the wheels, then calls `_publish-wheel.yml`
 in dry-run mode. Review the publish job and confirm that it selected exactly the
 expected wheels and derived the expected normalized package name and version.
-Pull request runs never create releases or documentation pull requests.
+Pull request runs never create releases or push documentation updates.
 
 Merging the pull request pushes the pending version to `main`, which triggers
 the package workflow again through its `push` trigger. The successful `main`
@@ -393,24 +389,21 @@ run:
 3. uploads all selected wheels and any required `gpl-sources.tar` asset;
 4. publishes the release, at which point repository-level immutable releases
    freeze its tag and assets; and
-5. opens or updates the package-specific `package/<package>` pull request,
-   titled `<package>: update packages`, filling in the version's entry with the
-   release tag, wheel filenames, SHA-256 hashes, and `Requires-Python` metadata.
+5. commits the release tag, wheel filenames, SHA-256 hashes, and
+   `Requires-Python` metadata to the version's entry and pushes the commit
+   directly to `main`.
 
 Every `main` run creates a new release; existing releases are never reused or
 modified. Its description links back to the workflow run that produced it.
 Publishing fails if immutable releases are disabled, or if the wheel's version
 is not declared in the package YAML.
 
-Merging the package pull request pushes the now-released entry to `main` and
-triggers the workflow once more; with nothing left pending, that run skips every
-guarded job. Until then the version is still pending on `main`, so any other
-push touching the workflow or its YAML rebuilds and re-releases it.
+The publication commit triggers the workflow once more; with nothing left
+pending, that run skips every guarded job.
 
 The generated `/simple/` package index reads only `docs/packages/*.yaml`. The
-new release does not become discoverable through pip until the generated
-documentation pull request has been reviewed, merged, and deployed. Review that
-pull request promptly to complete publication.
+new release becomes discoverable through pip after the publication commit
+triggers and completes the website deployment.
 
 ## Other Workflow Tips and Tricks
 
