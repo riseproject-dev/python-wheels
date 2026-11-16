@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 16 Nov 2026 00:00:00 +0000
+Subject: [PATCH] cmake/vulkan, 3rd_party/sapien-vulkan-2: disable
+ Vulkan-Headers' C++ module target
+
+Upstream-Status: To upstream [not riscv64-specific: hits any build using GCC >= 14 with a Makefiles/Xcode generator, not yet submitted]
+
+Vulkan-Headers (FetchContent'd by cmake/vulkan.cmake, pinned to
+vulkan-sdk-1.3.290.0) auto-enables VULKAN_HEADERS_ENABLE_MODULE
+whenever the compiler looks capable of C++20 modules
+(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND VERSION_GREATER_EQUAL "14.0"
+among the other compilers it checks), regardless of whether the
+*generator* can actually build them. Upstream's own Linux Docker image
+(docker/Dockerfile) uses gcc-toolset-11 (GCC 11), so it never reaches
+that branch. manylinux_2_39_riscv64's system GCC is >= 14, and SAPIEN's
+setup.py never passes -G, so CMake defaults to the Unix Makefiles
+generator -- which does not support CXX_MODULES FILE_SETs at all, so
+configure dies outright:
+
+  CMake Error in sapien_build/_sapien_deps/vulkan-src/CMakeLists.txt:
+    The target named "Vulkan-Module" has C++ sources that may use
+    modules, but modules are not supported by this generator:
+      Unix Makefiles
+
+SAPIEN's own top-level CMakeLists.txt pulls in Vulkan-Headers *twice*
+through two byte-identical cmake/vulkan.cmake files: its own
+(CMakeLists.txt:62 include(vulkan), before 3rd_party/sapien-vulkan-2 is
+even added) and the one vendored inside the 3rd_party/sapien-vulkan-2
+submodule (whose own include(vulkan) then finds vulkan_POPULATED
+already true and skips straight past its FetchContent_Populate/
+add_subdirectory). The first attempt at this fix only patched the
+submodule's copy, which runs *second* -- the add_subdirectory() that
+actually defines Vulkan-Module already ran via SAPIEN's own copy by
+then, so the submodule-only patch was a no-op in practice (confirmed:
+identical "Vulkan-Module"/Unix-Makefiles failure on the next riscv64
+run). Force the cache variable off in both files; neither SAPIEN nor
+sapien-vulkan-2 link against Vulkan::VulkanHppModule, only
+Vulkan::Headers, so this sidesteps the generator restriction and skips
+building a module nothing links against.
+
+Verified locally: a minimal CMake tree reproducing SAPIEN's own
+include(vulkan) --> add_subdirectory(sapien-vulkan-2) --> its own
+include(vulkan) order, with COMPILER_SUPPORTS_CXX_MODULES forced on to
+stand in for GCC >= 14, hits the exact same "Vulkan-Module"/Unix
+Makefiles error unpatched, and configures clean with this patch
+applied to both copies (VULKAN_HEADERS_ENABLE_MODULE reads OFF at both
+the top-level and the submodule's own check).
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cmake/vulkan.cmake                           | 2 ++
+ 3rd_party/sapien-vulkan-2/cmake/vulkan.cmake | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/cmake/vulkan.cmake b/cmake/vulkan.cmake
+index 0000000..0000000 100644
+--- a/cmake/vulkan.cmake
++++ b/cmake/vulkan.cmake
+@@ -7,6 +7,8 @@ FetchContent_Declare(
+     GIT_PROGRESS TRUE
+ )
+
++set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "sapien and sapien-vulkan-2 only use Vulkan::Headers, never Vulkan::VulkanHppModule, and the Unix Makefiles generator SAPIEN builds with cannot emit CXX_MODULES FILE_SETs" FORCE)
++
+ FetchContent_GetProperties(vulkan)
+ if(NOT vulkan_POPULATED)
+   FetchContent_Populate(vulkan)
+diff --git a/3rd_party/sapien-vulkan-2/cmake/vulkan.cmake b/3rd_party/sapien-vulkan-2/cmake/vulkan.cmake
+index 0000000..0000000 100644
+--- a/3rd_party/sapien-vulkan-2/cmake/vulkan.cmake
++++ b/3rd_party/sapien-vulkan-2/cmake/vulkan.cmake
+@@ -7,6 +7,8 @@ FetchContent_Declare(
+     GIT_PROGRESS TRUE
+ )
+
++set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "sapien and sapien-vulkan-2 only use Vulkan::Headers, never Vulkan::VulkanHppModule, and the Unix Makefiles generator SAPIEN builds with cannot emit CXX_MODULES FILE_SETs" FORCE)
++
+ FetchContent_GetProperties(vulkan)
+ if(NOT vulkan_POPULATED)
+   FetchContent_Populate(vulkan)
+--
+2.50.1
