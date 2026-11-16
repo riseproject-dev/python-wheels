@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels-linux` job of
+# https://github.com/chio-labs/polyglot/blob/python-v0.13.10/.github/workflows/python-fork-release.yml
+name: Build polyglot-sql-chio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polyglot-sql-chio.yaml not released yet'
+        required: false
+        default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polyglot-sql-chio.yml'
+      - 'docs/packages/polyglot-sql-chio.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polyglot-sql-chio.yml'
+      - 'docs/packages/polyglot-sql-chio.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polyglot-sql-chio
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build polyglot-sql-chio ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      POLYGLOT_SQL_CHIO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout polyglot python-v${{ env.POLYGLOT_SQL_CHIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chio-labs/polyglot
+          ref: python-v${{ env.POLYGLOT_SQL_CHIO_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside polyglot-sql-python's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is crates/polyglot-sql-python/ -- so upstream's
+        # published wheels carry no licence text at all, only the MIT
+        # classifier (confirmed against the real PyPI wheel's dist-info).
+        run: cp LICENSE crates/polyglot-sql-python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/polyglot-sql-python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: 'cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # polyglot-sql-python ships no [tool.cibuildwheel]; the Rust
+          # toolchain its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # Upstream's own CI builds this exact wheel with
+          # `--features abi3 --manifest-path crates/polyglot-sql-python/Cargo.toml`;
+          # abi3 selects pyo3's abi3-py312 feature (requires-python is >=3.12).
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--features abi3"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: crates/polyglot-sql-python/tests crates/polyglot-sql-python/pyproject.toml
+          # test_duckdb_datafusion_execution.py self-skips without the
+          # optional duckdb/datafusion engines installed; test_compat.py
+          # self-skips without POLYGLOT_API_CONTRACT set. Both are upstream's
+          # own dev test suite (not run against the wheel in upstream's own
+          # CI, which only smoke-tests one parse call), run here in full per
+          # this repo's own testing convention.
+          CIBW_TEST_COMMAND: >-
+            python -c "import polyglot_sql._polyglot_sql as m; assert m.__file__.endswith('.so'), m.__file__"
+            && python -c "import polyglot_sql; assert polyglot_sql.parse_one('SELECT 1', dialect='postgres')"
+            && cd crates/polyglot-sql-python
+            && python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: polyglot-sql-chio-${{ env.POLYGLOT_SQL_CHIO_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish polyglot-sql-chio ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: polyglot-sql-chio-${{ matrix.version }}-*-manylinux_riscv64
