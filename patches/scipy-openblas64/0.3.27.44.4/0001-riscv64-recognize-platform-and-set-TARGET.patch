@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 16 Nov 2026 00:00:00 +0000
+Subject: [PATCH] riscv64: recognize the platform and give OpenBLAS a TARGET
+
+v0.3.27.44.x predates upstream's own riscv64 support by about two years:
+get_plat_tag() doesn't know the plat name, and do_build_lib()'s TARGET
+case statement has no Linux-riscv64 entry, so OpenBLAS's getarch.c
+("This arch/CPU is not supported by OpenBLAS") is never even reached -
+the build fails earlier, in this wrapper script.
+
+Upstream-Status: Backport [https://github.com/MacPython/openblas-libs/commit/6d72d214d479976e382a83e7100e88ee7df964c6]
+
+Upstream's own "Build riscv64+glibc wheel" backports as TARGET=GENERIC,
+which this patch tried first - it compiles, but fails on real riscv64
+hardware here with "'sgemm_p' undeclared" from param.h's SGEMM_DEFAULT_P
+macro: OpenBLAS's plain GENERIC target has no riscv64 kernel-parameter
+block in this release's param.h at all. TARGET=RISCV64_GENERIC (the
+rv64gc baseline OpenBLAS has shipped since well before 0.3.27, confirmed
+in OpenMathLib/OpenBLAS's own v0.3.27 tag: getarch.c's
+FORCE_RISCV64_GENERIC and a real param.h RISCV64_GENERIC block defining
+SGEMM_DEFAULT_P etc.) is what upstream's own newer releases use for this
+case once they special-case riscv64 away from the x86/power/arm generic
+fallback - confirmed working here from a real riscv64 build.
+---
+ tools/build_steps.sh | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/tools/build_steps.sh b/tools/build_steps.sh
+index 916dc58..01d71ab 100644
+--- a/tools/build_steps.sh
++++ b/tools/build_steps.sh
+@@ -33,7 +33,7 @@ function get_plat_tag {
+     local mb_ml_ver=${MB_ML_VER:-1}
+     local mb_ml_libc=${MB_ML_LIBC:-manylinux}
+     case $plat in
+-        i686|x86_64|arm64|universal2|intel|aarch64|s390x|ppc64le) ;;
++        i686|x86_64|arm64|universal2|intel|aarch64|s390x|ppc64le|riscv64) ;;
+         *) echo Did not recognize plat $plat; return 1 ;;
+     esac
+     local uname=${2:-$(uname)}
+@@ -146,6 +146,10 @@ function do_build_lib {
+             local bitness=64
+             local target_flags="TARGET=POWER8"
+             ;;
++        Linux-riscv64)
++            local bitness=64
++            local target_flags="TARGET=RISCV64_GENERIC"
++            ;;
+         *) echo "Strange plat value $plat"; exit 1 ;;
+     esac
+     case $interface64 in

@@ -1,0 +1,63 @@
+From a0511e4f5f39637ffa56940f08ac3b14899c5411 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 15 Nov 2026 00:00:00 +0000
+Subject: [PATCH] riscv64: build with gcc instead of clang
+
+Upstream-Status: Inappropriate [tools/install-static-clang.sh's case statement matches RUNNER_ARCH's "RISCV64" only against lowercase arches, so it falls to the default branch and dies on an unrelated unbound-variable typo before any real clang-vs-gcc decision is made]
+
+At this tag ci-before-build.sh calls tools/install-static-clang.sh
+unconditionally for every non-Darwin platform (the loongarch64/ppc64le/
+s390x/riscv64 case statement that 0.3.34.106.0's patch targets does not
+exist yet). That script's own case statement matches GitHub Actions'
+RUNNER_ARCH against uppercase tokens for every architecture it means to
+support on a native runner (ARM64, ARM, X64, X86) but, for ppc64le/
+riscv64/s390x, only against the lowercase `uname -m` spelling - so on
+this repo's native riscv64 runners, where RUNNER_ARCH is "RISCV64", it
+falls through to the default case and fails immediately on an unrelated
+typo (`${CLANG_ARCH}` instead of `${STATIC_CLANG_ARCH}`) - confirmed from
+this PR's own first CI run, before OpenBLAS is even built. Upstream never
+hits this: their own riscv64 build runs under QEMU on an arm64 runner, so
+RUNNER_ARCH there is "ARM64", which does match.
+
+pyproject.toml's `[tool.cibuildwheel.linux]` table forces every Linux
+build - every architecture, not just the emulated ones - onto this same
+clang toolchain (the per-architecture case statement this repo's later
+patches target was only added afterwards). Since this repo only ever
+builds riscv64 through this workflow, dropping that table here is
+equivalent in effect, scoped by context, to excluding riscv64 from it:
+riscv64 keeps using the manylinux/musllinux image's own gcc, the same
+toolchain every other riscv64 package in this repo already builds
+OpenBLAS-dependent Fortran/C code with.
+---
+ ci-before-build.sh | 2 +-
+ pyproject.toml     | 3 ---
+ 2 files changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/ci-before-build.sh b/ci-before-build.sh
+index 1288d9d..249182a 100755
+--- a/ci-before-build.sh
++++ b/ci-before-build.sh
+@@ -53,7 +53,7 @@ else
+     export OPENBLAS_COMMIT=$(cat openblas_commit.txt)
+ fi
+
+-if [ "$(uname)" != "Darwin" ]; then
++if [ "$(uname)" != "Darwin" ] && [ "$PLAT" != "riscv64" ]; then
+   ./tools/install-static-clang.sh
+   export PATH=/opt/clang/bin:$PATH
+ fi
+diff --git a/pyproject.toml b/pyproject.toml
+index 348a512..01c03a4 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -55,8 +55,5 @@ environment-pass = [
+   "OS-NAME",
+   "RUNNER_ARCH",
+ ]
+-[tool.cibuildwheel.linux]
+-environment = { CC = "/opt/clang/bin/clang", CXX = "/opt/clang/bin/clang++", LDFLAGS = "-fuse-ld=lld" }
+-
+ [project.entry-points.pkg_config]
+ scipy-openblas = 'scipy_openblas64.lib.pkgconfig'
+--
+2.43.0
