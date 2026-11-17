@@ -31,6 +31,11 @@ on:
         description: 'Version glob to (re)build; empty builds every version of docs/packages/cryptography.yaml not released yet'
         required: false
         default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
     paths:
@@ -43,8 +48,8 @@ on:
       - 'docs/packages/cryptography.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
@@ -143,6 +148,17 @@ jobs:
       # OPENSSL_STATIC at, so both are dropped, along with --sbom-include,
       # which points at a static build's generated sbom.json that has no
       # riscv64 equivalent).
+      #
+      # musllinux-only: upstream's workspace Cargo.toml hardcodes
+      # `[profile.release] overflow-checks = true`, and at the default
+      # opt-level=3 that combination makes rustc's LLVM backend SIGSEGV
+      # compiling cryptography-rust for riscv64gc-unknown-linux-musl (not a
+      # bug in this crate - confirmed via a real job log: `rustc ...
+      # (signal: 11, SIGSEGV: invalid memory reference)`; every cryptography
+      # version since 39.0.2 has been pending because of it). manylinux
+      # isn't affected. Lowering opt-level avoids the backend bug without
+      # touching overflow-checks, so the shipped wheel keeps upstream's
+      # hardening.
       - name: Build the wheel
         run: |
           podman run -t \
@@ -151,6 +167,7 @@ jobs:
             --workdir /workspace \
             -e PYTHON_VERSION="${{ matrix.PYTHON.VERSION }}" \
             -e PIP_EXTRA_INDEX_URL="https://pypi.riseproject.dev/simple/" \
+            -e CARGO_PROFILE_RELEASE_OPT_LEVEL="${{ matrix.MANYLINUX.NAME == 'musllinux_1_2_riscv64' && '1' || '3' }}" \
             "${{ matrix.MANYLINUX.IMAGE }}" \
             bash -c '
               set -euo pipefail

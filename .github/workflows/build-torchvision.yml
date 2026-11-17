@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pytorch/vision/blob/main/.github/workflows/build-wheels-linux.yml
+name: Build torchvision wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/torchvision.yaml not released yet'
+        required: false
+        default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchvision.yml'
+      - 'docs/packages/torchvision.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchvision.yml'
+      - 'docs/packages/torchvision.yaml'
+
+run-name: build-torchvision ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: torchvision
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build torchvision ${{ matrix.version }} cp${{ matrix.python-version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Match torch's own riscv64 matrix on the registry. torchvision links
+        # libtorch_python (version-specific) and hardcodes TORCH_TARGET_VERSION
+        # to one torch release, so each CPython needs its own build against
+        # that exact torch; there is no single abi3 wheel.
+        # See https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+        python-version: [312, 313, 314, 314t]
+
+    env:
+      TORCHVISION_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout torchvision v${{ env.TORCHVISION_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pytorch/vision
+          ref: v${{ env.TORCHVISION_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version }}-manylinux_riscv64"
+          # torchvision's setup.py does `import torch` at module top and its
+          # [build-system] table has no explicit backend, so pip falls back to
+          # the legacy setuptools backend with no isolation benefit anyway.
+          # Preinstall torch (+ the build tools) and disable isolation so
+          # setup.py can import the already-installed torch.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # libpng/libjpeg-turbo/libwebp are Rocky 10's own packages (same set
+          # build-pygame-ce.yml and build-rasterio.yml already use here); their
+          # absence only disables the matching optional image codec with a
+          # warning (setup.py's find_libpng/find_library), but installing them
+          # keeps this wheel's feature set identical to upstream's own.
+          CIBW_BEFORE_ALL: dnf install -y -q libpng-devel libjpeg-turbo-devel libwebp-devel
+          # --only-binary=:all: torch: never let pip fall back to building
+          # torch from an sdist inside the container (public PyPI has no
+          # riscv64 torch wheel; ours does). torch==2.14.0 (exact, not a
+          # floor): setup.py hardcodes TORCH_TARGET_VERSION to 2.14.0's stable
+          # ABI tag, matching upstream's own exact pin for this release.
+          # PIP_EXTRA_INDEX_URL lets torch (and its own deps) resolve from our
+          # registry inside the container.
+          CIBW_BEFORE_BUILD: >-
+            pip install --only-binary=:all:
+            torch==2.14.0 numpy setuptools wheel ninja
+          # BUILD_VERSION pins a clean wheel version; without it setup.py
+          # keeps version.txt's own dev suffix (0.29.0a0). The tag maps 1:1 to
+          # the package version (v0.29.0 -> 0.29.0), so no translation needed.
+          CIBW_ENVIRONMENT: >-
+            BUILD_VERSION=${{ matrix.version }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # torchvision's extension links libtorch/libc10/libgomp etc., which
+          # are provided by the torch wheel at runtime (torch is imported
+          # before torchvision and loads them RTLD_GLOBAL). Exclude them from
+          # the repair so auditwheel does not vendor ~130MB of libtorch into
+          # our wheel - this mirrors how upstream torchvision wheels are
+          # built. libpng/libjpeg/libwebp are NOT excluded: upstream's own
+          # wheel vendors those the same way auditwheel will here.
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude libtorch.so
+            --exclude libtorch_cpu.so
+            --exclude libtorch_python.so
+            --exclude libtorch_global_deps.so
+            --exclude libc10.so
+            --exclude libgomp.so.1
+            --exclude libgfortran.so.5
+            --exclude libopenblas.so.0
+          CIBW_TEST_REQUIRES: torch==2.14.0 numpy
+          # Mirrors test/smoke_test.py's smoke_test_torchvision() and
+          # smoke_test_torchvision_read_decode(), minus the ResNet50 classify
+          # check: that one downloads pretrained weights over the network,
+          # which this runner's CI should not depend on.
+          # CLAUDE.md gotcha 247: the first statement must share the opening
+          # quote's line (no line break before `import`) and every statement
+          # must end in `;` - a folded `>-` scalar only turns newlines into
+          # spaces, it does not insert statement separators.
+          CIBW_TEST_COMMAND: >-
+            python -c "import torch, torchvision;
+            from torchvision.io import decode_image;
+            assert torch.ops.image.decode_png is not None;
+            assert torch.ops.torchvision.roi_align is not None;
+            img = decode_image('{project}/test/assets/encode_jpeg/grace_hopper_517x606.jpg');
+            assert tuple(img.shape) == (3, 606, 517), img.shape;
+            img = decode_image('{project}/test/assets/interlaced_png/wizard_low.png');
+            assert tuple(img.shape) == (4, 471, 354), img.shape;
+            img = decode_image('{project}/test/assets/fakedata/logos/rgb_pytorch.webp');
+            assert tuple(img.shape) == (3, 100, 100), img.shape;
+            print('torchvision smoke test OK')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torchvision-${{ env.TORCHVISION_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish torchvision ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: torchvision-${{ matrix.version }}-*-manylinux_riscv64

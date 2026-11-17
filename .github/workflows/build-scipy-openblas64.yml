@@ -1,0 +1,268 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build (the `posix` job), reusing its
+# pyproject.toml [tool.cibuildwheel] hooks (before-build/test-command/
+# repair-wheel-command), with one patch:
+#   https://github.com/MacPython/openblas-libs/blob/v0.3.34.106.0/.github/workflows/posix.yml
+#
+# Same upstream source as scipy-openblas32 (see build-scipy-openblas32.yml
+# for the full rationale, including the riscv64-build-with-gcc-instead-of-clang
+# patch) - only INTERFACE64 differs, which is why this workflow is
+# near-identical to that one rather than sharing a template: the two
+# publish as separate PyPI/registry packages, matching upstream.
+name: Build scipy-openblas64 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scipy-openblas64.yaml not released yet'
+        required: false
+        default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scipy-openblas64.yml'
+      - 'docs/packages/scipy-openblas64.yaml'
+      - 'patches/scipy-openblas64/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scipy-openblas64.yml'
+      - 'docs/packages/scipy-openblas64.yaml'
+      - 'patches/scipy-openblas64/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: scipy-openblas64
+      version: ${{ inputs.version }}
+
+  # See build-scipy-openblas32.yml for why: 0.3.27.44.{3,4,6} predate
+  # upstream's cibuildwheel build entirely.
+  setup_legacy:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      legacy: ${{ steps.split.outputs.legacy }}
+      modern: ${{ steps.split.outputs.modern }}
+    steps:
+      - id: split
+        env:
+          VERSIONS: ${{ needs.setup.outputs.versions }}
+        run: |
+          python3 -c "
+          import fnmatch, json, os
+          versions = json.loads(os.environ['VERSIONS'])
+          legacy = [v for v in versions if fnmatch.fnmatch(v, '0.3.27.44.*')]
+          modern = [v for v in versions if v not in legacy]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'legacy={json.dumps(legacy)}\n')
+              f.write(f'modern={json.dumps(modern)}\n')
+          "
+
+  build_wheels:
+    needs: [setup, setup_legacy]
+    if: needs.setup_legacy.outputs.modern != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup_legacy.outputs.modern) }}
+        libc: [manylinux, musllinux]
+    name: Build scipy-openblas64 ${{ matrix.version }} py3-none-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      OPENBLAS_VERSION: ${{ matrix.version }}
+      MB_ML_LIBC: ${{ matrix.libc }}
+      MB_ML_VER: _2_39
+      INTERFACE64: '1'
+      PLAT: riscv64
+
+    steps:
+      # cibuildwheel's `{project}` template (and this package's own
+      # pyproject.toml-relative hooks) resolve against the workspace root,
+      # so openblas-libs is checked out there and python-wheels (needed only
+      # for its patches/ dir) is placed under a subdir instead - same layout
+      # build-numpy.yml and build-ai-edge-litert.yml already use for this.
+      - name: Checkout openblas-libs v${{ env.OPENBLAS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MacPython/openblas-libs
+          ref: v${{ env.OPENBLAS_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels-repo
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply patches
+        # Not every version needs one - 0.3.31.22.0 and 0.3.33.112.0 predate
+        # the clang toolchain change 0.3.34.106.0's patch works around.
+        run: |
+          if compgen -G "python-wheels-repo/patches/scipy-openblas64/${{ env.OPENBLAS_VERSION }}/*.patch" > /dev/null; then
+            git apply -v python-wheels-repo/patches/scipy-openblas64/${{ env.OPENBLAS_VERSION }}/*.patch
+          fi
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: dist/
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # See build-scipy-openblas32.yml for why: upstream's own
+          # ci-test.sh runs `python3.9 -m scipy_openblas64`, which fails on
+          # the installed wheel (no __main__.py) on both libcs here - a
+          # pre-existing gap in upstream's own test script, not riscv64 or
+          # patch related. get_pkg_config() loads the compiled library via
+          # ctypes, so this is the real functional check instead.
+          CIBW_TEST_COMMAND: >-
+            python3 -c "import scipy_openblas64 as s;
+            config = s.get_pkg_config();
+            assert 'openblas_config=' in config and 'OpenBLAS' in config, config"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scipy-openblas64-${{ env.OPENBLAS_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build_wheels_legacy:
+    needs: [setup, setup_legacy]
+    if: needs.setup_legacy.outputs.legacy != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup_legacy.outputs.legacy) }}
+        libc: [manylinux, musllinux]
+    name: Build scipy-openblas64 ${{ matrix.version }} py3-none-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      OPENBLAS_VERSION: ${{ matrix.version }}
+      MB_ML_LIBC: ${{ matrix.libc }}
+      MB_ML_VER: ${{ matrix.libc == 'manylinux' && '_2_39' || '_1_2' }}
+      INTERFACE64: '1'
+      PLAT: riscv64
+
+    steps:
+      # See build-scipy-openblas32.yml for the full rationale and the
+      # 0.3.27.44.4/0.3.27.44.6 commit pins.
+      - name: Determine upstream ref for ${{ env.OPENBLAS_VERSION }}
+        run: |
+          case "$OPENBLAS_VERSION" in
+            0.3.27.44.4) echo "OPENBLAS_REF=acfae339810e47dacb33f378a5ba1f9390d907a9" >> "$GITHUB_ENV" ;;
+            0.3.27.44.6) echo "OPENBLAS_REF=fca3050fbd57028c1a67ca6817daa318ad54ead5" >> "$GITHUB_ENV" ;;
+            *) echo "OPENBLAS_REF=v$OPENBLAS_VERSION" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Checkout openblas-libs ${{ env.OPENBLAS_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MacPython/openblas-libs
+          ref: ${{ env.OPENBLAS_REF }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels-repo
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels-repo/patches/scipy-openblas64/${{ env.OPENBLAS_VERSION }}/*.patch
+
+      - name: Build OpenBLAS
+        run: |
+          set -xeo pipefail
+          source tools/build_steps.sh
+          before_build
+          clean_code OpenBLAS v0.3.27
+          build_lib "$PLAT" "$INTERFACE64" "0"
+
+      - name: Build and test wheel
+        run: |
+          set -xeo pipefail
+          docker_image="quay.io/pypa/${MB_ML_LIBC}${MB_ML_VER}_${PLAT}"
+          docker run --rm -e INTERFACE64="$INTERFACE64" -e MB_ML_LIBC="$MB_ML_LIBC" \
+            -v "$(pwd)":/openblas "$docker_image" /bin/bash -xe /openblas/tools/build_wheel.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scipy-openblas64-${{ env.OPENBLAS_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for scipy-openblas64 ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      OPENBLAS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gcc-gfortran
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scipy-openblas64-${{ env.OPENBLAS_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish scipy-openblas64 ${{ matrix.version }}
+    needs: [setup, build_wheels, build_wheels_legacy, gpl_sources]
+    if: needs.setup.outputs.versions != '[]' && !cancelled() && !failure()
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: scipy-openblas64-${{ matrix.version }}-py3-none-*riscv64
+      gpl-sources-artifact: scipy-openblas64-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
