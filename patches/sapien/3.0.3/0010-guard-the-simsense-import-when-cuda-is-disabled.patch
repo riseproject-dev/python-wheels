@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 17 Nov 2026 00:00:00 +0000
+Subject: [PATCH] python: guard the simsense import when CUDA is disabled
+
+Upstream-Status: To upstream [affects every non-CUDA Linux build, not riscv64-specific]
+
+Real riscv64 CI (this PR's run, job 133890774516): the wheel builds and
+installs fine, but the import smoke test fails outright:
+
+    ImportError: cannot import name 'simsense' from 'sapien.pysapien'
+
+CMakeLists.txt's own SAPIEN_CUDA option (default ON, forced OFF by this
+port's setup.py when CUDA_PATH is unset - no riscv64 CUDA toolkit exists)
+gates `add_subdirectory("3rd_party/simsense")` directly, so a CUDA-less
+build never compiles that extension module into pysapien at all. But
+py_package/__init__.py's own import of it is only guarded against macOS
+(`if platform.system() != "Darwin":`), not against a CUDA-disabled Linux
+build - upstream never ships a Linux wheel with CUDA off, so this gap
+has no prior opportunity to surface.
+
+Also check that the compiled module actually exposes simsense before
+importing it, same shape as the existing Darwin check, rather than
+assuming every non-Darwin build has it.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ python/py_package/__init__.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/python/py_package/__init__.py b/python/py_package/__init__.py
+index 0000000..0000000 100644
+--- a/python/py_package/__init__.py
++++ b/python/py_package/__init__.py
+@@ -32,7 +32,7 @@
+ from .pysapien import math
+
+ import platform
+-if platform.system() != "Darwin":
++if platform.system() != "Darwin" and hasattr(pysapien, "simsense"):
+     from .pysapien import simsense
+
+ from . import physx
+--
+2.50.1
