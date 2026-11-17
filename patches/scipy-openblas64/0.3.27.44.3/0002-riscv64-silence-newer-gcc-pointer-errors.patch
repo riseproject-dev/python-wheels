@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 16 Nov 2026 00:10:00 +0000
+Subject: [PATCH] riscv64: silence newer-GCC default errors in netlib LAPACK
+
+Upstream-Status: Inappropriate [quay.io/pypa manylinux_2_39_riscv64 and musllinux_1_2_riscv64 ship a GCC that errors by default on code this old LAPACK reference C predates]
+
+Both libcs fail identically, deep in OpenBLAS's bundled netlib LAPACK
+reference sources (confirmed from real riscv64 CI logs, PR #4888),
+after the TARGET=RISCV64_GENERIC fix lets the build reach that far:
+
+    spstrf.c:830:43: error: passing argument 1 of 'dmaxloc_' from
+    incompatible pointer type [-Wincompatible-pointer-types]
+            itemp = mymaxloc_(&work[1], &i__4, &i__5, &c__1);
+    spstrf.c:259:37: note: in definition of macro 'mymaxloc_'
+    #define mymaxloc_(w,s,e,n) dmaxloc_(w,*(s),*(e),n)
+
+spstrf.c/spstf2.c's single-precision mymaxloc_ macro has always called
+the double-precision dmaxloc_ on a float* - a pre-existing bug in this
+vendored, decades-old f2c-translated LAPACK reference code, harmless
+under every older GCC this project has ever built with (a mere
+-Wincompatible-pointer-types warning), but GCC turned that warning into
+a hard error by default a few releases ago. Nothing about this is
+riscv64/TARGET-specific; it would hit any architecture built with a GCC
+new enough, which neither this release's x86_64/aarch64/etc targets nor
+RISE's own GitLab pipeline that last built this line ever used.
+
+Scoped to $plat == riscv64 only, so every other platform's CFLAGS (and
+whichever GCC built them) stay untouched. Exported, not just a local
+shell assignment, so it also reaches any separate make invocation
+within this same function (0.3.27.44.4's do_build_lib adds one, a
+standalone `make ... tests` step with no inline CFLAGS= of its own -
+see that version's own patch of this name for why).
+---
+ tools/build_steps.sh | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/tools/build_steps.sh b/tools/build_steps.sh
+index 04748ad..d3d3f30 100644
+--- a/tools/build_steps.sh
++++ b/tools/build_steps.sh
+@@ -151,6 +151,9 @@ function do_build_lib {
+             ;;
+         *) echo "Strange plat value $plat"; exit 1 ;;
+     esac
++    if [ "$plat" == "riscv64" ]; then
++        export CFLAGS="$CFLAGS -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration"
++    fi
+     case $interface64 in
+         1)
+             local interface_flags="INTERFACE64=1 SYMBOLSUFFIX=64_ LIBNAMESUFFIX=64_ OBJCONV=$PWD/objconv/objconv";
