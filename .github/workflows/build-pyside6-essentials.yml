@@ -188,34 +188,42 @@ jobs:
               subprocess.run([\"patchelf\", \"--print-rpath\", os.path.join(\"/tmp/rpathcheck\", n)])
             "
             "$pybin/pip" install -q dist/pyside6_essentials-*.whl
-            # Diagnostic only, not a fix: capture a backtrace if the smoke test below
-            # dies from a bare signal (no Python-level traceback at all), and import
-            # one submodule at a time so the log shows exactly which one it was.
+            # Diagnostic only, not a fix: the previous run confirmed the crash is a
+            # bare SIGABRT specifically on `import PySide6.QtQuick` (QtCore/QtGui/
+            # QtWidgets/QtNetwork/QtQml all import fine first), with zero stderr
+            # text (no glibc malloc-corruption message, no Qt warning) and no core
+            # file - this runner's container has no CAP_SYS_ADMIN, so `ulimit -c
+            # unlimited` and writing /proc/sys/kernel/core_pattern both silently
+            # no-op (confirmed in that run's log: "Operation not permitted" /
+            # "Read-only file system"). Run the import live under gdb instead of
+            # relying on a post-mortem core file, so the backtrace is captured at
+            # the moment of the abort regardless of core-dump permissions.
             dnf -y install gdb || true
-            ulimit -c unlimited || true
-            echo "/tmp/core.%e.%p" > /proc/sys/kernel/core_pattern || true
-            set +e
-            "$pybin/python3" -c "
+            cat > /tmp/qtquick_smoke.py <<PYEOF
           import sys
-          mods = [\"QtCore\", \"QtGui\", \"QtWidgets\", \"QtNetwork\", \"QtQml\", \"QtQuick\", \"QtSql\", \"QtSvg\"]
+          mods = ["QtCore", "QtGui", "QtWidgets", "QtNetwork", "QtQml", "QtQuick", "QtSql", "QtSvg"]
           for name in mods:
-              print(\"importing\", name)
+              print("importing", name)
               sys.stdout.flush()
-              __import__(\"PySide6.\" + name)
-              print(name, \"OK\")
+              __import__("PySide6." + name)
+              print(name, "OK")
               sys.stdout.flush()
-          print(\"PySide6 Essentials import OK\")
-            "
-            rc=$?
-            echo "smoke test exit code: $rc"
+          print("PySide6 Essentials import OK")
+          PYEOF
+            set +e
+            gdb -q -batch \
+              -ex "run" \
+              -ex "bt full" \
+              -ex "info sharedlibrary" \
+              -ex "thread apply all bt" \
+              --args "$pybin/python3" /tmp/qtquick_smoke.py 2>&1 | tee /tmp/gdb_smoke.log
             set -e
-            if [ "$rc" -ne 0 ]; then
-              ls -la /tmp/core.* 2>/dev/null || echo "no core file produced"
-              for c in /tmp/core.*; do
-                [ -f "$c" ] || continue
-                gdb -q -batch -ex "bt full" -ex "info sharedlibrary" "$pybin/python3" "$c"
-              done
-              exit "$rc"
+            # gdb exit code reflects gdb, not the inferior - check for the
+            # final print from the script instead, same signal the plain
+            # smoke test used before this diagnostic wrapper.
+            if ! grep -q "PySide6 Essentials import OK" /tmp/gdb_smoke.log; then
+              echo "smoke test did not complete - see gdb backtrace above"
+              exit 1
             fi
           '
 
