@@ -15,6 +15,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **115** — A SIGSEGV that will not reproduce off the runner: get the native backtrace *in CI*
 - **379** — A test asserting a specific cross-thread ordering (a `gc.collect()`-on-one-thread-
 - **120** — Hypothesis' `too_slow` health check is a wall-clock budget on *input generation*,
+- **718** — A single-occurrence SIGSEGV in a brand-new upstream code path (finufft's
+  `execute_adjoint`) that a byte-for-byte rebuild of the identical Release config no longer
+  reproduces is upstream's own immaturity, not a riscv64 or optimizer defect — check
 - **164** — A test helper with a per-architecture syscall table falls back to a fixed sleep on
 - **166** — The riscv64 runners' libgomp faults on the `dynamic` and `guided` OpenMP
 - **167** — A riscv64-only intermittent SIGSEGV: climb the control ladder before you debug
@@ -2183,3 +2186,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
      cp312/cp313/cp314. `Upstream-Status: To discuss upstream` — the test's technique
      is simply incompatible with a `Py_GIL_DISABLED` build, which the package may not
      have had a cp314t leg to discover yet.
+
+718. **A single-occurrence SIGSEGV in a brand-new upstream code path that a byte-for-byte
+     rebuild of the identical Release config no longer reproduces is upstream's own
+     immaturity, not a riscv64 or optimizer defect — check the upstream changelog for recent
+     fixes in the same area before adding any riscv64-specific workaround (finufft 2.5.1's
+     `execute_adjoint`).** A `py3-none-manylinux_riscv64` CI leg crashed with
+     `Fatal Python error: Segmentation fault` inside `execute_adjoint` (exit code 139),
+     every time, from `test_finufft3_plan` (a type-3 guru-interface plan). The patch this
+     port already carries for riscv64 (gotcha-adjacent: bounding `xsimd::make_sized_batch`'s
+     search by `xsimd::default_arch`'s own width, since riscv64 without the vector extension
+     has no native xsimd architecture) touches the exact same SIMD/padding machinery in
+     `spreadinterp.cpp`, making it the obvious first suspect — but a second CI run with the
+     identical Release build flags (no source change at all, just re-running the same
+     checkout/patch/cibuildwheel steps) built cleanly and passed all 659 collected tests,
+     including the same `test_finufft3_plan`. A SIGSEGV that a bit-identical rebuild no
+     longer reproduces is gotcha 60's signature (an ordinary upstream bug, not a port defect)
+     with an extra twist worth checking before closing the loop: `execute_adjoint` is not
+     legacy code finufft has hardened for years — upstream's own changelog shows "Added
+     functionality for adjoint execution of FINUFFT plans" landed in v2.5.0 (the *immediately
+     preceding* release), with v2.5.1 itself still shipping thread-safety fixes in the same
+     area ("Fix thread safety of PSWF kernel evaluation", "Add parallel
+     makeplan/setpts/execute thread-safety test"), and the *next* changelog entries (dated
+     after 2.5.1, not yet in a tagged release at port time) include "Release built folded
+     points wrongly and segfaulted" (an xsimd-reassociation bug gated specifically on Release
+     builds) and "Fixed NaN results or segfaults that could happen when running type 3
+     transform that have zero input or output points" plus a new concurrent-`execute()`
+     regression test — i.e. upstream was still actively finding and fixing segfaults in this
+     exact type-3/adjoint/thread-safety neighborhood in the versions immediately surrounding
+     the one this port builds. Do not patch our own SIMD padding code further on the strength
+     of one crash: get a second data point first (gotcha 115 — rerun the identical config, or
+     use `CIBW_TEST_COMMAND` with gdb per gotcha 168), and if it doesn't reproduce, treat it as
+     `Upstream-Status: Not a riscv64 defect` and let a future version bump (once a release
+     past these changelog entries exists) carry the real fix, rather than guessing at a
+     riscv64-specific patch for a bug upstream's own CI never flagged as architecture-specific.

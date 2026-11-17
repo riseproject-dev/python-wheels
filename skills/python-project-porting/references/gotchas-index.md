@@ -1809,6 +1809,13 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   relaxation interaction (binutils bug 28709), not a GCC/lld compiler mismatch (upstream's
   own CI pairs GCC+lld successfully on aarch64). Fix: `-mno-relax` via `CFLAGS`/`CXXFLAGS`,
   not disabling `--gc-sections` or lld.
+- **718** — A single-occurrence SIGSEGV in a brand-new upstream code path (finufft 2.5.1's
+  `execute_adjoint`, a type-3 guru-plan adjoint added in the immediately preceding release)
+  that a byte-for-byte rebuild of the identical Release config no longer reproduces is
+  upstream's own immaturity, not a riscv64/optimizer defect — finufft's own changelog shows
+  active segfault fixes in this exact type-3/adjoint/thread-safety area in the versions
+  surrounding this one. Get a second data point (gotcha 115/168) before patching further;
+  tag `Upstream-Status: Not a riscv64 defect` if it doesn't reproduce.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
