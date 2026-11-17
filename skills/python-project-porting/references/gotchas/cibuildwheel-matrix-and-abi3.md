@@ -28,6 +28,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   `riscv64` marker (the turbohtml PGO case).
 - **707** — A workflow-level `env:` var isn't visible inside `CIBW_BEFORE_ALL_LINUX`/
   `CIBW_BEFORE_BUILD_LINUX` unless it's passed through `CIBW_ENVIRONMENT_PASS_LINUX`.
+- **714** — A dependency compiled fresh in `CIBW_BEFORE_ALL_LINUX` with no RPATH of its
+  own needs `LD_LIBRARY_PATH` set via `CIBW_ENVIRONMENT_LINUX` for `auditwheel repair`
+  to find it, even though `-L` found it fine at link time.
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -1316,3 +1319,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     - **Tell this apart from gotcha 107's cascade**: `CIBW_ENVIRONMENT_PASS_LINUX` doesn't
       *set* a value, it only forwards one that's already defined somewhere the container
       can't otherwise reach; it has no effect on a var that's merely missing everywhere.
+
+714. **A dependency compiled fresh in `CIBW_BEFORE_ALL_LINUX` with no RPATH of its own
+     needs its directory on `LD_LIBRARY_PATH` via `CIBW_ENVIRONMENT_LINUX`, not just on
+     the linker's `-L` path, or `auditwheel repair` can't find it (the piper-phonemize
+     case).** `before-all` and the repair step are separate `sh -c` invocations in the
+     same long-lived container, and only `CIBW_ENVIRONMENT`/`CIBW_ENVIRONMENT_LINUX` are
+     read by *both* (gotcha 12's "scope to the right phase", the other direction): a
+     directory `setup.py`'s `library_dirs=[...]` passed to `-L` at *link* time is no
+     longer visible to `auditwheel repair`'s own `DT_NEEDED` resolution afterwards unless
+     it is also on `LD_LIBRARY_PATH` (which that step — and the system loader — checks
+     the same way it would RPATH/`ld.so.cache`, same mechanism as gotcha 579's
+     meson-python case, just a plain missing RPATH here instead of a dropped SONAME
+     symlink). The build and the wheel assembly both succeeded here; only
+     `auditwheel repair` failed, with `ValueError: Cannot repair wheel, because
+     required library "libespeak-ng.so" could not be located` — a library that
+     indisputably exists exactly where `-L` pointed, which makes "not located" read as
+     a path *typo* rather than a missing-env-var-in-a-different-step problem.
+     - **The fix**: `CIBW_ENVIRONMENT_LINUX: LD_LIBRARY_PATH=/project/<install-dir>/lib`
+       (an absolute `/project/...` path, since `{project}` always mounts there — gotcha
+       5 — regardless of the relative path used to reach it from `before-all`'s own cwd).
+     - **Building the dependency with a real `CMAKE_INSTALL_RPATH`/`$ORIGIN` setup (as a
+       newer CMakeLists.txt might) sidesteps this entirely** — this only bites a
+       dependency whose own build system sets no RPATH at all, which an older or
+       minimal CMakeLists.txt (or a hand-rolled `Makefile`) commonly doesn't.
