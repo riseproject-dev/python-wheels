@@ -12,6 +12,11 @@ on:
         description: 'Version glob to (re)build; empty builds every version of docs/packages/aliyun-log-fastpb.yaml not released yet'
         required: false
         default: ''
+      cancel-in-progress:
+        description: Cancel an in-progress run in the same concurrency group.
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
     paths:
@@ -24,8 +29,8 @@ on:
       - 'docs/packages/aliyun-log-fastpb.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
@@ -50,6 +55,12 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # `tag` must be a real matrix dimension: gotcha 402 -- an `include`
+        # entry with no key in common with an existing dimension is merged
+        # onto *every* combination instead of creating its own, so without
+        # this the cp314t entry below silently overwrote cp312-abi3 and no
+        # cp312-abi3 job ever ran.
+        tag: [cp312-abi3, cp314t]
         include:
           # pyo3's abi3-py37 feature is on unconditionally (Cargo.toml), so
           # one abi3 wheel serves every GIL-ful interpreter; pyo3 disables

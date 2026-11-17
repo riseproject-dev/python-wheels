@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 12 Nov 2026 00:00:00 +0000
+Subject: [PATCH] cmake: point installed libraries at $ORIGIN for the
+ shared-prefix repackaging
+
+liblapack.so needs libblas.so.3 (and liblapacke.so needs liblapack.so.3) at
+runtime - both pairs built by this same CMakeLists.txt and installed into
+one directory, cmeel's shared cmeel.prefix/lib/. Reference LAPACK's own
+CMakeLists.txt never sets CMAKE_INSTALL_RPATH, so CMake's own install()
+step falls back to its documented default: the build-tree RPATH gets
+stripped and replaced with nothing (confirmed from the real build log:
+"Set non-toolchain portion of runtime path of
+.../liblapack.so.3.12.0 to \"\""). A bare dlopen of liblapack.so (e.g. via
+ctypes.CDLL, bypassing any package-level LD_LIBRARY_PATH shim) then fails
+resolving its own DT_NEEDED libblas.so.3, even though the file is sitting
+right next to it:
+
+  OSError: libblas.so.3: cannot open shared object file: No such file or
+  directory
+
+Point every installed shared library at its own directory instead, so each
+one finds its siblings there regardless of where this prefix ends up
+installed.
+
+Upstream-Status: Inappropriate [needed for cmeel's shared-prefix repackaging, where several of this project's own libraries cross-link each other outside any standard library search path; irrelevant to LAPACK's own build/test]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ CMakeLists.txt | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1753fa4..7ff9b08 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -14,6 +14,15 @@ set(
+ set(CMAKE_STATIC_LIBRARY_PREFIX "lib${LIBRARY_PREFIX}")
+ set(CMAKE_SHARED_LIBRARY_PREFIX "lib${LIBRARY_PREFIX}")
+ 
++# Shared libraries here cross-link each other (liblapack needs libblas,
++# liblapacke needs liblapack, ...) and this repackaging installs them all
++# into one non-standard prefix directory with no RPATH set otherwise, so
++# the install-time strip of the build RPATH (CMake's own default behavior
++# when CMAKE_INSTALL_RPATH is unset) leaves every one of them unable to
++# find its siblings at runtime. Point each installed library at its own
++# directory instead.
++set(CMAKE_INSTALL_RPATH "$ORIGIN")
++
+ # Add the CMake directory for custom CMake modules
+ set(CMAKE_MODULE_PATH "${LAPACK_SOURCE_DIR}/CMAKE" ${CMAKE_MODULE_PATH})
+ 
