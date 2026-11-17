@@ -21,21 +21,18 @@ A package normally moves through these states:
    `_publish-wheel.yml` in dry-run mode; no release or automated PR is created.
 3. Merging the PR triggers the package workflow on `main`. The wheels are built
    again and published in a new immutable GitHub Release.
-4. The publish job pushes the release metadata to `package/<pkg>` and opens or
-   updates a PR titled `<pkg>: update packages`.
-5. Merging that package PR makes the release visible in the generated Simple API
-   and triggers deployment of the website.
-6. Each night, `check_versions` compares tracked packages with PyPI. An upgrade,
+4. The publish job commits the release metadata directly to `main`, making the
+   release visible in the generated Simple API and triggering website deployment.
+5. Each night, `check_versions` compares tracked packages with PyPI. An upgrade,
    yanked release, or deprecation is proposed on the same `package/<pkg>` branch
    and in a PR with the same `<pkg>: update packages` title.
-7. Merging an upgrade PR returns to step 3. A deprecation PR instead retires the
+6. Merging an upgrade PR returns to step 3. A deprecation PR instead retires the
    package when PyPI provides an upstream riscv64 or universal wheel.
 
-The central design rule is that **all automated changes for one package share
-`package/<pkg>`, while different packages use different branches**. Publication
-and nightly version checks are also serialized by the `publish-wheel`
-concurrency group. This prevents the two automation sources from overwriting one
-another without forcing unrelated package changes into one branch or PR.
+Nightly version checks use one `package/<pkg>` branch per package. Publication
+updates `main` directly. Publication and nightly version checks are serialized
+by the `publish-wheel` concurrency group, which prevents the two automation
+sources from overwriting one another.
 
 ## 1. Adding a package
 
@@ -96,13 +93,15 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 ```
 
-The concurrency key serializes runs of the same workflow and branch. Manual runs cancel an
-existing run by default. Set `cancel-in-progress` to `false` when queueing a rebuild that
-must wait for the active run. GitHub retains at most one pending run in a concurrency group,
-so another dispatch can replace that pending run even when the active run is preserved.
+The concurrency key serializes runs of the same workflow and branch. Push runs never cancel
+an existing run, because a later push may have no pending versions to build. Pull request and
+manual runs cancel an existing run by default. Set `cancel-in-progress` to `false` when
+queueing a rebuild that must wait for the active run. GitHub retains at most one pending run
+in a concurrency group, so another dispatch can replace that pending run even when the
+active run is preserved.
 
 They have distinct purposes:
 
@@ -162,7 +161,6 @@ publish:
       version: ${{ fromJSON(needs.setup.outputs.versions) }}
   permissions:
     contents: write
-    pull-requests: write
   uses: $/.github/workflows/_publish-wheel.yml
   with:
     artifact-pattern: <pkg>-${{ matrix.version }}-*-manylinux_riscv64
@@ -181,10 +179,10 @@ The PR's package workflow builds and tests every pending version. The publish
 job downloads and inspects the selected wheels, verifies that their normalized
 project names and versions agree, computes the prospective release tag, and
 prints a dry-run summary. `ci_scripts/update_doc.py` also prints the YAML diff
-and branch/PR it would create.
+it would push to `main`.
 
-Because the ref is not `main`, a PR run does **not** create a GitHub Release,
-push `package/<pkg>`, or open a package PR. Reviewers should verify:
+Because the ref is not `main`, a PR run does **not** create a GitHub Release or
+push package metadata. Reviewers should verify:
 
 - the workflow follows upstream's build and test process;
 - all expected Python/platform wheels exist and no unrelated artifact matched;
@@ -224,28 +222,19 @@ A rebuild leaves the previous release behind: the YAML entry moves to the new
 tag, so the old release is linked from nowhere. `gc-releases.yml` (manual
 dispatch, dry run by default) runs `ci_scripts/gc-releases.py`, which deletes
 every release named `<package>-v<version>-<timestamp>` whose tag is not the
-`tag` of a version entry in `docs/packages/*.yaml` on `main`. A tag recorded by
-the YAML of an open `package/<pkg>` pull request is kept, because merging that
-PR links it.
+`tag` of a version entry in `docs/packages/*.yaml` on `main`. A tag recorded by the YAML of an open `package/<pkg>` pull request is also kept,
+because a nightly declaration and publication may race before publication can
+push the metadata to `main`.
 The script refuses to run if it finds no tag at all or would delete more than
 half of the releases. It shares the `publish-wheel` concurrency group so no
 publication is in flight, and the git tag of a deleted release stays, as an
 immutable release's tag cannot be removed.
 
-### The package branch and PR
+### The publication commit
 
-`update_doc.py` normalizes the wheel's project name and uses:
-
-- branch: `package/<normalized-pkg>`;
-- PR title: `<normalized-pkg>: update packages`;
-- base: `main`.
-
-If the branch already exists, it is fetched and rebased onto `main` before the
-new commit is made. The push uses `--force-with-lease`, so an unexpected branch
-update is rejected rather than overwritten. If an open PR already uses the
-branch, publication pushes to it instead of opening another PR.
-
-The publication commit fills the declared version entry with:
+`update_doc.py` fetches the latest `main`, commits the publication metadata, and
+pushes directly to `main`. If another push wins the race, it rebases the commit
+and retries. The publication commit fills the declared version entry with:
 
 - the immutable release `tag`;
 - every wheel's `filename` and SHA-256 digest;
@@ -270,19 +259,16 @@ concurrency:
   queue: max
 ```
 
-Only one of these jobs mutates package branches at a time. `queue: max` retains
+Only one of these jobs mutates package metadata at a time. `queue: max` retains
 waiting jobs instead of replacing an older pending job, and
 `cancel-in-progress: false` lets the active publication or nightly check finish.
 This is deliberately job-level concurrency: package builds may proceed in
-parallel, but branch/PR mutation is serialized.
+parallel, but package metadata mutation is serialized.
 
-## 3. Reviewing and completing publication
+## 3. Completing publication
 
-The automated package PR may contain a nightly declaration, publication
-metadata, or both. Review the complete diff rather than assuming it came from
-only one source.
-
-For publication metadata, verify:
+The publication workflow validates the complete wheel set before committing
+metadata. It verifies:
 
 1. top-level `license` is a short valid identifier (preferably SPDX), not a file
    path or full license text;
@@ -295,7 +281,7 @@ For publication metadata, verify:
    changes;
 6. no unrelated package files were changed.
 
-Merging `<pkg>: update packages` places `tag` and `files` on `main`, so the
+Pushing the publication commit places `tag` and `files` on `main`, so the
 version is no longer pending. That push has two effects:
 
 - the package build workflow may be triggered by its YAML path, but `_setup.yml`
@@ -308,10 +294,10 @@ version is no longer pending. That push has two effects:
   project, unless it already says *Available in RISE PyPI* or *Available Upstream*.
   The issue stays open; only a deprecation closes it.
 
-The GitHub Release exists before this merge, but pip cannot discover it through
-the RISE index until the YAML reaches `main` and the website deployment
-completes. Publication is therefore not complete until the package PR is merged
-and the site deploy succeeds.
+The GitHub Release exists before this push, but pip cannot discover it through
+the RISE index until the website deployment completes. Publication is therefore
+not complete until the publication commit reaches `main` and the site deploy
+succeeds.
 
 ## 4. Nightly upgrades and maintenance
 
@@ -342,8 +328,8 @@ been upstreamed. The build shows whether the copied patches still apply.
 ### One branch and PR per package
 
 For every actionable result, the workflow re-runs
-`check_versions.py --declare <package>` in isolation. It uses the same
-`package/<normalized-pkg>` branch as publication:
+`check_versions.py --declare <package>` in isolation. It uses a
+`package/<normalized-pkg>` branch:
 
 1. fetch the existing package branch when present, otherwise start at `main`;
 2. rebase existing package work onto the current `main` and push that rebase
@@ -358,12 +344,9 @@ new bare `- version:` entries trigger that package's `build-<pkg>.yml` PR run.
 The build and publish dry run must pass before merge. Merging the nightly PR
 then invokes the same `main` publication path described above.
 
-Using the existing package branch is important when nightly and publication
-cross paths. For example, if publication metadata is awaiting review and a new
-upstream version appears, nightly rebases and appends the declaration instead
-of replacing the metadata. Conversely, publication can fill a version already
-declared by nightly on that branch. Shared concurrency prevents both jobs from
-performing those operations simultaneously.
+Using the existing package branch retains earlier nightly declarations and
+maintenance updates. Shared concurrency prevents nightly from mutating a
+package branch while publication updates `main`.
 
 ### Deprecation and yanks
 
@@ -413,11 +396,8 @@ Important failure boundaries:
 - If build or tests fail, no release is created.
 - If release creation/upload succeeds but documentation update fails, the
   immutable release may already exist; rerunning creates another release.
-- A force-with-lease failure means the package branch changed unexpectedly.
-  Re-run after inspecting the branch; do not replace it with an unconditional
-  force-push.
-- If the package PR is not merged, the release remains undiscoverable in the
-  RISE Simple API and the YAML version remains pending on `main`.
+- If another push reaches `main` first, the documentation updater rebases and
+  retries. A real conflict fails publication and requires inspection.
 - Do not dispatch a rebuild merely because the normal post-merge `push` run is
   still queued or running.
 
@@ -426,9 +406,10 @@ Important failure boundaries:
 GitHub restricts recursive workflow triggering from the repository's default
 `GITHUB_TOKEN`; depending on the event, runs are suppressed or require manual
 approval. `nightly.yml` and `_publish-wheel.yml` therefore prefer an installation
-token for the `riseproject-dev` GitHub App so package PR checks start normally.
-They fall back to `GITHUB_TOKEN` when App credentials are unavailable, including
-untrusted pull-request contexts.
+token for the `riseproject-dev` GitHub App so nightly package PR checks and
+publication metadata pushes trigger follow-up workflows normally. They fall
+back to `GITHUB_TOKEN` when App credentials are unavailable, including untrusted
+pull-request contexts.
 
 Required repository configuration:
 
@@ -440,13 +421,14 @@ Required repository configuration:
 Because `_publish-wheel.yml` is reusable, each package workflow must explicitly
 pass the private key as `app-private-key`. Token permissions can only be
 maintained or reduced across a reusable-workflow call, so the caller's publish
-job must grant `contents: write` and `pull-requests: write`.
+job must grant `contents: write`. Existing callers also grant
+`pull-requests: write` for compatibility with nightly package PR automation.
 
 ## 7. Related workflows
 
 - `_setup.yml` selects pending or explicitly requested package versions.
 - `_publish-wheel.yml` inspects artifacts, creates immutable releases, and
-  updates package branches.
+  pushes publication metadata to `main`.
 - `nightly.yml` detects upgrades, yanks, deprecations, installation failures,
   and known vulnerabilities.
 - `pr-checks.yml` checks commit/PR policy, validates package YAML/workflow

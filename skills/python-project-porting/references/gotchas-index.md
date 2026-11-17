@@ -597,6 +597,18 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   gated only on `cfg(target_os = "linux")`, blocks a from-source riscv64 Linux build exactly
   as hard as gotcha 600/670/704's missing checkout would, even with a fully public wrapper
   repo and a clean Python dependency closure (the chalk-remote-call-python case).
+- **716** — A `[tool.cibuildwheel] repair-wheel-command` can declare a build-time dependency
+  (passagemath-conf/`SAGE_LOCAL`) not in `[build-system] requires` or `[project]
+  dependencies` at all; check whether a sibling port with the same `sage_conf`-in-build-
+  system shape has already gone green before assuming it unverified and patching it out
+  (the passagemath-graphs case, after build-passagemath-cddlib.yml's own proof).
+- **717** — A compiled extension's `__init__.py` can eagerly import an unrelated, unported
+  sibling distribution purely to "fail early with a nicer error," not declared in any extras
+  and not a real dependency of the extension itself — check each eager import's own
+  transitive imports separately before patching the whole guard out (the passagemath-
+  combinat/symmetrica `sage.matrix.constructor` case; `sage.combinat.tableau` on the same
+  line was left alone since it resolves clean against the already-live passagemath-
+  categories).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -673,6 +685,14 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   not `dynamic = ["version"]` sourced from the dependency crate (the formatjs/formatjs
   icu_messageformat case). Distinct from gotcha 668: that one has no tag at all for the
   extra digit; here the tag is real and still disagrees with its own dependency's manifest.
+- **715** — A passagemath/passagemath monorepo split's sparse-checkout can silently drop a
+  directory from the built *wheel* even though `MANIFEST.in` ships it fine in the *sdist*:
+  `sage_setup.find.find_python_sources()` prunes any directory with no `__init__.py`/
+  `all.py` of its own unless it carries an `all__sagemath_<dist>.py` marker, which an
+  individual-file sparse-checkout glob never pulls in on its own — add
+  `src/sage/**/all__sagemath_<dist>.py` to the checkout list defensively (the passagemath-
+  categories case; low-risk for a `graft`-heavy split like graphs/combinat, but cheap
+  insurance either way).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
