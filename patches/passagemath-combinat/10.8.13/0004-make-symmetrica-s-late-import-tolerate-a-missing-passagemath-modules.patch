@@ -1,0 +1,97 @@
+From 9c3a7e1f5d2b4a6c8e0f1b3d5a7c9e1f3b5d7a9c Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 16 Nov 2026 23:40:00 +0000
+Subject: [PATCH] make symmetrica's late_import tolerate a missing passagemath-modules
+
+Upstream-Status: Inappropriate [sage.combinat.sf.sf/sage.matrix.constructor/sage.combinat.schubert_polynomial belong to the unported passagemath-modules, not the compiled symmetrica bindings themselves]
+
+sage/libs/symmetrica/symmetrica.pxi's late_import() is a separate call
+site from sage/libs/symmetrica/__init__.py's eager imports that patch
+0003 already addresses: it is a `cdef void ... noexcept` function that
+practically every public wrapper in this extension calls on each use
+(kostka.pxi, schur.pxi, sb.pxi and most of symmetrica.pxi itself), and
+it unconditionally imports sage.combinat.sf.sf, sage.matrix.constructor
+and sage.combinat.schubert_polynomial - all of which pull in the
+unported passagemath-modules (sage.combinat.sf.sf drags in
+sage.combinat.free_module transitively).
+
+Without this patch, the first call on this wheel raised
+ModuleNotFoundError partway through that import block. Because the
+function is declared `noexcept` and returns nothing, Cython cannot
+propagate that exception to the caller - CPython printed it as
+"Exception ignored in: 'late_import'" and carried on, leaving
+SymmetricFunctions/matrix_constructor/SchubertPolynomialRing as the
+module-level None they started as. late_import()'s only re-entry guard
+(`if Integer is not None: return`) is set well before this block runs,
+so every later call silently skips retrying it too.
+
+This patch only changes how that absence is surfaced: the three
+imports are wrapped in try/except ImportError so the globals stay None
+quietly instead of printing a raw traceback on first use. It does not
+make the symmetric-function/Schubert-polynomial/matrix-returning
+functions (schur.pxi's Schur/monomial/power-sum/homogeneous/elementary
+conversions and plethysm, sb.pxi's Schubert polynomial bindings,
+sc.pxi's chartafel/kranztafel) usable - they still need
+passagemath-modules and will raise once they touch the None global.
+What stays genuinely usable on this wheel, unaffected either way,
+is everything that only needs the names already resolved earlier in
+late_import() against the live passagemath-categories/-objects
+(Partition, Integer, Permutation, Tableau, ...): kostka_number,
+kostka_tab, kostka_tafel, dimension_schur, newtrans,
+strict_to_odd_part, odd_to_strict_part, q_core, gupta_nm, gupta_tafel,
+random_partition, charvalue and the sab.pxi group.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/sage/libs/symmetrica/symmetrica.pxi | 30 ++++++++++++++++++++++++-------
+ 1 file changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/src/sage/libs/symmetrica/symmetrica.pxi b/src/sage/libs/symmetrica/symmetrica.pxi
+index ce43909..f4fa478 100644
+--- a/src/sage/libs/symmetrica/symmetrica.pxi
++++ b/src/sage/libs/symmetrica/symmetrica.pxi
+@@ -450,16 +450,34 @@ cdef void late_import() noexcept:
+     zero = Integer(0)
+     sage_maxint = Integer(maxint)
+
+-    #Symmetric Functions
+-    import sage.combinat.sf.sf
+-    SymmetricFunctions = sage.combinat.sf.sf.SymmetricFunctions
++    #Symmetric Functions, Schubert polynomials and the matrix() constructor
++    #all belong to the unported passagemath-modules; late_import() is the
++    #shared entry point practically every public function in this
++    #extension calls (kostka_number_symmetrica among them), and on a wheel
++    #that lacks passagemath-modules the import below used to raise
++    #ModuleNotFoundError. Because this function is declared `noexcept`,
++    #that exception could not propagate to the caller - CPython printed it
++    #as "Exception ignored in: 'late_import'" and carried on, leaving
++    #SymmetricFunctions/matrix_constructor/SchubertPolynomialRing as None.
++    #Functions that only need the names already set above (Partition,
++    #Integer, Permutation, ...) keep working; the ones that need these
++    #three (schur.pxi's Schur/monomial/power-sum/homogeneous/elementary
++    #conversions, sb.pxi's Schubert polynomial bindings, sc.pxi's
++    #chartafel/kranztafel matrices) still raise - now a plain, catchable
++    #TypeError/AttributeError on the None global instead of a noisy
++    #unraisable exception the caller never sees coming.
++    try:
++        import sage.combinat.sf.sf
++        SymmetricFunctions = sage.combinat.sf.sf.SymmetricFunctions
+
+-    import sage.matrix.constructor
+-    matrix_constructor = sage.matrix.constructor.matrix
++        import sage.matrix.constructor
++        matrix_constructor = sage.matrix.constructor.matrix
+
+-    import sage.combinat.schubert_polynomial
+-    SchubertPolynomialRing = sage.combinat.schubert_polynomial.SchubertPolynomialRing
+-    SchubertPolynomial_class = sage.combinat.schubert_polynomial.SchubertPolynomial_class
++        import sage.combinat.schubert_polynomial
++        SchubertPolynomialRing = sage.combinat.schubert_polynomial.SchubertPolynomialRing
++        SchubertPolynomial_class = sage.combinat.schubert_polynomial.SchubertPolynomial_class
++    except ImportError:
++        pass
+
+
+ ##########################################
+--
+2.43.0
