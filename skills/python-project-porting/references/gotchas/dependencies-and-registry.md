@@ -26,6 +26,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   *optional* component another test dependency imports unconditionally.
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
   written with `PIP_EXTRA_INDEX_URL`/`PIP_ONLY_BINARY` silently no-ops and source-builds.
+- **720** — A bare `linux_riscv64` wheel tag crosses the manylinux/musllinux boundary and
+  only crashes at `import`, not at install (the pycdfpp/numpy case).
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
   `PIP_ONLY_BINARY` for packages you never named, because *its* runtime deps are the ones
   that break (the moyopy/pymatgen case).
@@ -945,6 +947,55 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       catch a failed `build_ext`). When a musllinux leg source-builds a dependency the
       manylinux leg got as a wheel, compare the two wheels' sizes in the log before
       trusting that they are equivalent.
+
+720. **A registry wheel's bare `linux_riscv64` platform tag (not `manylinux_*_riscv64` or
+     `musllinux_*_riscv64`) is accepted by pip as compatible with *any* libc, so
+     `PIP_ONLY_BINARY` can install a glibc-linked dependency wheel straight into a
+     `musllinux_*_riscv64` container — the install succeeds and only the later `import`
+     crashes (the pycdfpp/numpy case).** `build-pycdfpp.yml`'s `CIBW_ENVIRONMENT` set
+     `PIP_ONLY_BINARY=numpy,pyyaml` for both platforms. Every manylinux leg built and
+     tested clean; every musllinux leg failed, in one of two ways depending on whether our
+     registry happens to host a numpy wheel for that interpreter yet:
+     - Where one exists (cp310/cp311/cp312), pip resolved and installed
+       `numpy-2.0.0-cp31N-cp31N-linux_riscv64.whl` — the same file the manylinux sibling job
+       gets — into the musl test venv without complaint, then crashed at `import numpy` with
+       `ImportError: Error loading shared library ld-linux-riscv64-lp64d.so.1: No such file
+       or directory (needed by .../_multiarray_umath.cpython-31N-riscv64-linux-gnu.so)`. The
+       `.so`'s own name (`-linux-gnu`) and the missing loader (glibc's
+       `ld-linux-riscv64-lp64d.so.1`, not musl's `ld-musl-riscv64.so.1`) show the wheel was
+       built in the manylinux image and never recompiled for musl — it was never *meant* to
+       run there, but its tag doesn't say so.
+     - Where none exists yet (cp313/cp314/cp314t/cp315/cp315t), `python -m build`'s
+       isolated-env bootstrap of `[build-system] requires = ["numpy", ...]` (pycdfpp's own
+       `pyproject.toml`) died first, with pip's ordinary `ERROR: Could not find a version
+       that satisfies the requirement numpy (from versions: none)` — only-binary leaves no
+       sdist fallback once no wheel at all matches.
+     Both are the same registry gap (no *real* musllinux riscv64 numpy wheel), not two
+     unrelated bugs — the first just masks it one step later, at import instead of install.
+     This is gotcha 574's mechanism (a dependency with no musllinux wheel surviving
+     `PIP_ONLY_BINARY`) wearing a different disguise: 574's cffi/bitarray case fails cleanly
+     at the test install with "no matching distribution" on *every* musllinux interpreter,
+     because those wheels carry a real `manylinux_*_riscv64` platform tag that pip correctly
+     refuses inside a musl container. A bare `linux_<arch>` tag has no libc marker at all, so
+     pip's `packaging.tags` treats it as compatible with the current interpreter on any Linux
+     host of that machine — manylinux or musllinux alike — and happily installs it where it
+     will not actually run.
+     - **Gate `PIP_ONLY_BINARY` on `matrix.platform` (gotcha 574's fix), not just on the
+       dependency name**: keep `numpy,pyyaml` binary-only for `manylinux` (the registry
+       wheel is real there), and drop them for `musllinux` so pip falls back to the sdist —
+       `PIP_ONLY_BINARY=${{ matrix.platform == 'manylinux' && 'numpy,pyyaml' || '' }}`. The
+       isolated build env and the test venv both re-resolve independently, so this one-line
+       change fixes the build-bootstrap failure and the import crash together.
+     - **A dependency installing without a single warning is not proof it will import** —
+       when a musllinux leg is green at install and red only at `import <dep>`, diff the
+       installed wheel's filename against the manylinux leg's own `Downloading <dep>-...whl`
+       line before suspecting the dependent package's own C++. A tag with no
+       `manylinux`/`musllinux` component at all, on a package that ships a compiled
+       extension, is the tell.
+     - Don't reach for gotcha 577 here: PyYAML's wheel has the identical bare-tag problem in
+       this same workflow, but nothing in pycdfpp's own Python imports `yaml`, so it never
+       surfaces as a test failure — 577's silent-C-accelerator-loss only matters for a
+       package that actually exercises `CSafeLoader`/`CSafeDumper`.
 
 615. **An unbounded floor pin (`torch>=X.Y.0a0`) on a package that vendors its own
     frozen copy of torch's low-level `c10`/ATen headers resolves to whatever is newest

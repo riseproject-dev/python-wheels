@@ -1400,6 +1400,12 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **577** — A musllinux leg that source-builds PyYAML (riscv64 wheels are manylinux-only)
   silently gets a pure-Python build with no `CSafeLoader` when libyaml headers are absent —
   `apk add yaml-dev` in `CIBW_BEFORE_TEST` on musllinux and set `PYYAML_FORCE_LIBYAML=1`.
+- **720** — A registry wheel's bare `linux_riscv64` tag (no `manylinux_*`/`musllinux_*`
+  component) is accepted by pip as compatible with any libc, so `PIP_ONLY_BINARY` installs
+  the glibc-linked wheel into a musllinux container too — the install succeeds and only the
+  later `import` crashes (`ld-linux-riscv64-lp64d.so.1: No such file or directory`); for an
+  interpreter with no such wheel at all it fails earlier instead, at the build bootstrap.
+  Gate only-binary per `matrix.platform` like gotcha 574 (the pycdfpp/numpy case).
 - **615** — An unbounded `torch>=X.Y.0a0` floor pin resolves to the registry's newest torch
   for a package that vendors its own frozen `c10`/ATen header snapshot (executorch's
   `torch_pin.py` names `2.13.0`) — the vendored and real headers collide in the same
