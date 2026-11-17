@@ -18,6 +18,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **135** — A version placeholder that upstream's *release script* stamps is a fourth way to
 - **154** — A PyPI `project_urls` repository link can 404 — search for the live repo before
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
+- **715** — A passagemath/passagemath monorepo split's sparse-checkout can silently drop a
+  directory from the built wheel even though `MANIFEST.in` correctly ships it in the sdist.
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
 - **668** — A per-release "binding revision" digit appended to upstream's own version can
@@ -888,3 +890,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       counterpart at all (an extra digit PyPI carries that the tag never does); this one is
       about a *tagged* release whose own dependency's manifest still disagrees with the tag,
       because the monorepo's version-bumping bot tracks each binding's manifest separately.
+
+715. **A passagemath/passagemath monorepo split's sparse-checkout can silently drop a
+    directory from the built wheel even though `MANIFEST.in` correctly ships it in the
+    sdist (the passagemath-categories case; see `build-passagemath-categories.yml`'s own
+    long inline comment, reused verbatim here because the mechanism recurs for every large
+    split).** `sage_setup.find.find_python_sources()` (called by `setup.py` at *wheel-build*
+    time, not sdist time) `os.walk`-prunes any directory that has no `__init__.py`/
+    `__init__.pxd`/`all.py` of its own, *unless* it carries an `all__sagemath_<dist>.py`
+    marker matching this distribution. A directory populated only through individual-file
+    globs in the workflow's own `sparse-checkout:` list (e.g. `src/sage/rings/integer*.p*`,
+    with no `src/sage/rings` directory-level checkout) never gets that marker file checked
+    out, so `find_python_sources()` drops the whole directory from the wheel — while the
+    *sdist* step (`python -m build --sdist`, plain `MANIFEST.in` copying with no package-
+    discovery check) ships the same files fine. The result is a build that looks complete
+    (sdist step succeeds, lists the files) and a wheel that silently loses them, with no
+    error at any step — confirmed from real logs: the sdist's own files include e.g.
+    `sage/rings/integer_ring.pyx`, but the wheel's `build/lib.../sage/rings` directory is
+    never created at all.
+    - **The fix is one recursive sparse-checkout line per distribution, not chasing every
+      loose-file directory's marker by hand**: add
+      `src/sage/**/all__sagemath_<dist>.py` and `src/sage/all__sagemath_<dist>.py` to the
+      `sparse-checkout:` list. `MANIFEST.in`'s own `global-include all__sagemath_<dist>.py`
+      already expects to find this marker on disk in every directory the distribution
+      touches — it is a statement of exactly which directories need the fix, for free.
+    - **A directory populated by a full `graft sage/<name>` line (the common case for a
+      smaller, less-fragmented split like passagemath-graphs/-combinat) is not at risk** —
+      the whole directory, `__init__.py` included, is already checked out, so
+      `find_python_sources()` finds the normal package marker and never needs the
+      `all__sagemath_<dist>.py` fallback. The risk is specific to `MANIFEST.in` lines that
+      `include`/`exclude` individual files rather than `graft`/`prune` whole directories —
+      categories' own `MANIFEST.in` is almost entirely the former shape (hence its long,
+      explicit sparse-checkout list), while graphs'/combinat's is almost entirely the
+      latter — but add the recursive marker pattern defensively either way, since it is a
+      no-op when nothing needs it and a silent wheel-content gap when something does.
