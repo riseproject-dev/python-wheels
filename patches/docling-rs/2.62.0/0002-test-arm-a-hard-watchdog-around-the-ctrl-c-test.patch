@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 17 Nov 2026 00:00:00 +0000
+Subject: [PATCH] test: arm a hard watchdog around the ctrl-c test
+
+Upstream-Status: Inappropriate [riscv64-fleet-specific timing guard, not a
+portability fix]
+
+Real riscv64 CI (job 133351190021) shows the test suite passing 16/255
+items, reaching test_abandoning_the_iterator_cancels_the_stream PASSED at
+2026-11-16T16:22:31Z, then producing zero further log output for over 10
+hours until the job's own 720-minute timeout silently killed it at
+2026-11-17T02:31:30Z. The very next test in file order is
+test_ctrl_c_interrupts_native_chunking.
+
+The prior revision's own commit message timed this same _big_document()
+chunk at "on the order of a minute" on these runners when it dropped the
+upstream 5s completion budget in favor of retrying the SIGINT every 0.2s
+until the channel-empty poll observes it. That retry assumes the channel
+goes empty often enough during the run to observe a pending signal "soon".
+Whether the 10-hour stall is that same race simply losing every round on a
+sufficiently slow/loaded host, or something else entirely (e.g. a
+background thread or channel left over from the previous test's
+abandoned-iterator cleanup), is not established from the CI log alone -
+there is no partial output at all to tell the two apart.
+
+Either way, nothing should be able to silently consume the rest of the
+job's timeout budget. Arm a hard watchdog via the stdlib faulthandler
+module, well beyond any plausible legitimate duration for this document on
+this fleet, that dumps every thread's real stack and aborts the process
+outright if this test is still running when it fires. A genuine hang then
+produces an immediate, actionable failure (with a real thread-state dump
+to diagnose from) instead of silently eating a 12-hour runner slot.
+---
+ crates/docling-py/tests/test_chunking.py | 42 ++++++++++++++++++++++++------
+ 1 file changed, 34 insertions(+), 8 deletions(-)
+
+diff --git a/crates/docling-py/tests/test_chunking.py b/crates/docling-py/tests/test_chunking.py
+index 79c37a3..27b2038 100644
+--- a/crates/docling-py/tests/test_chunking.py
++++ b/crates/docling-py/tests/test_chunking.py
+@@ -172,45 +172,65 @@ def test_abandoning_the_iterator_cancels_the_stream():
+ def test_ctrl_c_interrupts_native_chunking():
+     # A SIGINT arriving while the Rust side is chunking must raise
+     # KeyboardInterrupt promptly, not stall until the native call returns.
++    import faulthandler
+     import signal
+     import threading
+     import time
+
+     doc = _big_document()
+
+-    # __next__ only checks for a pending signal when its 100ms channel poll
+-    # times out empty; on a slow/few-core host the channel can stay non-empty
+-    # for the whole run, so a single fixed-delay SIGINT can be missed.
+-    # Re-issue it until the call is interrupted, instead of once.
+-    stop = threading.Event()
+-
+-    def resignal():
+-        while not stop.wait(0.2):
+-            signal.raise_signal(signal.SIGINT)
+-
+-    timer = threading.Timer(0.5, resignal)
+-    timer.daemon = True
+-    timer.start()
+-    try:
+-        with pytest.raises(KeyboardInterrupt):
+-            list(HybridChunker(tokenizer=str(TOKENIZER), max_tokens=64).chunk(doc))
+-    finally:
+-        # resignal() can commit to one more raise_signal() after observing
+-        # `stop` only on its next 0.2s poll, so a SIGINT can still be pending
+-        # delivery to this thread right here - including to the very next
+-        # statement run, whichever one that is. A real riscv64 run proved
+-        # that the hard way: wrapping only timer.join() in retry-on-
+-        # KeyboardInterrupt still let a trailing signal escape uncaught from
+-        # stop.set() itself, since Python can act on a pending signal at any
+-        # bytecode boundary, not only inside the call being retried. Put
+-        # every statement this cleanup needs inside the retried block, not
+-        # just the one expected to block, so there is no statement left
+-        # outside it for a trailing signal to hit.
+-        while True:
+-            try:
+-                stop.set()
+-                timer.join()
+-            except KeyboardInterrupt:
+-                continue
+-            else:
+-                break
++    # The retry loop below assumes the channel goes empty often enough during
++    # the run to observe a pending signal "soon". A real riscv64 CI run (job
++    # 133351190021) instead stalled here for over 10 hours - far beyond the
++    # "on the order of a minute" this same document's chunking was timed at
++    # when that retry loop was written - with zero log output, until the
++    # job's own 720-minute timeout silently killed it. Whether that is this
++    # same race simply losing every single round on a sufficiently
++    # slow/loaded host, or something else (e.g. a channel/thread left over
++    # from the previous test's abandoned-iterator cleanup) isn't established
++    # from CI logs alone. Either way, nothing should be able to silently eat
++    # the rest of the job's timeout budget: arm a hard watchdog, well beyond
++    # any plausible legitimate duration for this document on this fleet, that
++    # dumps every thread's real stack and aborts the process outright if this
++    # test is still running when it fires - turning a silent multi-hour stall
++    # into an immediate, diagnosable failure.
++    faulthandler.dump_traceback_later(1200, exit=True)
++    try:
++        # __next__ only checks for a pending signal when its 100ms channel poll
++        # times out empty; on a slow/few-core host the channel can stay non-empty
++        # for the whole run, so a single fixed-delay SIGINT can be missed.
++        # Re-issue it until the call is interrupted, instead of once.
++        stop = threading.Event()
++
++        def resignal():
++            while not stop.wait(0.2):
++                signal.raise_signal(signal.SIGINT)
++
++        timer = threading.Timer(0.5, resignal)
++        timer.daemon = True
++        timer.start()
++        try:
++            with pytest.raises(KeyboardInterrupt):
++                list(HybridChunker(tokenizer=str(TOKENIZER), max_tokens=64).chunk(doc))
++        finally:
++            # resignal() can commit to one more raise_signal() after observing
++            # `stop` only on its next 0.2s poll, so a SIGINT can still be pending
++            # delivery to this thread right here - including to the very next
++            # statement run, whichever one that is. A real riscv64 run proved
++            # that the hard way: wrapping only timer.join() in retry-on-
++            # KeyboardInterrupt still let a trailing signal escape uncaught from
++            # stop.set() itself, since Python can act on a pending signal at any
++            # bytecode boundary, not only inside the call being retried. Put
++            # every statement this cleanup needs inside the retried block, not
++            # just the one expected to block, so there is no statement left
++            # outside it for a trailing signal to hit.
++            while True:
++                try:
++                    stop.set()
++                    timer.join()
++                except KeyboardInterrupt:
++                    continue
++                else:
++                    break
++    finally:
++        faulthandler.cancel_dump_traceback_later()
+--
+2.43.0
