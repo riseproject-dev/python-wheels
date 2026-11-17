@@ -18,7 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **164** — A test helper with a per-architecture syscall table falls back to a fixed sleep on
 - **166** — The riscv64 runners' libgomp faults on the `dynamic` and `guided` OpenMP
 - **167** — A riscv64-only intermittent SIGSEGV: climb the control ladder before you debug
-- **718** — A minimal duck-typed graph object in a `CIBW_TEST_COMMAND` can fail every single
+- **719** — A minimal duck-typed graph object in a `CIBW_TEST_COMMAND` can fail every single
   leg identically, not with an infra blip or a per-leg divergence, when the compiled
   extension does a hard `isinstance` check a sibling binding's extension does not.
 - **168** — Running a diagnostic on the riscv64 runner: drive it from `CIBW_TEST_COMMAND`, and
@@ -559,7 +559,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       Eigen/geometry-central-style header-heavy numeric C++ dependency tree should try the
       same rebuild before spending hours on gotcha 167's fuller isolation ladder.
 
-718. **A minimal duck-typed graph object in a `CIBW_TEST_COMMAND` can fail every single leg
+719. **A minimal duck-typed graph object in a `CIBW_TEST_COMMAND` can fail every single leg
     identically, not with an infra blip or a per-leg divergence, when the compiled
     extension does a hard `isinstance` check a sibling binding's extension does not (the
     passagemath-graphs/boost_graph case).** `sage/graphs/bliss.pyx`'s `canonical_form` and
