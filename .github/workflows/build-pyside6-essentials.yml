@@ -166,16 +166,57 @@ jobs:
             # of PySide6.QtCore aborted with Fatal Python error: libshiboken:
             # could not init enum. --exclude keeps the shiboken6 .so out of the
             # repair so the wheel relies on the real shiboken6 install instead.
-            "$pybin/python3" -m auditwheel repair --plat manylinux_2_39_riscv64 \
+            "$pybin/python3" -m auditwheel -v repair --plat manylinux_2_39_riscv64 \
               --exclude libshiboken6.abi3.so.6.11 \
               -w audited dist/pyside6_essentials-*.whl
             rm -f dist/*.whl
             mv audited/*.whl dist/
-            "$pybin/pip" install -q dist/pyside6_essentials-*.whl
+            # Diagnostic only, not a fix: dump the actual RPATH of the repaired wheel
+            # so we can see in the real log whether auditwheel kept or dropped the original
+            # $ORIGIN/../shiboken6/ entry above (it only preserves rpath entries that
+            # resolve to somewhere inside the wheel being repaired, and shiboken6 lives
+            # in a separate wheel, so that entry may be silently dropped
             "$pybin/python3" -c "
-          from PySide6 import QtCore, QtGui, QtWidgets, QtNetwork, QtQml, QtQuick, QtSql, QtSvg
+          import glob, zipfile, subprocess, os
+          whl = glob.glob(\"dist/pyside6_essentials-*.whl\")[0]
+          zf = zipfile.ZipFile(whl)
+          names = [n for n in zf.namelist() if n.startswith(\"PySide6/\") and n.endswith(\".abi3.so\") and \".libs/\" not in n]
+          zf.extractall(\"/tmp/rpathcheck\", members=names)
+          zf.close()
+          for n in sorted(names):
+              print(\"RPATH\", n)
+              subprocess.run([\"patchelf\", \"--print-rpath\", os.path.join(\"/tmp/rpathcheck\", n)])
+            "
+            "$pybin/pip" install -q dist/pyside6_essentials-*.whl
+            # Diagnostic only, not a fix: capture a backtrace if the smoke test below
+            # dies from a bare signal (no Python-level traceback at all), and import
+            # one submodule at a time so the log shows exactly which one it was.
+            dnf -y install gdb || true
+            ulimit -c unlimited || true
+            echo "/tmp/core.%e.%p" > /proc/sys/kernel/core_pattern || true
+            set +e
+            "$pybin/python3" -c "
+          import sys
+          mods = [\"QtCore\", \"QtGui\", \"QtWidgets\", \"QtNetwork\", \"QtQml\", \"QtQuick\", \"QtSql\", \"QtSvg\"]
+          for name in mods:
+              print(\"importing\", name)
+              sys.stdout.flush()
+              __import__(\"PySide6.\" + name)
+              print(name, \"OK\")
+              sys.stdout.flush()
           print(\"PySide6 Essentials import OK\")
-          "
+            "
+            rc=$?
+            echo "smoke test exit code: $rc"
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              ls -la /tmp/core.* 2>/dev/null || echo "no core file produced"
+              for c in /tmp/core.*; do
+                [ -f "$c" ] || continue
+                gdb -q -batch -ex "bt full" -ex "info sharedlibrary" "$pybin/python3" "$c"
+              done
+              exit "$rc"
+            fi
           '
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
