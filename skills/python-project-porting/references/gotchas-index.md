@@ -1294,6 +1294,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   CI/releases directly, not the consuming package's hardcoded list, and bypass via an
   existing path/URL override env var instead of patching (the componentize-py / WASI-SDK
   case).
+- **714** — Pointing `auditwheel repair` at a dep-wheel's `.so` via `LD_LIBRARY_PATH` so it can
+  be located makes it get vendored too, unless `--exclude` says otherwise — two loaded copies
+  of a native runtime with its own internal registries corrupts them both (the
+  pyside6-essentials/shiboken6 case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
