@@ -39,7 +39,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
@@ -144,8 +144,13 @@ jobs:
           # adbc-driver-manager/pandas/pyarrow riscv64 wheels only exist on our
           # own registry. PyPI's newest pandas has no riscv64 wheel and its sdist
           # fails to build (meson/xsimd), so install pandas wheel-only and let pip
-          # back off to a release the registry has a wheel for.
-          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas pip install -q \
+          # back off to a release the registry has a wheel for. Same story for
+          # pyarrow: unpinned resolution reaches a version with no riscv64 wheel
+          # here and its sdist fails (CMake can't find_package(Arrow), since the
+          # Arrow C++ library isn't installed in this test env) - wheel-only lets
+          # pip back off to a published riscv64 build (16.1.0/25.0.1/26.0.0 all
+          # satisfy >=14.0.1 and have manylinux_2_39_riscv64 wheels).
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas,pyarrow pip install -q \
             wheelhouse/*.whl adbc-driver-manager numpy pandas "pyarrow>=14.0.1" "pytest>=9"
 
           python -c "import adbc_driver_sqlite; import adbc_driver_sqlite.dbapi"

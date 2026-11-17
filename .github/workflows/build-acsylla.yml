@@ -29,7 +29,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
@@ -79,7 +79,11 @@ jobs:
           # upstream's wheels do not ship.
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
-            dnf install -y openssl-devel
+            if command -v apk >/dev/null; then
+              apk add openssl-dev
+            else
+              dnf install -y openssl-devel
+            fi
             LIBUV_VERSION=1.52.1
             curl -fsSLO https://dist.libuv.org/dist/v$LIBUV_VERSION/libuv-v$LIBUV_VERSION.tar.gz
             tar -xzf libuv-v$LIBUV_VERSION.tar.gz
@@ -94,7 +98,12 @@ jobs:
             cp vendor/cpp-driver/src/third_party/http-parser/LICENSE-MIT LICENSE.cpp-driver-http-parser
             cp vendor/cpp-driver/src/third_party/rapidjson/license.txt LICENSE.cpp-driver-rapidjson
             cp vendor/cpp-driver/src/third_party/sparsehash/COPYING LICENSE.cpp-driver-sparsehash
-            cp /usr/share/licenses/openssl-libs/LICENSE.txt LICENSE.openssl
+            if [ -f /usr/share/licenses/openssl-libs/LICENSE.txt ]; then
+              cp /usr/share/licenses/openssl-libs/LICENSE.txt LICENSE.openssl
+            else
+              openssl_version=$(openssl version | awk '{print $2}')
+              curl -fsSL -o LICENSE.openssl "https://raw.githubusercontent.com/openssl/openssl/openssl-${openssl_version}/LICENSE.txt"
+            fi
           CIBW_ENVIRONMENT: >-
             LIBUV_ROOT_DIR=/usr/local
             UV_LIBRARY_PATH=/usr/local/lib
@@ -104,7 +113,11 @@ jobs:
           # run the same Cassandra release on Temurin 17 (the image's JRE) in the container.
           CIBW_BEFORE_TEST_LINUX: |
             set -ex
-            dnf install -y procps-ng
+            if command -v apk >/dev/null; then
+              apk add procps
+            else
+              dnf install -y procps-ng
+            fi
             curl -fsSL -o /tmp/jre.tar.gz https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jre_riscv64_linux_hotspot_17.0.20.1_1.tar.gz
             echo "79c40c11fbad2b6771d08b9d4a7328bedfe49660b711930d3fe6529e5f28f99f  /tmp/jre.tar.gz" | sha256sum -c -
             curl -fsSL -o /tmp/cassandra.tar.gz https://archive.apache.org/dist/cassandra/5.0.9/apache-cassandra-5.0.9-bin.tar.gz

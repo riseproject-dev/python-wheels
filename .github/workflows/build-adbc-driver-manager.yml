@@ -30,7 +30,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs['cancel-in-progress'] }}
+  cancel-in-progress: ${{ case(github.event_name == 'pull_request', true, github.event_name == 'workflow_dispatch', inputs['cancel-in-progress'], false) }}
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
@@ -92,7 +92,12 @@ jobs:
           # CIBW_TEST_REQUIRES and would otherwise pick pandas 3.1: a pip constraints
           # file, written by before-test (which runs ahead of that install).
           CIBW_BEFORE_TEST: ${{ matrix.python == 'cp314t' && 'echo "pandas<3.1" > /tmp/pandas-constraint.txt' || '' }}
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.python == 'cp314t' && 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_CONSTRAINT=/tmp/pandas-constraint.txt' || 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas' }}
+          # Same story for pyarrow: unpinned resolution reaches a version with no
+          # riscv64 wheel here and its sdist fails (CMake can't find_package(Arrow),
+          # since the Arrow C++ library isn't installed in this test env) - wheel-only
+          # lets pip back off to a published riscv64 build. The registry does have a
+          # cp314t pyarrow wheel, unlike pandas, so that leg can go wheel-only for it.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.python == 'cp314t' && 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_CONSTRAINT=/tmp/pandas-constraint.txt PIP_ONLY_BINARY=pyarrow' || 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas,pyarrow' }}
           CIBW_TEST_EXTRAS: dbapi
           CIBW_TEST_REQUIRES: ${{ matrix.python == 'cp314t' && 'pytest>=9 pandas<3.1' || 'pytest>=9' }}
           CIBW_TEST_SOURCES: python/adbc_driver_manager/tests python/adbc_driver_manager/pyproject.toml
