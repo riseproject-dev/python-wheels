@@ -38,6 +38,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
   from-source build, not a no-op (the eclipse-sumo case).
 - **698** — A distro-apt `swig` can be too *old* for the target CPython, failing cp314 and
   cp314t identically with no free-threading angle at all (the ufal.udpipe case).
+- **721** — An unpinned `pip install` inside a `repair-wheel-command` can drift out of sync
+  with the pinned version the wheel was built against once enough real time passes between
+  the build and repair steps (the passagemath-cddlib case).
 
 ---
 
@@ -811,3 +814,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     there is no existing pipx venv to patch in place — `pipx install` a fresh one and prepend
     its bin dir to `$GITHUB_PATH` so the later step that invokes a bare `swig` picks it up
     ahead of apt's.
+
+721. **An unpinned `pip install` inside a `repair-wheel-command` can drift out of sync with
+    the pinned version the wheel was actually built against, once enough real time passes
+    between the build and repair steps — gotcha 716's own sibling, one layer further
+    (passagemath-cddlib's every leg failing identically).** The build step installs
+    `passagemath-conf ~= 10.8.13.0` (from `[build-system] requires`, rendered by `./bootstrap`
+    from the tag) and runs `make(cddlib-ensure)` against that exact tree
+    (`sage-10.8.13.post1-Linux-riscv64`). `repair_wheel.py`'s own
+    `[tool.cibuildwheel.linux] repair-wheel-command`, by contrast, does a bare
+    `pip install passagemath-conf auditwheel` with no version constraint at all — fine when
+    build and repair run back to back, but this repo's riscv64 runners are scarce enough that
+    the two steps can be hours apart (14:16 sdist build vs. 16:53-17:08 per-leg repair here).
+    In that window upstream published `passagemath-conf` 10.8.14; the unpinned install picked
+    it up, and `repair_wheel.py` tarred `cddlib`'s bundled binaries from
+    `sage-10.8.14-Linux-riscv64/local/bin` — a tree the build step never touched — instead of
+    the `10.8.13.post1` one `cddlib-ensure` actually populated, so every single bundled binary
+    came back `tar: Cannot stat: No such file or directory` and every leg failed the same way
+    despite the wheel itself having built cleanly.
+    - **The fix is a `CIBW_REPAIR_WHEEL_COMMAND_LINUX` override that re-states the same
+      version the build step pinned**, not a patch to `repair_wheel.py` itself:
+      `pip install "passagemath-conf~=${{ matrix.version }}.0" auditwheel && python3
+      {project}/repair_wheel.py {wheel} && auditwheel repair -w {dest_dir} {wheel}` keeps the
+      repair step's `sage_conf` tree pinned to the one the build step actually populated,
+      regardless of what upstream ships in between.
+    - **All legs failing identically is consistent with a shared root cause that is purely
+      about *when* the job happened to run, not what it built** — every `python`/`platform`
+      row hit the exact same `pip install passagemath-conf` resolving to the exact same newer
+      release, because they all ran their repair step after the same point in real time. Don't
+      mistake "every leg, byte-for-byte identical error" for proof the bug lives before the
+      matrix diverges in the *build graph* sense (gotcha 716's own undeclared-dependency angle)
+      — here it is a wall-clock race that happens to land identically everywhere once it fires.

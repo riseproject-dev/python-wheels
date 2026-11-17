@@ -1460,6 +1460,10 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **698** — A distro-apt `swig` can be too old for the target CPython's `PyHeapTypeObject`
   layout, failing a `-builtin`-mode extension's compile identically on cp314 and cp314t with
   no free-threading angle at all — pin a newer PyPI `swig` wheel (the ufal.udpipe case).
+- **721** — An unpinned `pip install` inside a `repair-wheel-command` can drift out of sync
+  with the pinned version the wheel was built against once enough real time passes between
+  the build and repair steps, failing every matrix leg identically (the passagemath-cddlib
+  case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
