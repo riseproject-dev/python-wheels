@@ -18,6 +18,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **164** — A test helper with a per-architecture syscall table falls back to a fixed sleep on
 - **166** — The riscv64 runners' libgomp faults on the `dynamic` and `guided` OpenMP
 - **167** — A riscv64-only intermittent SIGSEGV: climb the control ladder before you debug
+- **718** — A minimal duck-typed graph object in a `CIBW_TEST_COMMAND` can fail every single
+  leg identically, not with an infra blip or a per-leg divergence, when the compiled
+  extension does a hard `isinstance` check a sibling binding's extension does not.
 - **168** — Running a diagnostic on the riscv64 runner: drive it from `CIBW_TEST_COMMAND`, and
 - **169** — `astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
@@ -555,6 +558,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       future porter hitting the identical "all legs crash, no traceback" shape on an
       Eigen/geometry-central-style header-heavy numeric C++ dependency tree should try the
       same rebuild before spending hours on gotcha 167's fuller isolation ladder.
+
+718. **A minimal duck-typed graph object in a `CIBW_TEST_COMMAND` can fail every single leg
+    identically, not with an infra blip or a per-leg divergence, when the compiled
+    extension does a hard `isinstance` check a sibling binding's extension does not (the
+    passagemath-graphs/boost_graph case).** `sage/graphs/bliss.pyx`'s `canonical_form` and
+    `sage/graphs/mcqd.pyx`'s `mcqd` both accept a bare `type('G', (object,), {...})` mock
+    with just the handful of methods they call — no sibling check against a real Sage
+    class. `sage/graphs/base/boost_graph.pyx` does not: both
+    `boost_graph_from_sage_graph` and `boost_weighted_graph_from_sage_graph` (the latter
+    used internally by `eccentricity_DHV`, `eccentricity`, and every other boost_graph
+    entry point) open with `if not isinstance(g_sage, GenericGraph): raise
+    TypeError("the input must be a Sage graph")`, which no duck-typed object can ever
+    satisfy regardless of which methods it defines. A smoke test copy-pasting the
+    bliss/mcqd shape onto a boost_graph call fails with `TypeError: the input must be a
+    Sage graph` on every single build leg, every single time, with an identical traceback
+    and no timing variance — the strongest possible real-log signal that this is one
+    deterministic Python-level bug in the test command itself, not 10 different per-leg
+    build problems and not transient CI/registry infra (which would show HTTP-error or
+    timeout signatures, not a clean `TypeError` three frames into application code).
+    - **Fix by constructing a real (minimal) instance of the package's own graph class,
+      not by patching the duck-typed mock's attribute set.** No amount of adding methods
+      to the `type(...)` mock clears an `isinstance` check; `Graph([(0,1),(1,2),(2,3),
+      (3,4),(4,0)])` from `sage.graphs.graph` (a `GenericGraph` subclass) is both simpler
+      and correct here, and needs nothing beyond the extension's own already-declared
+      hard dependencies (passagemath-categories supplies the `sage.structure`/`sage.rings`
+      base `Graph.__init__` needs for a plain, unweighted, integer-labelled graph).
+    - **A fix landing in the same push that first makes the real CI run complete can look
+      like a regression across every leg when it is actually the pre-existing bug finally
+      being observed everywhere.** A prior run that *appeared* to show only a handful of
+      legs failing was not evidence the rest would have passed if the superseding fix
+      commit's own build got cancelled (matrix `fail-fast: false` plus a 45-70 minute
+      per-leg wall-clock) by a follow-up push before the slower legs finished — compare
+      each leg's own job conclusion (`cancelled` vs `failure`) and completion timestamp,
+      not just the run's rolled-up `total failing` count, before concluding a broader
+      failure set must have a broader cause.
 
 169. **`astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
     statically what a distro ships as shared — which fails tests that assert on module
