@@ -126,6 +126,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   OpenSSL for `cmcurl` and the image ships no dev headers by default.
 - **634** — Zig 0.16's translate-c (Aro) predefines no RISC-V float-ABI macros, so a Zig
   extension that translates `Python.h` fails on manylinux_riscv64 only (`unsupported FLEN`).
+- **718** — A project-specific auditwheel fork pinned before it synced a later upstream
+  release can lack a whole symbol-version category, making `repair` fail "too-recent
+  versioned symbols" under every policy with no library or symbol named in the error.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1955,3 +1958,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     failure lands at the very final link of a large binary/shared-object target, specifically
     naming compiler-generated EH labels (`.LEHB*`/`.LFB*`/`.LEHE*`/local numeric `.L*`
     symbols) as the discarded-section references, not an undefined external symbol.
+
+718. **A project-specific auditwheel fork, pinned to a commit from before the fork synced a
+    later upstream release, can be missing a whole symbol-version category — and `repair`
+    reports that as the generic "too-recent versioned symbols" error with no library or
+    symbol named, for every manylinux policy, not just the one requested (the sapien case).**
+    Upstream `pypa/auditwheel` added `libatomic.so.1` (plus `libmvec.so.1`/`libanl.so.1`) to
+    `lib_whitelist`, and a matching `LIBATOMIC` entry to `symbol_versions`, in commit
+    `444d9021d2` (2025-04-16, "feat: add libatomic.so.1 to lib_whitelist"). A fork carried for
+    a project-specific feature (here, `fbxiang/auditwheel`'s `--internal` flag, which keeps
+    grafted `.so` names architecture-independent) can be pinned to a branch cut *before* that
+    sync, so its policy tables have zero entries for the category at all — not a too-high
+    version of a known category, a category the fork's policy.json cannot express under any
+    policy. GCC on riscv64 commonly auto-links C++ code using `std::atomic` against
+    `libatomic.so.1` (RV64GC has no native lock-free path for some atomic widths), so any
+    riscv64 C++ wheel linking such a fork trips this unconditionally, regardless of how
+    generous the target manylinux tag already is for GLIBC/GLIBCXX/GCC.
+    - **The real error carries no library/symbol name to grep for** — `auditwheel repair`
+      only logs `INFO:auditwheel.lddtree:Excluding <lib>` lines per `--exclude` and then the
+      generic `cannot repair ... because of the presence of too-recent versioned symbols`
+      straight from `main_repair.py`'s argparse-style error; there is no intermediate
+      `WARNING`-level line naming the offending `.so` or symbol version in non-verbose mode.
+      Don't spend a log fetch looking for one.
+    - **Diagnose from the fork's own policy.json, not the binary.** Fetch
+      `src/auditwheel/policy/manylinux-policy.json` at the pinned ref (raw.githubusercontent.com,
+      no clone needed) and check both `lib_whitelist` and `symbol_versions.keys()` for the
+      target arch, for the target policy entry, against the same file on the fork's current
+      default branch or on `pypa/auditwheel` main. A category present upstream/later but
+      absent at the pin is strong, checkable evidence without burning a CI cycle to reproduce.
+    - **Fix by bumping the fork pin, not by raising the manylinux policy tag or forcing an
+      older compiler** — those two "obvious" fixes from the generic error message don't apply
+      here: the image's own GCC/glibc are already within the policy's allowed range (this
+      fork's manylinux_2_39/riscv64 entry already lists `GCC` up to `14.0.0` and `GLIBCXX` up
+      to `3.4.32`), and raising the tag doesn't add a missing category to a policy table that
+      doesn't have it at *any* level. Check `git ls-remote <fork-url>` for a newer
+      version-tagged branch of the same fork (sapien-sim's fork names them `<auditwheel
+      version>-internal`, e.g. `6.2.0-internal` → `6.8.2-internal`) before assuming the fix
+      means dropping the fork's feature or vendoring a policy-table patch.

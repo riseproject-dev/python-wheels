@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (567 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1785,6 +1785,13 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   relaxation interaction (binutils bug 28709), not a GCC/lld compiler mismatch (upstream's
   own CI pairs GCC+lld successfully on aarch64). Fix: `-mno-relax` via `CFLAGS`/`CXXFLAGS`,
   not disabling `--gc-sections` or lld.
+- **718** — A project-specific auditwheel fork pinned to a commit from before the fork synced
+  a later upstream release can be missing a whole symbol-version category (`libatomic.so.1`/
+  `LIBATOMIC`, added upstream in `444d9021d2`), making `repair` fail "too-recent versioned
+  symbols" under every manylinux policy, with no library or symbol named in the error (the
+  sapien case: riscv64 GCC auto-links `std::atomic` code against `libatomic.so.1`, which the
+  pinned `fbxiang/auditwheel@6.2.0-internal` cannot express in any policy; fixed by bumping
+  to that fork's own later `6.8.2-internal` branch, which carries the upstream sync).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
