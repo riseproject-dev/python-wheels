@@ -368,6 +368,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   but check whether the language binding's *published-wheel* build job actually bundles that
   specific binary at all before parking on it — an optional engine can dlopen lazily and
   degrade gracefully, and never be part of the real artifact on any platform (the xberg case).
+- **716** — A `[tool.cibuildwheel] repair-wheel-command` can declare a build-time dependency
+  not in `[build-system] requires` or `[project] dependencies` at all - read the repair
+  script itself, not just the declared metadata, before trusting a formal dependency list.
+- **717** — A compiled extension's `__init__.py` can eagerly import an unrelated, unported
+  sibling distribution purely to "fail early with a nicer error" - not a real dependency of
+  the extension itself, and not declared in any extras either.
 - **704** — Gotchas 556/600/601 generalize one layer further: a legitimate, active GitHub org
   with its own unrelated public repos can still run a product's *entire* build — wrapper layer
   and native engine alike — inside a private monorepo with no public checkout at any layer, so
@@ -6484,3 +6490,77 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - **Verdict: `parked`.** Revisit only if Chalk AI publishes the `chalk-queue`/
       `chalk_metrics`/`chalk_statsd` source (or a Linux build mode that doesn't need it), or
       ships a riscv64 wheel themselves.
+
+716. **A `[tool.cibuildwheel] repair-wheel-command` can declare a build-time dependency not
+    in `[build-system] requires` or `[project] dependencies` at all - read the repair script
+    itself, not just the declared metadata, before trusting a formal dependency list (the
+    passagemath-graphs/-buckygen/-benzene/-plantri case).** `pkgs/sagemath-graphs`'s
+    `repair_wheel.py` does `from sage.config import SAGE_LOCAL` and tars
+    `SAGE_LOCAL/share/graphs` straight into the wheel - a real, hard dependency on
+    passagemath-conf having already built that data spkg - yet nothing in
+    `pyproject.toml.m4`'s `[build-system]`/`[project]` tables names passagemath-conf at all;
+    it only shows up as a `pip install passagemath-conf auditwheel` line buried inside
+    `[tool.cibuildwheel.linux] repair-wheel-command`, a table `check_versions.py`-style
+    dependency audits never look at. The instinct to treat this as unverified and patch it
+    out (matching the buckygen/benzene/plantri/kissat/glucose `.queue.yml` entries, parked
+    for exactly this passagemath-conf/`SAGE_LOCAL` concern) turned out to be the wrong call
+    once `build-passagemath-cddlib.yml` (merged, PR #4760) proved the identical
+    passagemath-conf + `sage_setup()`'s `make(f"{spkg}-ensure")` + `repair_wheel.py` pipeline
+    green on both manylinux and musllinux riscv64 for the same `sage_conf`-in-build-system
+    shape - at that point the honest fix was to drop the defensive patch, not keep it.
+    - **The question to settle first is never "is this declared?" but "has any sibling port
+      with the same shape actually gone green?"** `sage_conf` (passagemath-conf's internal
+      spkg name) in `[build-system] requires` is itself the tell that `sage_setup()`'s
+      `try: from sage.config import make / except ImportError: pass` branch will NOT be
+      silently skipped - passagemath-conf is a real build-system requirement, so pip
+      installs it before `setup.py` runs, and `make(spkg-ensure)` genuinely executes. Check
+      every sibling split package's own `[build-system] requires` for the same `sage_conf`
+      entry, and check this repo's own already-merged PRs for one that already found out
+      whether the pipeline works, before assuming "unverified" from an older queue note that
+      predates a newer sibling's proof.
+    - **The two things that gate the automatic path are a system equivalent and a build-time
+      credential, not a feature flag.** `boost_cropped`'s own `spkg-configure.m4` calls
+      `AX_BOOST_BASE([1.83.0])` - if a `dnf install boost-devel`/`apk add boost-dev` step
+      runs before passagemath-conf's own `./configure`, it detects the system Boost and
+      skips the from-source cmake build entirely, same escape hatch gotcha-level dnf-instead-
+      of-source patterns already use for `build-ompl.yml`/`build-cgal.yml`. Nothing else
+      needs patching.
+    - **Not every from-source C dependency in this family should take this route anyway** -
+      `build-passagemath-cliquer.yml` also carries `sage_conf` in its build-system requires,
+      yet still fetches and builds cliquer manually in `CIBW_BEFORE_ALL_LINUX` rather than
+      relying on the automatic `make("cliquer-ensure")` path. cddlib's shape (ensuring
+      separate command-line binaries that `repair_wheel.py` only tars into `sage_wheels/bin`
+      after the wheel is built) is not the same risk as a library whose headers/`.so` have to
+      be on `CPATH`/`LIBRARY_PATH` *during* the Cython compile step itself (symmetrica's
+      shape, gotcha 717's sibling entry) - prefer the proven, explicit from-source build for
+      the latter shape until a sibling proves the automatic route works for it too.
+
+717. **A compiled extension's `__init__.py` can eagerly import an unrelated, unported sibling
+    distribution purely to "fail early with a nicer error" - not a real dependency of the
+    extension itself, and not declared in any extras either (the passagemath-combinat/
+    symmetrica case).** `sage/libs/symmetrica/__init__.py` does `import sage.combinat.tableau`
+    then `import sage.matrix.constructor` at module scope, commented only "Fail early if
+    runtime deps of symmetrica are not available; symmetrica does not handle this well."
+    Nothing in the compiled `symmetrica.pyx` bindings (`kostka_number`, `chartafel`,
+    `outerproduct_schur`, ...) takes a matrix argument or calls into `sage.matrix` at the C
+    level - `sage.matrix.constructor` belongs to the unported passagemath-modules, and
+    `pyproject.toml.m4`'s own `symmetrica = []` extra is empty, giving no hint that importing
+    the compiled extension needs anything beyond this package. Since Python always runs a
+    package's `__init__.py` before any of its submodules, merely doing
+    `from sage.libs.symmetrica.all import kostka_number` - the only way to reach the compiled
+    extension at all - raises `ImportError` on a wheel that never declared passagemath-modules
+    as a dependency anywhere.
+    - **Not every eager import in the same guard is equally suspect - check each one's own
+      transitive imports before patching the whole block out.** `sage.combinat.tableau`,
+      the *other* "fail early" import on the line above, was left untouched here: its own
+      module-scope imports (`sage.combinat.composition`/`partition`/`subset`/
+      `combinatorial_map`, confirmed by grepping `src/sage/combinat/tableau.py`) all resolve
+      to the already-live passagemath-categories, so it imports cleanly on this wheel and
+      removing it would have been an unjustified extra divergence.
+    - **This is gotcha 716's own undeclared-dependency shape, one level down**: there, a
+      *build-time* step (`repair-wheel-command`) had an undeclared dependency the formal
+      `[build-system]`/`[project]` tables never named; here it is a *runtime* import inside
+      the package's own `__init__.py`. Both need reading the actual code the declared
+      metadata doesn't cover - the passagemath-glpk/-polyhedra case (a module-scope `from
+      sage.numerical.mip import MIPSolverException` with no matching declared dependency)
+      is the same pattern again, one layer further from the compiled extension itself.

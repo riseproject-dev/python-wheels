@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 16 Nov 2026 00:20:00 +0000
+Subject: [PATCH] riscv64: skip the libgfortran RPATH fixup when there is none
+
+Upstream-Status: Inappropriate [this build's riscv64 gfortran links libgfortran statically into libscipy_openblas.so instead of as a separate shared object, unlike x86_64/aarch64]
+
+Every leg that gets past the OpenBLAS compile fails here on real riscv64
+CI (PR #4888), identically on manylinux and musllinux:
+
+    + unzip dist/scipy_openblas32-...-riscv64.whl '*libgfortran*'
+    caution: filename not matched:  *libgfortran*
+    ##[error]Process completed with exit code 11.
+
+auditwheel repair's own log for the same run never mentions copying or
+grafting any shared library at all (confirmed from the real job log),
+so this isn't a glob/naming mismatch: the wheel genuinely has no
+separate libgfortran*.so to RPATH-fix on this build - unlike the
+upstream-published x86_64 wheel for this exact version, which does
+bundle one (its real PyPI wheel carries
+scipy_openblas32/lib/libgfortran-040039e1.so.5.0.0). GPL-source
+availability for gcc-gfortran is unaffected either way: this repo's
+own gpl_sources job already collects it from the same manylinux image
+regardless of how libgfortran ends up linked.
+
+Guard on the wheel's own contents rather than $PLAT, so the fix holds
+for any future target with the same static-gfortran behavior instead
+of enumerating riscv64 by name.
+---
+ tools/build_wheel.sh | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/tools/build_wheel.sh b/tools/build_wheel.sh
+index f2f2ca9..c374d9f 100644
+--- a/tools/build_wheel.sh
++++ b/tools/build_wheel.sh
+@@ -85,14 +85,16 @@ else
+     rm dist/scipy_openblas*-none-any.whl
+     # Add an RPATH to libgfortran:
+     # https://github.com/pypa/auditwheel/issues/451
+-    if [ "$MB_ML_LIBC" == "musllinux" ]; then
+-      apk add zip
+-    else
+-      yum install -y zip
++    if unzip -l dist/*.whl | grep -q libgfortran; then
++      if [ "$MB_ML_LIBC" == "musllinux" ]; then
++        apk add zip
++      else
++        yum install -y zip
++      fi
++      unzip dist/*.whl "*libgfortran*"
++      patchelf --force-rpath --set-rpath '$ORIGIN' */lib/libgfortran*
++      zip dist/*.whl */lib/libgfortran*
+     fi
+-    unzip dist/*.whl "*libgfortran*"
+-    patchelf --force-rpath --set-rpath '$ORIGIN' */lib/libgfortran*
+-    zip dist/*.whl */lib/libgfortran*
+ fi
+ 
+ if [ "${PLAT}" == "arm64" ]; then

@@ -3,9 +3,8 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 """
-Extract metadata from a just-built riscv64 wheel, record its release under the
-matching version entry of docs/packages/<name>.yaml, and open a pull request
-with the change.
+Extract metadata from a just-built riscv64 wheel and record its release under
+the matching version entry of docs/packages/<name>.yaml on `main`.
 
 The version entry must already be declared (the porter or the nightly upgrade
 adds a bare `- version:` line, which is what the build workflow builds); this
@@ -330,118 +329,35 @@ def git_run(*args, check=True):
     return subprocess.run(["git", *args], check=check)
 
 
-def push_remote():
-    """
-    Where to push the docs branch.
-
-    The checkout's own credentials are whatever the workflow gave it, and a
-    push made with GITHUB_TOKEN raises no events, so the documentation PR would
-    get no checks. Push over GH_TOKEN instead -- the App installation token
-    when the publish workflow minted one -- and fall back to the checkout's
-    remote when there is none. Actions masks the token in the logs.
-    """
-    if not GH_TOKEN:
-        return "origin"
-    return f"https://x-access-token:{GH_TOKEN}@github.com/{REPO}"
+def checkout_main():
+    """Check out the latest `origin/main`, starting from a depth-one checkout."""
+    git_run("fetch", "--depth=1", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    git_run("switch", "--force-create", "main", "origin/main")
 
 
-def checkout_package_branch(branch):
-    """
-    Check out the package's branch as a local worktree HEAD, based on
-    origin/<branch> if it already exists, otherwise on origin/main, and replay
-    its pending commits on top of origin/main.
-
-    Nightly declarations and publication metadata share this package-specific
-    branch, so a run needs to build on whatever is already there rather than
-    starting from main each time. main keeps moving under it while it waits for
-    review, so without the rebase the branch carries an ever older tree and the
-    PR ends up conflicting.
-
-    Returns the origin/<branch> commit the checkout started from, or None when
-    the branch is new, so the push can lease against it.
-    """
-    # Checkout starts at depth 1. Fetch only main and this package branch with
-    # enough history to find their merge base, deepening only when necessary.
-    branch_ref = f"refs/heads/{branch}"
-    branch_exists = subprocess.run(
-        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch_ref],
-        stdout=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0
-    refspecs = ["+refs/heads/main:refs/remotes/origin/main"]
-    if branch_exists:
-        refspecs.append(f"+{branch_ref}:refs/remotes/origin/{branch}")
-
-    git_run(
-        "fetch",
-        "--depth=100" if branch_exists else "--depth=1",
-        "origin",
-        *refspecs,
+def push_main():
+    """Push HEAD to main, rebasing and retrying when another push wins a race."""
+    remote = (
+        f"https://x-access-token:{GH_TOKEN}@github.com/{REPO}" if GH_TOKEN else "origin"
     )
-    remote_ref = f"origin/{branch}"
-    if branch_exists:
-        for deepen in (500, 2000):
-            if git_run(
-                "merge-base", "origin/main", remote_ref, check=False
-            ).returncode == 0:
-                break
-            git_run("fetch", f"--deepen={deepen}", "origin", *refspecs)
-        else:
-            # Rare fallback for a package branch with a very old merge base.
-            git_run("fetch", "--unshallow", "origin", *refspecs)
-
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", remote_ref],
-        capture_output=True,
-        text=True,
-    )
-    remote_sha = result.stdout.strip() if result.returncode == 0 else None
-
-    git_run("switch", "--force-create", branch, remote_sha or "origin/main")
-    if remote_sha and git_run("rebase", "origin/main", check=False).returncode != 0:
-        git_run("rebase", "--abort", check=False)
-        raise SystemExit(
-            f"could not rebase {branch} onto origin/main; resolve the conflict "
-            f"and force-push the branch, then re-run this publish"
+    for attempt in range(1, 6):
+        result = git_run("push", remote, "HEAD:main", check=False)
+        if result.returncode == 0:
+            return
+        if attempt == 5:
+            break
+        print(f"push rejected; rebasing onto the latest main ({attempt}/5)")
+        git_run(
+            "fetch", "--depth=100", "origin", "+refs/heads/main:refs/remotes/origin/main"
         )
-    return remote_sha
-
-
-def pr_exists(branch):
-    """Return True if an open PR already targets this branch as its head."""
-    out = subprocess.run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            REPO,
-            "--head",
-            branch,
-            "--state",
-            "open",
-            "--json",
-            "number",
-            "--jq",
-            "length",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    return out.isdigit() and int(out) > 0
+        if git_run("rebase", "origin/main", check=False).returncode != 0:
+            git_run("rebase", "--abort", check=False)
+            raise SystemExit("could not rebase the publication commit onto main")
+    raise SystemExit("could not push the publication commit to main after 5 attempts")
 
 
 def configure_git_identity():
     subprocess.run([CI_SCRIPTS_DIR / "git-identity.sh"], check=True)
-
-
-def extract_pr_url(stdout):
-    for line in stdout.split("\n"):
-        line = line.strip()
-        if "github.com" in line and "/pull/" in line:
-            return line
-    return None
 
 
 def main(validate_only=False):
@@ -472,9 +388,6 @@ def main(validate_only=False):
     patch_dir = find_patch_dir(slug, version)
     comment = None
     yaml_path = DOCS_DIR / f"{slug}.yaml"
-
-    branch = f"package/{slug}"
-    pr_title = f"{slug}: update packages"
 
     def compute_content():
         """Read the current YAML and return (old_content, new_content)."""
@@ -509,9 +422,7 @@ def main(validate_only=False):
         if new_content is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
-        print(
-            "[dry-run] Not on main branch — no branch, commit, or PR will be created."
-        )
+        print("[dry-run] Not on main branch; no commit will be pushed.")
         print(f"[dry-run] Would write {yaml_path}:")
         diff = difflib.unified_diff(
             (old_content or "").splitlines(keepends=True),
@@ -520,16 +431,13 @@ def main(validate_only=False):
             tofile=str(yaml_path),
         )
         sys.stdout.writelines(diff)
-        print(
-            f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main"
-        )
+        print("[dry-run] Would commit this change and push it directly to main")
         return
 
     configure_git_identity()
-    remote_sha = checkout_package_branch(branch)
+    checkout_main()
 
-    # Compute the change against the package branch's contents, so a version
-    # declared by the nightly workflow is retained and filled in here.
+    # Compute the change against the latest main so concurrent changes are retained.
     _old_content, new_content = compute_content()
     if new_content is None:
         print(f"{slug} {version} is already documented; nothing to do")
@@ -540,41 +448,8 @@ def main(validate_only=False):
 
     git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
 
-    # The rebase rewrote whatever was on the branch, so the push is no longer a
-    # fast-forward; the lease keeps it from clobbering a concurrent update.
-    push = ["push", push_remote(), f"HEAD:{branch}"]
-    if remote_sha:
-        push.insert(1, f"--force-with-lease={branch}:{remote_sha}")
-    git_run(*push)
-
-    if pr_exists(branch):
-        print(f"[+] PR already open for branch '{branch}'; pushed update")
-        return
-
-    result = subprocess.run(
-        [
-            "gh",
-            "pr",
-            "create",
-            "--repo",
-            REPO,
-            "--base",
-            "main",
-            "--head",
-            branch,
-            "--title",
-            pr_title,
-            "--body",
-            "Automatically generated PR to document newly published wheels. "
-            "Please review it carefully before merging.\n\n"
-            "If necessary, force-push this branch.",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    pr_url = extract_pr_url(result.stdout)
-    print(f"[+] Opened PR: {pr_url or '(URL not found in output)'}")
+    push_main()
+    print(f"[+] Pushed publication metadata for {slug} {version} to main")
 
 
 if __name__ == "__main__":
