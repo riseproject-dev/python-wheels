@@ -693,6 +693,15 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
   `src/sage/**/all__sagemath_<dist>.py` to the checkout list defensively (the passagemath-
   categories case; low-risk for a `graft`-heavy split like graphs/combinat, but cheap
   insurance either way).
+- **722** — A passagemath/passagemath split whose `pkgs/sagemath-<dist>/VERSION.txt` is a
+  symlink to the monorepo's top-level `VERSION.txt` (most splits — a few early ones like
+  sagemath-categories/-objects carry a real file instead), left out of the workflow's
+  `sparse-checkout:` list, builds a wheel with `Version: 0.0.0` baked in silently: the
+  dangling symlink makes setuptools' dynamic-version file read resolve to `''`, and
+  `Distribution.get_version()` falls back to `"0.0.0"` — no error at sdist or wheel build,
+  only at a later version-vs-YAML check (the passagemath-combinat case, PR #4907). Add
+  `/VERSION.txt` to the sparse-checkout list, right after `/pyproject.toml` (already
+  precedented in `build-passagemath-cddlib.yml`).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

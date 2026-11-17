@@ -18,6 +18,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **135** — A version placeholder that upstream's *release script* stamps is a fourth way to
 - **154** — A PyPI `project_urls` repository link can 404 — search for the live repo before
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
+- **722** — A passagemath/passagemath split whose `pkgs/sagemath-<dist>/VERSION.txt` is a
+  symlink to the monorepo's top-level `VERSION.txt`, omitted from the workflow's own
+  `sparse-checkout:` list, builds a wheel with `Version: 0.0.0` baked in and no error
+  anywhere in the sdist or wheel build.
 - **715** — A passagemath/passagemath monorepo split's sparse-checkout can silently drop a
   directory from the built wheel even though `MANIFEST.in` correctly ships it in the sdist.
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
@@ -924,3 +928,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       explicit sparse-checkout list), while graphs'/combinat's is almost entirely the
       latter — but add the recursive marker pattern defensively either way, since it is a
       no-op when nothing needs it and a silent wheel-content gap when something does.
+
+722. **A passagemath/passagemath split whose `pkgs/sagemath-<dist>/VERSION.txt` is a
+    symlink to the monorepo's top-level `VERSION.txt`, omitted from the workflow's own
+    `sparse-checkout:` list, builds a wheel with `Version: 0.0.0` baked in and no error
+    anywhere in the sdist or wheel build (confirmed on passagemath-combinat, PR #4907).**
+    Most `pkgs/sagemath-*/VERSION.txt` files are a symlink to `../../VERSION.txt` — only
+    a handful of the earliest, most-depended-on splits (confirmed: sagemath-categories,
+    sagemath-objects) carry a real, self-contained copy of the version string instead.
+    `pyproject.toml.m4` declares `dynamic = ["version"]` with
+    `[tool.setuptools.dynamic] version = {file = ["VERSION.txt"]}` for every split alike,
+    symlinked or not. When the sparse-checkout list has no `/VERSION.txt` entry, the
+    top-level target is never materialized, so the per-package `VERSION.txt` is a dangling
+    symlink; `git checkout` does not fail on this (the symlink itself is a valid, checked-
+    out blob — only its *target* is missing). setuptools' own file reader
+    (`setuptools.config.expand._filter_existing_files`) uses `os.path.isfile()`, which is
+    `False` for a dangling symlink, so the dynamic version silently resolves to `''`
+    (a `SetuptoolsWarning: File 'VERSION.txt' cannot be found`, buried in normal build
+    noise, is the only trace) — and `Distribution.get_version()`
+    (`setuptools/_distutils/dist.py`) falls back to `self.version or "0.0.0"`. The sdist
+    and every wheel built from it succeed outright with that literal baked into their
+    METADATA; nothing catches it until a later version-vs-declared-YAML check (this repo's
+    publish job's "Validate complete wheel set" step) fails hours later, after every
+    build leg has already passed.
+    - **The fix is one line, already precedented**: add `/VERSION.txt` to the
+      `sparse-checkout:` list, right after `/pyproject.toml` — see
+      `build-passagemath-cddlib.yml`, whose `pkgs/sagemath-cddlib/VERSION.txt` is the same
+      kind of symlink and which already carries this exact line.
+    - **Check which shape a new split's `VERSION.txt` is before assuming either way** —
+      `ls -la pkgs/sagemath-<dist>/VERSION.txt` in an upstream checkout; a symlink needs
+      `/VERSION.txt`, a real file does not (and adding it anyway is harmless, just an
+      unneeded extra blob in the checkout).
