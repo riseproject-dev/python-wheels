@@ -21,7 +21,16 @@ _ID = r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}"
 _INT = r"[0-9]{1,9}"
 _REASON = r".{1,2000}"
 
-# verb -> {field: regex}; every listed field is required, no others allowed.
+# verb -> {field: regex}; every listed field is required unless it is in
+# OPTIONAL for that verb; no other fields are allowed.
+#
+# ``contribution`` is always optional: a command is posted on the
+# contribution's own tracking issue, and the controller resolves it from that
+# issue. If given, it must match the issue's contribution.
+#
+# ``revision`` is required for commands that change or approve work (so an
+# approval cannot apply to work that moved since you read it) and optional
+# for stop commands (stopping is always safe, a stale stop is honored).
 GRAMMAR: dict[str, dict[str, str]] = {
     "pause": {"contribution": _ID, "revision": _INT, "reason": _REASON},
     "resume": {"contribution": _ID, "revision": _INT, "reason": _REASON},
@@ -47,6 +56,13 @@ GRAMMAR: dict[str, dict[str, str]] = {
 
 # Commands that stop work; processed before everything else in a tick.
 URGENT = frozenset({"pause", "park", "block", "abandon"})
+
+OPTIONAL: dict[str, frozenset[str]] = {
+    verb: frozenset({"contribution"} | ({"revision"} if verb in URGENT else set())
+                    | ({"reason"} if verb == "pause" else set()))
+    for verb in GRAMMAR if verb != "resolve-operation"
+}
+OPTIONAL["resolve-operation"] = frozenset()
 
 _TOKEN_RE = re.compile(r'\s*([a-z][a-z-]*)=("((?:[^"\\]|\\.)*)"|[^\s"]+)')
 
@@ -134,7 +150,7 @@ def parse(body: str) -> Command:
                 raise CommandError(f"invalid value for {key!r}")
             args[key] = value
         pos = m.end()
-    missing = set(spec) - set(args)
+    missing = set(spec) - set(args) - OPTIONAL.get(verb, frozenset())
     if missing:
         raise CommandError(f"missing fields: {', '.join(sorted(missing))}")
     return Command(verb=verb, args=args)

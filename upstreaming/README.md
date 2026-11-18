@@ -11,7 +11,7 @@ Status: **Stage A implementation, not yet run remotely**. The whole write
 path exists and is tested locally: the gh-aw worker (compiled with v1.2.2),
 the dispatcher, the trusted fork publisher, live CI observation and the
 state commit on `main`. Every writer is off while `policy.json` has
-`read_only: true`, and none has run against GitHub. The remaining Stage A
+`read_only: true`. `read_only` is now `false`: the controller persists state on `main` and dispatches tasks. The remaining Stage A
 checks are in [`INTEGRATION.md`](INTEGRATION.md); each needs explicit
 authorization.
 
@@ -56,7 +56,7 @@ The fork push is a separate pipeline operation with its own receipt.
 | Path | Purpose | Plan |
 |---|---|---|
 | `schemas/*.schema.json` | Contribution, project, operation, command, event, evidence, agent proposal and policy schemas (v1) | 6.2 |
-| `policy.json` | Reviewed policy: proposed numeric defaults, command authority (`660779` = `@luhenry`; immutable user IDs, since logins can be renamed), `read_only: true` | 7, 16, 19 |
+| `policy.json` | Reviewed policy: proposed numeric defaults, command authority (`660779` = `@luhenry`; immutable user IDs, since logins can be renamed), `read_only` | 7, 16, 19 |
 | `commands.py` | Strict `/upstreaming` command grammar | 7.3 |
 | `intake.py` | Issue-form parsing, cheap event filter, admission, command acceptance/replay rules | 7.1-7.3 |
 | `lifecycle.py` | Phases, ordinary transitions, command effects, revision rule, publication check, write admission | 8 |
@@ -112,6 +112,29 @@ in this repository: nothing here is imported by, or calls into,
 `ci_scripts/`, `_setup.yml`, `_publish-wheel.yml` or the `build-*.yml`
 workflows, and they do not use it. Upstreaming docs stay out of `docs/`,
 because a push touching `docs/**` deploys the website.
+
+## Commands on a tracking issue
+
+Post a command as its own comment on the request issue. The issue says which
+contribution it applies to, so `contribution=` is optional (if given, it must
+match). Stop commands need no revision:
+
+```text
+/upstreaming pause
+/upstreaming pause reason="waiting for runner quota"
+/upstreaming park reason="needs RVV hardware we do not have"
+/upstreaming block reason="..."
+/upstreaming abandon reason="..."
+```
+
+Commands that change or approve work name the revision you reviewed, shown
+in the issue's status and in the controller report, so they cannot apply to
+work that moved meanwhile:
+
+```text
+/upstreaming resume revision=1 reason="quota back"
+/upstreaming approve-handoff revision=4 head=<clean head sha>
+```
 
 ## Usage
 

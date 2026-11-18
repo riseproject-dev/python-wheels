@@ -81,7 +81,7 @@ class TestForkPublish(_ForkFixture, unittest.TestCase):
         self.assertEqual(out.operation["proposed"]["parents"], [self.base])
 
     def test_read_only_validates_but_does_not_push(self):
-        out = self.run_publish(pol=policy())
+        out = self.run_publish(pol=policy(read_only=True))
         self.assertEqual(out.status, "rejected")
         self.assertIn("read-only", out.reason)
         self.assertEqual(self.fork_head(), self.base)

@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from . import capacity, collect, controller, lifecycle, observe_ci, recovery
+from .common import safe_id
 
 
 @dataclass
@@ -63,6 +64,7 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
     from datetime import datetime as _dt, timedelta
     staged: list[tuple[str, dict]] = []
     new = copy.deepcopy(rec)
+    new["active_work"] = None          # any outcome ends the requested task
     status = outcome.get("status")
     fclass = outcome.get("failure_class")
     pending = new.get("pending_publication")
@@ -90,7 +92,7 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
         return new, staged
     new["pending_publication"] = None
     art = outcome.get("artifact")
-    if art:
+    if art and all(k in art for k in ("work_id", "claim_id", "artifact_id", "name", "digest", "run_id")):
         new["proposal_artifact"] = {k: art[k] for k in ("work_id", "claim_id", "artifact_id", "name",
                                                         "digest", "run_id")} | {
             "result_commit": art.get("result_commit"), "outcome": outcome.get("status")}
@@ -109,6 +111,24 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
         new["activity"] = "idle"
     elif status == "rejected":
         new["activity"] = "idle" if fclass == "stale" else "fix_needed"
+    elif status == "investigation":
+        # The dossier is recorded as evidence; scope approval is a human
+        # decision (/upstreaming approve-scope), so wait for it.
+        dossier = outcome.get("dossier")
+        eid = None
+        if isinstance(dossier, dict):
+            eid = safe_id(f"dossier-{new['contribution_id'].replace('/', '--')}-r{new['revision']}")
+            ev = {"schema_version": 1, "evidence_id": eid, "contribution_id": new["contribution_id"],
+                  "kind": "dossier", "policy_version": (policy or {}).get("policy_version", "unknown"),
+                  "collected_at": now,
+                  "summary": str((outcome.get("proposal") or {}).get("diagnosis") or "investigation dossier")[:8000],
+                  "limitations": [], "data": dossier,
+                  "digests": {"artifact": (outcome.get("artifact") or {}).get("digest") or ""}}
+            staged.append(("evidence", ev))
+        new["activity"] = "waiting_human"
+        new["pending_human_action"] = {"kind": "review_dossier" if eid else "investigation_without_dossier",
+                                       "requested_at": now, "reminded_at": None, "escalated_at": None}
+        new["dossier_evidence_id"] = eid
     new["updated_at"] = now
     staged.append(("contributions", new))
     return new, staged
@@ -151,6 +171,20 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
                 snap.operations[r["operation_id"]] = r
         pubs_report.append({"contribution": cid, "status": pub.get("status"), "reason": pub.get("reason")})
     out.report["publications"] = pubs_report
+
+    # 1b. Requested tasks that never produced an outcome: give up, ask a human.
+    timed_out = []
+    for key, c in list(contributions.items()):
+        aw = c.get("active_work")
+        if aw and datetime.fromisoformat(aw["deadline_at"]) <= now:
+            new = dict(c, active_work=None, activity="waiting_human", updated_at=iso,
+                       pending_human_action={"kind": "task_without_outcome", "requested_at": iso,
+                                             "reminded_at": None, "escalated_at": None})
+            contributions[key] = new
+            out.staged.append(("contributions", new))
+            timed_out.append({"contribution": c["contribution_id"], "task": aw["task"],
+                              "requested_at": aw["requested_at"]})
+    out.report["timed_out_work"] = timed_out
 
     # 2. Live branch and CI observation.
     if observe:

@@ -37,7 +37,7 @@ class TestStateCommit(unittest.TestCase):
         with self.assertRaises(state_commit.PublishError):
             state_commit.publish(self.pub, remote="origin", branch="main",
                                  records_for=lambda tip: {self.path: self.rec},
-                                 message="state", policy=policy())
+                                 message="state", policy=policy(read_only=True))
 
     def test_race_rebuilds_on_new_tip_without_reverting(self):
         # A downstream commit lands between our fetch and push.

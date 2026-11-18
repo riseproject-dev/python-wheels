@@ -169,16 +169,19 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
     """
     if cmd.verb == "resolve-operation":
         raise TransitionError("resolve-operation applies to operations, see recovery.py")
-    if cmd.contribution != record["contribution_id"]:
-        return _reject(record, "command targets another contribution")
+    if cmd.contribution is not None and cmd.contribution != record["contribution_id"]:
+        return _reject(record, "command names another contribution than this issue's")
     rev = cmd.revision
     cur = record["revision"]
     phase = record["phase"]
-    if rev is None or rev > cur:
+    if rev is None:
+        # Only stop commands may omit it (enforced by the grammar).
+        rev = cur
+    if rev > cur:
         return _reject(record, "revision is not a known revision")
-    # Stopping is always safe, so a stale pause/block is still honoured.
+    # Stopping is always safe, so a stale pause/park/block/abandon is honoured.
     # Everything that (re)activates or approves work must name the current revision.
-    if cmd.verb not in ("pause", "block") and rev != cur:
+    if cmd.verb not in ("pause", "block", "park", "abandon") and rev != cur:
         return _reject(record, f"stale revision {rev}, current is {cur}")
     if phase in TERMINAL and cmd.verb != "authorize-followup":
         return _reject(record, f"contribution is terminal ({phase})")
@@ -194,7 +197,7 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
             return _reject(record, "already paused")
         rec["paused"] = True
     elif v == "block":
-        rec["blocked_reason"] = a["reason"]
+        rec["blocked_reason"] = a.get("reason") or "blocked"
         rec["activity"] = "waiting_human"
     elif v == "resume":
         if phase == "parked":
@@ -383,6 +386,8 @@ def new_contribution(*, contribution_id: str, project_id: str, issue: dict, upst
         "publication_operation_id": None,
         "pending_publication": None,
         "processed_publications": [],
+        "active_work": None,
+        "dossier_evidence_id": None,
         "debug_commits": [],
         "clean_head_sha": None,
         "handoff_request": None,

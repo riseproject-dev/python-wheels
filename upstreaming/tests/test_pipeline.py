@@ -223,9 +223,15 @@ class TestPublicationRetry(unittest.TestCase):
     def test_validation_rejection_asks_agent_stale_does_not(self):
         rej = {"status": "rejected", "failure_class": "validation", "reason": "outside scope", "task": self.task,
                "worker_run_id": "1", "publication_artifact_id": 9}
-        self.assertEqual(self.final(self.tick(self.rec, [rej]))["activity"], "fix_needed")
+        t = self.tick(self.rec, [rej])
+        # The rejection makes it fix_needed and the same tick requests one repair.
+        self.assertEqual([e["task"] for e in t.report["requested_effects"]], ["development_repair"])
+        self.assertEqual(self.final(t)["active_work"]["task"], "development_repair")
+        # Stale: no repair is requested (the next tick re-plans from the new head).
         stale = dict(rej, failure_class="stale", publication_artifact_id=10)
-        self.assertEqual(self.final(self.tick(self.rec, [stale]))["activity"], "idle")
+        t = self.tick(dict(self.rec, last_ci_evidence_id="ev-1"), [stale])
+        self.assertEqual(t.report["requested_effects"], [])
+        self.assertEqual(self.final(t)["activity"], "idle")
 
     def test_success_after_retry_clears_pending(self):
         rec = dict(self.rec, pending_publication={"worker_run_id": "4242", "attempts": 1, "last_reason": "x",
