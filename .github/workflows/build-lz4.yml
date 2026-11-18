@@ -55,14 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # Upstream runs the free-threaded suite under pytest-run-parallel, with
-          # one thread on its slower (arm) runners.
-          - python: "cp314t"
-            pytest_addopts: PYTEST_ADDOPTS=--parallel-threads=1
-            tox_free_threading: -x testenv.deps+=pytest-run-parallel
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       LZ4_VERSION: ${{ matrix.version }}
@@ -93,12 +86,13 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # The patch dirties the checkout, so setuptools_scm would derive 4.4.6.dev0
           # from `git describe` instead of the tag.
-          CIBW_ENVIRONMENT: PYLZ4_USE_SYSTEM_LZ4=False SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LZ4=${{ env.LZ4_VERSION }} PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ ${{ matrix.pytest_addopts }}
+          CIBW_ENVIRONMENT: PYLZ4_USE_SYSTEM_LZ4=False SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LZ4=${{ env.LZ4_VERSION }} PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ ${{ matrix.python == 'cp314t' && 'PYTEST_ADDOPTS=--parallel-threads=1' || '' }}
           CIBW_TEST_REQUIRES: tox
           # Upstream's `tox -c {project}` also runs flake8 and the sphinx docs env
           # against an editable install; `-e py --installpkg` runs the same suite
-          # against the wheel that was just built.
-          CIBW_TEST_COMMAND: tox -c {package} -e py --installpkg {wheel} ${{ matrix.tox_free_threading }}
+          # against the wheel that was just built. Upstream runs the free-threaded
+          # suite under pytest-run-parallel, with one thread on its slower (arm) runners.
+          CIBW_TEST_COMMAND: tox -c {package} -e py --installpkg {wheel} ${{ matrix.python == 'cp314t' && '-x testenv.deps+=pytest-run-parallel' || '' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
