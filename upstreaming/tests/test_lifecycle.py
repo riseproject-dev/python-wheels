@@ -209,3 +209,19 @@ class TestStopEndsRequestedWork(unittest.TestCase):
             self.assertTrue(out.accepted, body)
             self.assertIsNone(out.record["active_work"], body)
             self.assertNotEqual(out.record["activity"], "agent_running", body)
+
+
+class TestCapacityOwnBacklog(unittest.TestCase):
+    def test_other_tenants_old_pending_jobs_do_not_block(self):
+        from datetime import datetime, timezone
+        from upstreaming import capacity
+        now = datetime(2026, 11, 18, 22, tzinfo=timezone.utc)
+        job = lambda ent, created: {"job_labels": ["ubuntu-24.04-riscv"], "status": "pending",
+                                     "entity_name": ent, "job_created_at": created}
+        pol = {"capacity": {"max_pending_jobs_rise": 100, "max_pending_age_seconds": 7200}}
+        p = capacity.observe({"jobs": [job("someone-else", "2026-11-17T00:00:00Z")]}, fetched_at=now, now=now,
+                             max_age_seconds=900)
+        self.assertTrue(capacity.admit_expensive(p, reserved=0, estimated_jobs=1, policy=pol)[0])
+        p = capacity.observe({"jobs": [job("riseproject-upstreaming", "2026-11-17T00:00:00Z")]}, fetched_at=now,
+                             now=now, max_age_seconds=900)
+        self.assertFalse(capacity.admit_expensive(p, reserved=0, estimated_jobs=1, policy=pol)[0])

@@ -98,6 +98,8 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
               if c["phase"] not in lifecycle.TERMINAL}
     known = [c["tracking_issue"]["id"] for c in by_id.values()]
     for issue in inputs.issues:
+        if issue.get("id") in known:
+            continue      # already a contribution; the form is not re-read
         try:
             req = intake.parse_request(issue, policy)
         except intake.IntakeError as e:
