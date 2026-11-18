@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# Upstreaming controller, Stage B (read-only observer).
+#
+# Runs one deterministic controller tick: reads committed state under
+# upstreaming-state/, open upstreaming-request issues and runner pressure,
+# and prints the decision report (commands, intake, selected/deferred work,
+# uncertain operations, alerts). It never writes state or any remote
+# resource: the job has read-only permissions and the tick forces
+# read_only. No model is invoked.
+#
+# The schedule and issue triggers are intentionally commented out until the
+# Stage B rollout is approved; run it by hand with workflow_dispatch.
+# Writers (state publisher, fork publisher, gh-aw worker) are added in
+# Stage A/C only after the integration checks in
+# ci_scripts/upstreaming/INTEGRATION.md pass.
+name: Upstreaming controller (read-only)
+
+on:
+  # schedule:
+  #   - cron: '*/15 * * * *'
+  # issues:
+  #   types: [opened, labeled, reopened]
+  # issue_comment:
+  #   types: [created, edited]
+  workflow_dispatch:
+
+concurrency:
+  group: python-wheels-upstreaming-controller
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  # Cheap filter: unsupported events, missing labels and comments that are
+  # not commands never reach the tick.
+  filter:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'upstreaming-request')) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/upstreaming '))
+    steps:
+      - run: echo "event accepted for reconciliation"
+
+  observe:
+    needs: filter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Controller tick (read-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements ci_scripts/upstreaming/requirements.txt \
+            python -m ci_scripts.upstreaming observe > report.json
+          {
+            echo '## Upstreaming controller report (read-only)'
+            echo '```json'
+            cat report.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: upstreaming-controller-report
+          path: report.json
+          retention-days: 30

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# Control validation for the riscv64 upstreaming pipeline: unit/acceptance
+# tests of the trusted controller and publisher code, schema validation of
+# committed state, and the trigger-compatibility audit that a state-only push
+# to main starts no workflow. Read-only; no secrets.
+name: Upstreaming control validation
+
+on:
+  pull_request:
+    paths:
+      - 'ci_scripts/upstreaming/**'
+      - 'upstreaming-state/**'
+      - '.github/workflows/upstreaming-*.yml'
+      - '.github/workflows/*.yml'
+      - '.github/ISSUE_TEMPLATE/upstreaming-request.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ci_scripts/upstreaming/**'
+      - '.github/workflows/upstreaming-*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Unit and acceptance tests
+        run: uv run --no-project --with-requirements ci_scripts/upstreaming/requirements.txt python -m unittest discover -s ci_scripts/upstreaming/tests -t . -v
+
+      - name: Validate committed state
+        run: uv run --no-project --with-requirements ci_scripts/upstreaming/requirements.txt python -m ci_scripts.upstreaming validate-state
+
+      - name: A state-only push to main must trigger no workflow
+        run: uv run --no-project --with-requirements ci_scripts/upstreaming/requirements.txt python -m ci_scripts.upstreaming audit-triggers --expect-none --paths upstreaming-state/contributions/x.json upstreaming-state/events/x/00000000.json
