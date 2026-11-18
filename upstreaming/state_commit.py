@@ -84,3 +84,70 @@ def publish(repo: Path, *, remote: str, branch: str, records_for: Callable[[str]
                 and "fetch first" not in (p.stdout + p.stderr):
             raise PublishError(f"push failed: {p.stderr.strip()[:300]}")
     raise PublishError("main kept moving; giving up after bounded retries")
+
+
+def records_from_checkout(root: Path, base: str, repo: Path | None = None) -> dict[str, dict]:
+    """State files changed in the working tree relative to ``base``
+    (added or modified only), as path -> record. Used by the workflow after
+    ``python -m upstreaming reconcile`` wrote records into the checkout."""
+    import json
+    repo = repo or root
+    out = _git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "upstreaming-state").stdout
+    records: dict[str, dict] = {}
+    for entry in filter(None, out.split("\0")):
+        code, path = entry[:2], entry[3:]
+        if "D" in code or "R" in code:
+            raise PublishError(f"{path}: deletions/renames are not state updates")
+        if path.endswith(".json"):
+            records[path] = json.loads((root / path).read_text(encoding="utf-8"))
+    return records
+
+
+def main(argv=None) -> int:
+    """python -m upstreaming.state_commit [--remote origin] [--branch main] [--message M]
+
+    Publishes the state files changed in this checkout as one validated
+    fast-forward commit on main. On a race, the records are re-applied on
+    the new tip (they are full records keyed by path), revalidated, and only
+    pushed if each record's revision has not moved backwards on the tip.
+    """
+    import argparse
+    import json
+    from .common import load_policy
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--remote", default="origin")
+    ap.add_argument("--branch", default="main")
+    ap.add_argument("--message", default="upstreaming: update state")
+    a = ap.parse_args(argv)
+    root = Path(_git(Path("."), "rev-parse", "--show-toplevel").stdout.strip())
+    policy = load_policy()
+    records = records_from_checkout(root, "HEAD")
+    if not records:
+        print("no state changes")
+        return 0
+
+    def recheck(tip: str) -> bool:
+        # A record on the new tip with a higher revision than ours means
+        # another writer advanced that contribution: defer to the next tick.
+        for path, rec in records.items():
+            p = _git(root, "show", f"{tip}:{path}", check=False)
+            if p.returncode != 0:
+                continue
+            cur = json.loads(p.stdout)
+            if isinstance(cur.get("revision"), int) and isinstance(rec.get("revision"), int) \
+                    and cur["revision"] > rec["revision"]:
+                return False
+        return True
+
+    try:
+        sha = publish(root, remote=a.remote, branch=a.branch, records_for=lambda tip: records,
+                      message=a.message, policy=policy, recheck=recheck)
+    except PublishError as e:
+        print(f"::error::{e}")
+        return 1
+    print(sha)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

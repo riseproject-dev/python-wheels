@@ -55,6 +55,8 @@ def _actionable(c: dict) -> str | None:
     """What a coding agent could usefully do now, or None (no AI on idle)."""
     if c["paused"] or c.get("blocked_reason") or c["phase"] in lifecycle.TERMINAL | {"parked"}:
         return None
+    if c.get("pending_publication"):
+        return None   # a delivered proposal is still being published; never re-run the agent for it
     if c.get("active_operation_id") or c["activity"] in ("agent_running", "waiting_human",
                                                           "waiting_ci", "waiting_capacity"):
         return None

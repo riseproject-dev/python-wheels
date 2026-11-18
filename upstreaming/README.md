@@ -7,12 +7,49 @@ upstream projects publish Linux `riscv64` wheels themselves. The RISE index
 and this repository's recipes are inputs to that work, not where the result
 ends up.
 
-Status: **Stage A/B groundwork**. Schemas, transition rules, command
-handling, recovery, validators and a read-only observer exist and are
-tested locally. No remote writer is enabled. Fork publication, the gh-aw
-worker and state publication on `main` are blocked on the integration
-checks in [`INTEGRATION.md`](INTEGRATION.md), and each one needs explicit
-authorization before it is turned on.
+Status: **Stage A implementation, not yet run remotely**. The whole write
+path exists and is tested locally: the gh-aw worker (compiled with v1.2.2),
+the dispatcher, the trusted fork publisher, live CI observation and the
+state commit on `main`. Every writer is off while `policy.json` has
+`read_only: true`, and none has run against GitHub. The remaining Stage A
+checks are in [`INTEGRATION.md`](INTEGRATION.md); each needs explicit
+authorization.
+
+## How a task flows (plan 5.1, 15.3)
+
+```text
+controller workflow (reconcile job, every tick, no model)
+  fold publication outcomes, observe fork head + CI, apply commands/intake
+  -> commit changed state to main (state_commit, validated, fast-forward)
+  -> if work was selected: launch the dispatcher
+dispatcher (gh-aw, trusted preparation step runs `python -m upstreaming plan`)
+  -> stages one Work + dispatch_next; native scheduler grants a Claim
+worker (gh-aw, assignment-only, no remote-write credential)
+  agent patches ./fork locally, uploads ONE native artifact
+  (upstreaming-out/proposal.json + patches.mbox), finishes its Claim
+  -> gh-aw verifies the artifact and records Result (= proposal delivered)
+worker publish job (ordinary trusted job, gated on work_queue_outcome)
+  install the pinned gh-aw v1.2.2 CLI, `work-queue replay --json`, require
+  this Claim's Result (barrier verified, bound to this run, attempt 1),
+  download exactly that artifact by ID and digest, preflight against state,
+  mint a token for the one task fork, rebuild + validate in a fresh repo,
+  leased push to riscv64, read back the ref, upload the publication outcome
+next controller tick: records the publication receipt and the new head,
+  then watches CI on that exact head
+on an infrastructure failure (network, token, API): the controller schedules
+  upstreaming-publish-retry.yml for the same worker run with backoff
+  (15, 60, 240 minutes; `retries.infrastructure_per_head_failure` attempts),
+  never a new agent task; after that it waits for a human
+```
+
+Outcome classes: `validation` (the proposal is unacceptable; the next tick
+asks the agent for a repair), `stale` (the branch, revision or pause changed;
+re-plan, no retry), `infrastructure` (retry the publish only). A retry
+whose push already landed confirms it from the branch instead of pushing
+again.
+
+A queue Result proves the proposal artifact was delivered, nothing more.
+The fork push is a separate pipeline operation with its own receipt.
 
 ## Layout
 
@@ -33,9 +70,17 @@ authorization before it is turned on.
 | `probe.py` | External wheel probe: RECORD, ELF machine/ABI, `DT_NEEDED`, RVV leakage in baseline objects, binary-only install | 11.4, 12.1 |
 | `triggers.py` | Trigger-compatibility audit of `.github/workflows` | 6.4 |
 | `controller.py` | One deterministic tick. Effects are requested, not executed. | 9 |
-| `collect.py` | Read-only GitHub/PyPI/usage collectors | Stage B |
+| `collect.py` | Read-only GitHub client (GET only, pagination): issues, comments, PRs, branch heads, workflow runs/jobs/check runs/statuses/artifacts, PyPI, usage, sw-ecosystem reports | 9, 14.3 |
+| `observe_ci.py` | Live fork/upstream CI on the exact head into evidence records and activity changes; branch-operation discovery | 9, 14.3 |
+| `work.py` | Immutable gh-aw Work payloads, artifact-only effect contracts, staged plans | 5.1, 15.1 |
+| `queue_result.py` | Publication gate: the exact Claim's verified Result and its artifact identity, from the pinned gh-aw CLI's `work-queue replay --json` | 15.3 |
+| `install_gh_aw.sh` | Installs gh-aw v1.2.2 with a pinned SHA-256 (worker publish job, retry, validation CI) | 15.3, 22 |
+| `SETUP.md` | Exact one-time repository settings: the `upstreaming-publish` and `upstreaming-state` environments, emergency stop | 10.2, 6.3 |
+| `artifact.py` | Safe extraction of the untrusted proposal artifact | 15.3 |
+| `fork_publish.py` | Trusted fork publisher: preflight, fresh rebuild of the patch series, validation, leased push, readback | 10.4, 15.3, 16.3 |
+| `reconcile.py` | One reconciliation tick: publications, live observation, controller | 9 |
+| `check_gh_aw.sh` | Locks match the pinned gh-aw v1.2.2 compiler; rejected-route fixtures still rejected | 22 |
 | `image/` | Runner-free `linux/riscv64` reproduction image definition and guarded launcher | 13 |
-| `gh-aw/upstreaming-worker.md.draft` | Uncompiled design sketch of the bounded worker | 5.1, 15 |
 | `tests/` | Executable acceptance tests mapped to plan section 21 | 21 |
 
 The repository also gets:
@@ -45,9 +90,19 @@ The repository also gets:
   create.
 - `.github/workflows/upstreaming-validate.yml`, which runs the tests, state
   validation and the state-only trigger audit on PRs and pushes.
-- `.github/workflows/upstreaming-controller.yml`, the read-only Stage B
-  observer. It is `workflow_dispatch` only. The schedule and issue triggers
-  are commented out until Stage B is approved.
+- `.github/workflows/upstreaming-controller.yml`: `observe` (read-only
+  report) and `reconcile` (state writer, active only when `read_only` is
+  false). `workflow_dispatch` only; the schedule and issue triggers are
+  commented out until the rollout stage is approved.
+- `.github/workflows/upstreaming-publish-retry.yml`: publish-only retry of
+  one finished worker run (no agent), launched by `reconcile`.
+- `.github/workflows/upstreaming-worker.md` / `.lock.yml` and
+  `upstreaming-dispatcher.md` / `.lock.yml`: the gh-aw workflows, compiled
+  with gh-aw v1.2.2 (`upstreaming/check_gh_aw.sh` verifies the locks).
+  `.github/workflows/aw.json` (queue settings: one `upstreaming` pool,
+  concurrency 1), `.github/workflows/shared/work-queue-staged-plan.md`
+  (gh-aw v1.2.2's shared dispatcher contract, copied verbatim),
+  `.github/aw/actions-lock.json` and `.gitattributes` are compiler outputs.
 - `upstreaming-state/`, the state root (6.1). It is empty for now.
 
 The pipeline is deliberately separate from the downstream build machinery

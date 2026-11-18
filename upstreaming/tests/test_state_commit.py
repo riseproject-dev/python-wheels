@@ -73,3 +73,23 @@ class TestStateCommit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRecordsFromCheckout(unittest.TestCase):
+    def test_changed_state_files_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = init_repo(Path(d) / "r")
+            rec = contribution()
+            path = state.record_path("contributions", rec)
+            commit_files(repo, {"README.md": "x\n"})
+            from upstreaming.common import canonical_json
+            (repo / path).parent.mkdir(parents=True)
+            (repo / path).write_text(canonical_json(rec))
+            (repo / "README.md").write_text("changed\n")    # outside state: ignored
+            got = state_commit.records_from_checkout(repo, "HEAD")
+            self.assertEqual(list(got), [path])
+            git(repo, "add", path)
+            git(repo, "commit", "-q", "-m", "s")
+            (repo / path).unlink()
+            with self.assertRaises(state_commit.PublishError):
+                state_commit.records_from_checkout(repo, "HEAD")

@@ -33,7 +33,45 @@ unverified needs explicit authorization before anyone tests it remotely.
   (linux/riscv64 manifest `sha256:9f35ce18...`). The entrypoint is
   `docker-init -- riscv-runner-entrypoint.sh` and the user is `runner`. The
   repro Dockerfiles pin this index. They have not been built.
-- `actionlint` and `shellcheck` pass on the new workflows and scripts.
+- `actionlint` and `shellcheck` pass on the hand-written workflows and
+  scripts. (actionlint reports a few items in the gh-aw-generated locks,
+  such as `concurrency.queue`, that newer Actions features use; the locks
+  are not edited by hand.)
+- **gh-aw v1.2.2 (plan 22, item 1).** Downloaded release binary
+  `linux-arm64`, SHA-256 matches the release `checksums.txt`
+  (`a1dd217c...d11fe3`), kept in `.git/pw-scratch/upstreaming/gh-aw`.
+  `upstreaming/check_gh_aw.sh <binary>` passes:
+  - `upstreaming-worker.md` and `upstreaming-dispatcher.md` compile under
+    strict mode and the committed locks are byte-identical to the
+    compiler's output.
+  - In the worker lock: the agent job has read-only permissions; the only
+    agent resource output is `upload_artifact` (max one, `allowed-paths:
+    upstreaming-out/*`, 4 MiB); the App private key appears only in the
+    `publish` job; `publish` needs `safe_outputs` and `detection` and runs
+    only when `needs.safe_outputs.outputs.work_queue_outcome == 'completed'`
+    (the v1.2.2 handler emits `completed` only when every Claim settled with
+    a `result`, see `safe_output_handler_manager.cjs`).
+  - Rejected-route fixtures (`upstreaming/tests/gh-aw-fixtures/`): a
+    credentialed custom safe-output job is still refused ("requires a
+    trusted per-Claim delivery adapter"); the cross-repository
+    `push-to-pull-request-branch` worker still compiles, but has no Claim
+    delivery verifier in v1.2.2 source.
+- **Result gate.** The publish job runs the pinned gh-aw v1.2.2 CLI
+  (`upstreaming/install_gh_aw.sh`, SHA-256 pinned for linux-amd64 and
+  linux-arm64) and reads `work-queue replay --json`. The fields used
+  (`works[id].claim_id/barrier/result/result_commit_id`,
+  `claims[id].state/work_id/dispatch_id`, `dispatches[id].run`) are the JSON
+  tags of `Projection` in v1.2.2 `pkg/workqueue/types.go`; gh-aw sets
+  `barrier: "verified"` and `result` only in `settleVerifiedDelivery`, which
+  requires delivery evidence from `verified_receipts` for the dispatch's
+  bound run, attempt 1.
+- **Engine.** Worker and dispatcher use `engine: pi` with
+  `model: anthropic/opus-5.5`; both compile, the lock validates
+  `ANTHROPIC_API_KEY`, and threat detection also runs on Anthropic.
+- **Local end to end.** `tests/test_pipeline.py` runs controller selection,
+  Work construction, a simulated agent series, Result resolution, artifact
+  extraction, preflight, rebuild, leased push to a local bare fork, and the
+  next reconciliation tick (publication receipt, head change, CI evidence).
 
 ## Reported by the user, not independently inspected
 
@@ -45,21 +83,32 @@ unverified needs explicit authorization before anyone tests it remotely.
 
 Each item needs explicit authorization before it is tested remotely.
 
-1. **gh-aw pin.** `gh aw` is not installed here. Pin a release, compile
-   `gh-aw/upstreaming-worker.md.draft`, and check that the compiled
-   safe-outputs keep exactly `riscv64`, with no salt, no fallback PR/issue,
-   no `recreate-ref` and no automatic merge. Also check that the native
-   queue can carry the Work payload/effect contract used by
-   `controller.tick`, and that leased rewrites have a supported route. If one
-   of these is missing, report it as a blocker. Do not switch routes.
+1. **gh-aw remote run.** Compilation is verified (above). Still to run on
+   GitHub: one dispatcher -> worker -> verified `upload_artifact` Result ->
+   publish job, and confirm (a) `gh aw work-queue replay --json` reports the
+   Claim with `barrier: "verified"` and a `result` descriptor whose
+   `upload_artifact` resource has the fields `queue_result.py` reads (taken
+   from v1.2.2 source, `pkg/workqueue/types.go` and `upload_artifact.cjs`,
+   not yet observed), (b) the `publish` job gate fires only on that Result,
+   (c) the replay in `publish` already sees the Result written by the same
+   run's `safe_outputs` job, (d) the `pre-agent-steps` checkout of `./fork`
+   works inside the gh-aw sandbox, (e) Pi with `anthropic/opus-5.5` resolves
+   (the compiler cannot check model availability offline). Needs: the
+   `work-queue` branch bootstrapped by the first trusted submission, and the
+   environments in [`SETUP.md`](SETUP.md). If any of (a)-(d) fails, report it as a
+   blocker; do not switch routes.
 2. **Destination token.** Discover the installation with
    `GET /orgs/riseproject-upstreaming/installation`. Mint a token with
    `repositories: <one fork>` and `contents`, `pull_requests` and
    `workflows` write. Confirm that it cannot write
    `riseproject-dev/python-wheels`, and that build jobs can obtain neither
    token nor the App key.
-3. **Control token and `main` write route.** Choose the ruleset/bypass,
-   identity and signing route for `state_commit.publish`. Document its real
+3. **Control token and `main` write route.** `main` currently has no
+   branch protection or ruleset (read-only check, 2026-11-18), so an App
+   token with `contents: write` can push. The `reconcile` job mints one
+   with `owner: riseproject-dev`, `repositories: python-wheels`,
+   `contents`/`actions` write. Choose the identity and signing route for
+   `state_commit.publish`. Document its real
    blast radius: the token is repository-wide. Confirm that an App-token
    state-only push triggers nothing, and that a mixed commit is rejected by
    `check-state-diff`.
