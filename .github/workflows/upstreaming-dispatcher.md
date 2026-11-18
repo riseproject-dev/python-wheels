@@ -5,7 +5,6 @@ name: Upstreaming dispatcher
 description: Admit at most one controller-selected upstreaming task and request one worker
 on:
   workflow_dispatch:
-if: github.run_attempt == 1
 imports:
   - shared/work-queue-staged-plan.md
 permissions:
@@ -14,7 +13,7 @@ permissions:
   issues: read
 engine:
   id: pi
-model: anthropic/opus-5.5
+model: anthropic/claude-haiku-5-5
 network:
   allowed: []
 tools:
@@ -24,14 +23,14 @@ tools:
 safe-outputs:
   threat-detection: false
   dispatch-workflow:
-    workflows: [upstreaming-worker]
+    workflows: [upstreaming-worker, upstreaming-investigator]
     target-ref: ${{ github.event.repository.default_branch }}
     max: 1
 steps:
   - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
     with:
       enable-cache: false
-  - name: Select work from committed state (deterministic, no model)
+  - name: Replay the controller-requested task from committed state (deterministic, no model)
     id: select
     env:
       GH_TOKEN: ${{ github.token }}
@@ -65,8 +64,9 @@ with `{"pool":"upstreaming","limit":8}`. An absent queue is empty; the
 trusted submission installs Policy and Work together. An existing
 policyless ledger or a tool error is a failure, not an empty backlog.
 
-The trusted preparation step ran the upstreaming controller against the
-committed `upstreaming-state/` and staged at most one task followed by
+The trusted preparation step read the task the upstreaming controller
+requested in the committed `upstreaming-state/` and staged at most one task
+(for the `upstreaming-investigator` or `upstreaming-worker` profile) followed by
 `{"pool":"upstreaming","max_claims":1,"max_dispatches":1}`. Explain the
 staged plan in one short paragraph: the contribution, the task kind and the
 reason it was selected. Do not submit again, choose a winner, dispatch

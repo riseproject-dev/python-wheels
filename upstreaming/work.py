@@ -25,7 +25,12 @@ import json
 from .common import CONTROL_REPO, DEV_REF, canonical_json
 
 POOL = "upstreaming"
+# Two worker profiles in one pool: investigations (read and report, cheaper
+# model, no publish job) and patch work (stronger model, trusted publish job).
 WORKER_PROFILE = "upstreaming-worker"
+INVESTIGATOR_PROFILE = "upstreaming-investigator"
+PROFILE_WORKFLOWS = {WORKER_PROFILE: ".github/workflows/upstreaming-worker.lock.yml",
+                     INVESTIGATOR_PROFILE: ".github/workflows/upstreaming-investigator.lock.yml"}
 PROPOSAL_ARTIFACT = "upstreaming-proposal"
 
 WRITE_TASKS = {"development_patch", "development_repair", "upstream_revision"}
@@ -88,16 +93,39 @@ def payload(request: dict, record: dict, *, control_repo_id: str, allowed_paths:
     return p
 
 
+def profile_for(task: str) -> str:
+    if task == "investigation":
+        return INVESTIGATOR_PROFILE
+    if task in WRITE_TASKS:
+        return WORKER_PROFILE
+    raise ValueError(f"unknown task {task}")
+
+
+def graph_id(dedupe_key: str) -> str:
+    return "upstreaming:" + hashlib.sha256(dedupe_key.encode()).hexdigest()[:32]
+
+
+def request_from_active(rec: dict) -> dict | None:
+    """The controller's committed request (``active_work``) as a work request,
+    or None if there is nothing to dispatch for this record."""
+    aw = rec.get("active_work")
+    if not aw or rec.get("paused") or aw.get("revision") != rec["revision"]:
+        return None
+    fork = rec.get("fork") or {}
+    return {"type": "submit_work", "dedupe_key": aw["dedupe_key"], "contribution_id": rec["contribution_id"],
+            "revision": rec["revision"], "expected_head": fork.get("head_sha"), "task": aw["task"]}
+
+
 def node(request: dict, record: dict, **kw) -> dict:
     pl = payload(request, record, **kw)
     key = request["dedupe_key"]
     return {
-        "graph_id": "upstreaming:" + hashlib.sha256(key.encode()).hexdigest()[:32],
+        "graph_id": graph_id(key),
         "node_key": "task",
         "pool": POOL,
         "priority": 2 if request["task"] in ("upstream_revision", "development_repair") else 3,
         "fairness_key": "",
-        "worker_profile": WORKER_PROFILE,
+        "worker_profile": profile_for(request["task"]),
         "payload": pl,
         "depends_on": [],
     }
@@ -121,7 +149,11 @@ _PLANS = {
     "development_patch": (
         "Write the smallest patch to the fork's riscv64 branch that makes the upstream project build, "
         "test and publish Linux riscv64 wheels through its normal release process, following the "
-        "nearest existing architecture pattern. Return the proposal and patch series as the artifact."),
+        "nearest existing architecture pattern. The project's own CI must run on the fork: if a job is "
+        "guarded to the upstream repository (for example `if: github.repository == 'owner/repo'`), "
+        "lift the guard in a separate {debug} commit. CI must execute natively on `ubuntu-24.04-riscv` "
+        "and upload the built riscv64 wheel as an artifact. If the project already has such a job, "
+        "the fix may be only the {debug} commit. Return the proposal and patch series as the artifact."),
     "development_repair": (
         "Diagnose the failing fork CI identified by reason_ids on the expected head and propose a "
         "focused fix within scope. Return the proposal and patch series as the artifact."),

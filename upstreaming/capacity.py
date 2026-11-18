@@ -26,7 +26,8 @@ class Pressure:
     reason: str | None = None
     running: int = 0
     pending: int = 0
-    oldest_pending_seconds: int = 0
+    oldest_pending_seconds: int = 0          # over every entity (pressure on the shared pool)
+    oldest_pending_rise_seconds: int = 0     # RISE entities only (our own backlog)
     per_entity: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
@@ -55,6 +56,8 @@ def observe(snapshot: Any, *, fetched_at: datetime, now: datetime, label: str = 
             try:
                 age = (now - _parse_ts(j["job_created_at"])).total_seconds()
                 p.oldest_pending_seconds = max(p.oldest_pending_seconds, int(age))
+                if str(j.get("entity_name")) in (RISE_ENTITY, FORK_ENTITY):
+                    p.oldest_pending_rise_seconds = max(p.oldest_pending_rise_seconds, int(age))
             except (KeyError, ValueError, TypeError):
                 pass
     return p
@@ -83,8 +86,10 @@ def admit_expensive(p: Pressure, *, reserved: int, estimated_jobs: int, policy: 
         p.per_entity.get(FORK_ENTITY, {}).get("pending", 0)
     if pending + reserved + estimated_jobs > cap["max_pending_jobs_rise"]:
         return False, f"pending {pending} + reserved {reserved} + new {estimated_jobs} over threshold"
-    if p.oldest_pending_seconds > cap["max_pending_age_seconds"]:
-        return False, f"oldest pending job waited {p.oldest_pending_seconds}s"
+    # Another tenant's long queue does not mean our jobs wait: the backlog age
+    # that gates admission is RISE's own (control repo and contribution forks).
+    if p.oldest_pending_rise_seconds > cap["max_pending_age_seconds"]:
+        return False, f"oldest pending RISE job waited {p.oldest_pending_rise_seconds}s"
     return True, "within thresholds"
 
 

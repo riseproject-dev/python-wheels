@@ -7,27 +7,30 @@ import unittest
 from upstreaming import commands, intake
 from upstreaming.tests.helpers import NOW, OWNER, STRANGER, comment, policy
 
-FORM = """### Upstream repository
+# A "Package build request" body (.github/ISSUE_TEMPLATE/package-request.yml).
+FORM = """### Package name (on PyPI)
+
+Proj_Core
+
+### Source repository
 
 https://github.com/example/proj
 
-### PyPI distributions
+### Version(s) requested
 
-Proj_Core
-proj-core
-proj.extra
+1.2.3
 
-### Upstream target branch
+### Why is this needed?
 
-_No response_
+riscv64 wheel build added in #123
 
-### Additional notes
+### Additional context
 
 _No response_
 """
 
 
-def issue(body=FORM, actor=STRANGER, iid=77, number=12, labels=("upstreaming-request",)):
+def issue(body=FORM, actor=STRANGER, iid=77, number=12, labels=("wheel", "upstreaming-request")):
     return {"id": iid, "number": number, "body": body, "user": dict(actor),
             "labels": [{"name": n} for n in labels]}
 
@@ -125,8 +128,22 @@ class TestIntake(unittest.TestCase):
     def test_parse_and_normalize(self):
         r = intake.parse_request(issue(), self.p)
         self.assertEqual(r.upstream, "example/proj")
-        self.assertEqual(r.distributions, ("proj-core", "proj-extra"))
+        self.assertEqual(r.distributions, ("proj-core",))
         self.assertIsNone(r.target_branch)
+        self.assertIn("riscv64 wheel build added in #123", r.notes)
+
+    def test_real_package_request_body(self):
+        # Issue #2136 as GitHub renders it.
+        body = ("### Package name (on PyPI)\n\nav\n\n### Source repository\n\nhttps://github.com/PyAV-Org/PyAV\n\n"
+                "### Version(s) requested\n\n18.1.0\n\n### Why is this needed?\n\nriscv64 wheel build added in #461\n\n"
+                "### Additional context\n\n_No response_")
+        r = intake.parse_request(issue(body=body), self.p)
+        self.assertEqual((r.upstream, r.distributions), ("PyAV-Org/PyAV", ("av",)))
+
+    def test_wheel_issue_without_upstreaming_label_is_not_intake(self):
+        repo = {"full_name": "riseproject-dev/python-wheels"}
+        ev = {"repository": repo, "action": "labeled", "issue": issue(labels=("wheel",))}
+        self.assertEqual(intake.filter_event("issues", ev, self.p), "missing intake label")
 
     def test_bad_urls(self):
         for url in ["https://user:pw@github.com/a/b", "http://github.com/a/b",

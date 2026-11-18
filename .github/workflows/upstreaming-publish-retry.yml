@@ -64,13 +64,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ inputs.worker-run-id }}
-          WORKFLOW_PATH: .github/workflows/upstreaming-worker.lock.yml
         run: |
           set -euo pipefail
           mkdir -p ../in ../prev
-          # The worker run must be a run of the worker workflow in this repository.
+          # The run must be a worker or investigator run in this repository.
           path=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN" --jq .path)
-          [ "${path%@*}" = "$WORKFLOW_PATH" ] || { echo "run $RUN is not an upstreaming worker run"; exit 1; }
+          WORKFLOW_PATH=${path%@*}
+          case "$WORKFLOW_PATH" in
+            .github/workflows/upstreaming-worker.lock.yml|.github/workflows/upstreaming-investigator.lock.yml) ;;
+            *) echo "run $RUN is not an upstreaming worker or investigator run"; exit 1 ;;
+          esac
           # Its own publication record carries the original assignment.
           id=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN/artifacts" \
             --jq '[.artifacts[] | select(.name == "upstreaming-publication" and (.expired | not))] | if length == 1 then .[0].id else error("expected one publication artifact") end')
@@ -93,6 +96,12 @@ jobs:
           fi
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.artifact extract ../in/proposal.zip ../in
+          if [ "$(jq -r .task ../in/task.json)" = investigation ]; then
+            # Nothing to push: hand the dossier to the controller.
+            jq -n '{status:"investigation", failure_class:null, reason:null, stage:"result"}' > ../in/outcome.json
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.fork_publish preflight --record ../in/record.json --task ../in/task.json \
               --proposal ../in/proposal.json --out ../in/preflight.json
@@ -148,6 +157,8 @@ jobs:
             in/result.json
             in/preflight.json
             in/outcome.json
+            in/proposal.json
+            in/dossier.json
             in/worker-run-id
           if-no-files-found: ignore
           retention-days: 30

@@ -59,6 +59,8 @@ def evaluate(*, runs: list[dict], jobs_by_run: dict[int, list[dict]], head_sha: 
         return v
     all_jobs = [j for r in relevant for j in jobs_by_run.get(r["id"], [])]
     pending = [j for j in all_jobs if j.get("status") != "completed"]
+    # Wheel success means the wheel was built on the native runner label: a
+    # job only matches when its name matches and it ran on that label.
     for pat in required_job_patterns:
         matching = [j for j in all_jobs if pat in j["name"]]
         if not matching:
@@ -74,8 +76,10 @@ def evaluate(*, runs: list[dict], jobs_by_run: dict[int, list[dict]], head_sha: 
             else:
                 v.executed_jobs.append(j)
             labels = j.get("labels") or []
-            if "riscv" in " ".join(labels) and native_label not in labels:
-                v.problems.append(f"job {j['name']!r} uses a non-standard native label {labels}")
+            if native_label not in labels:
+                # Wheel success means built natively on the standard label
+                # (QEMU or cross jobs on other runners do not count).
+                v.problems.append(f"job {j['name']!r} failed the native-runner check: labels {labels}")
     missing_wheels = sorted(set(expected_wheels) - set(produced_wheels))
     if missing_wheels:
         v.problems.append(f"expected wheels not produced: {', '.join(missing_wheels)}")

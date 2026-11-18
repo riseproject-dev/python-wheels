@@ -132,12 +132,19 @@ def cmd_observe(args) -> int:
     comments = collect.command_comments(api, numbers, None) if not args.offline else []
     res = controller.tick(contributions=contributions, operations=operations, consumed=consumed,
                           projects=projects, policy=dict(policy, read_only=True),
-                          inputs=controller.Inputs(now=now, issues=issues, comments=comments, pressure=pressure))
+                          inputs=controller.Inputs(now=now, issues=issues, comments=comments, pressure=pressure,
+                                                   **dict(zip(("users", "provisioning"),
+                                                              _command_lookups(api, reconcile_snapshot(root, policy), comments)
+                                                              if not args.offline else ({}, {})))))
     res.report["would_stage"] = [state.record_path(k, r) if k != "events" else f"events/{r['contribution_id']}"
                                  for k, r in res.staged]
     res.report["requested_effects"] = res.requested_effects
     print(json.dumps(res.report, indent=2, default=str))
     return 0
+
+
+def reconcile_snapshot(root: Path, policy: dict):
+    return _load(root, policy)[1]
 
 
 def _load(root: Path, policy: dict):
@@ -162,29 +169,57 @@ def _pressure(policy: dict) -> capacity.Pressure:
 
 
 def cmd_plan(args) -> int:
-    """Dispatcher preparation: select at most one task from committed state and
-    write a gh-aw staged plan. No plan file means nothing to dispatch."""
+    """Dispatcher preparation: turn the tasks the controller already requested
+    (``active_work`` in committed state) into a gh-aw staged plan. Selection
+    happened in the controller tick that committed ``active_work``; the plan
+    only replays that decision, so a rerun or a second dispatcher run stages
+    the identical Work (the queue admits an identical node once). No plan file
+    means nothing to dispatch."""
     from . import work
     policy = load_policy()
     _store, snap = _load(Path(args.root or _root()), policy)
-    res = controller.tick(contributions=snap.contributions, operations=snap.operations, consumed={},
-                          projects=snap.projects, policy=policy,
-                          inputs=controller.Inputs(now=datetime.now(timezone.utc), pressure=_pressure(policy)))
-    by_cid = {c["contribution_id"]: c for c in snap.contributions.values()}
     contracts = {e["evidence_id"]: e for e in snap.evidence.values() if e.get("kind") == "target_contract"}
-    nodes = []
-    for req in res.requested_effects[: policy["concurrency"]["coding_workers"]]:
-        rec = by_cid[req["contribution_id"]]
+    nodes, selected = [], []
+    for rec in sorted(snap.contributions.values(), key=lambda c: (c["active_work"] or {}).get("requested_at", "")
+                      if c.get("active_work") else ""):
+        req = work.request_from_active(rec)
+        if req is None:
+            continue
+        if len(nodes) >= policy["concurrency"]["coding_workers"]:
+            break
         ctr = (contracts.get(rec.get("target_contract_id") or "") or {}).get("data") or {}
         nodes.append(work.node(req, rec, control_repo_id=args.control_repo_id,
-                               allowed_paths=ctr.get("allowed_paths") or [".github/workflows/*"],
-                               context={"report": res.report.get("selected")}))
-    print(json.dumps({"selected": res.report["selected"], "deferred": res.report["deferred"]}, indent=2))
+                               allowed_paths=rec.get("scope_paths") or ctr.get("allowed_paths")
+                               or [".github/workflows/*"],
+                               context={"requested_at": rec["active_work"]["requested_at"]}))
+        selected.append({"contribution": rec["contribution_id"], "task": req["task"],
+                         "worker_profile": nodes[-1]["worker_profile"]})
+    print(json.dumps({"selected": selected}, indent=2))
     if not nodes:
         return 0
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(work.plan(nodes), indent=2))
     return 0
+
+
+def _command_lookups(api, snap, comments) -> tuple[dict, dict]:
+    """Read-only facts some commands need, fetched before the tick: the
+    backup owner named by approve-scope, and the fork checks for provision."""
+    users: dict = {}
+    provisioning: dict = {}
+    for item in comments:
+        try:
+            cmd = commands.parse(item["comment"]["body"])
+        except commands.CommandError:
+            continue
+        if cmd.verb == "approve-scope" and cmd.args["backup"] not in users:
+            users[cmd.args["backup"]] = collect.user(api, cmd.args["backup"])
+        if cmd.verb == "provision":
+            from . import intake
+            rec = intake.contribution_for_issue(snap.contributions.values(), item["issue_number"])
+            if rec is not None and rec["contribution_id"] not in provisioning:
+                provisioning[rec["contribution_id"]] = collect.verify_provisioning(api, rec)
+    return users, provisioning
 
 
 def cmd_reconcile(args) -> int:
@@ -219,8 +254,19 @@ def cmd_reconcile(args) -> int:
     tracking = sorted({c["tracking_issue"]["number"] for c in snap.contributions.values()}
                       | {i["number"] for i in issues})
     comments = [] if args.offline else collect.command_comments(api, tracking, args.since)
+    users, provisioning = _command_lookups(api, snap, comments) if not args.offline else ({}, {})
+    runs = queue = None
+    if not args.offline and args.gh_aw:
+        from . import queue_result
+        try:
+            runs = collect.dispatcher_runs(api)
+            queue = queue_result.queue_work_states(args.gh_aw, collect.CONTROL_REPO)
+        except (collect.CollectError, OSError, ValueError) as e:
+            print(f"dispatch recovery skipped this tick: {e}", file=sys.stderr)
+            runs = queue = None
     out = reconcile.tick(api, snap, policy=policy, now=datetime.now(timezone.utc), publications=pubs,
-                         pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline)
+                         pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline,
+                         dispatcher_runs=runs, queue_works=queue, users=users, provisioning=provisioning)
     for kind, rec in out.staged:
         store.stage(kind, rec)
     written = store.write_staged()
@@ -247,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--control-repo-id", required=True); p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("reconcile"); p.add_argument("--root"); p.add_argument("--publications")
     p.add_argument("--report"); p.add_argument("--since"); p.add_argument("--offline", action="store_true")
+    p.add_argument("--gh-aw", help="pinned gh-aw v1.2.2 binary, to read the queue for dispatch recovery")
     p.set_defaults(fn=cmd_reconcile)
     args = ap.parse_args(argv)
     return args.fn(args)

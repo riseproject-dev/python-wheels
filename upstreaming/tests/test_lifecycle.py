@@ -194,3 +194,86 @@ class TestMergeAndRelease(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStopEndsRequestedWork(unittest.TestCase):
+    def test_stop_commands_clear_active_work(self):
+        from upstreaming import commands as C
+        from upstreaming.tests.helpers import NOW, OWNER, contribution
+        rec = contribution(phase="investigation", activity="agent_running", revision=1)
+        rec["active_work"] = {"dedupe_key": "k", "task": "investigation", "revision": 1,
+                              "requested_at": NOW, "deadline_at": NOW, "dispatched_run_id": None}
+        for body in ("/upstreaming pause", "/upstreaming abandon reason=x", "/upstreaming park reason=x",
+                     "/upstreaming block reason=x"):
+            out = lifecycle.apply_command(rec, C.parse(body), command_id="c", actor=dict(OWNER), now=NOW)
+            self.assertTrue(out.accepted, body)
+            self.assertIsNone(out.record["active_work"], body)
+            self.assertNotEqual(out.record["activity"], "agent_running", body)
+
+
+class TestCapacityOwnBacklog(unittest.TestCase):
+    def test_other_tenants_old_pending_jobs_do_not_block(self):
+        from datetime import datetime, timezone
+        from upstreaming import capacity
+        now = datetime(2026, 11, 18, 22, tzinfo=timezone.utc)
+        job = lambda ent, created: {"job_labels": ["ubuntu-24.04-riscv"], "status": "pending",
+                                     "entity_name": ent, "job_created_at": created}
+        pol = {"capacity": {"max_pending_jobs_rise": 100, "max_pending_age_seconds": 7200}}
+        p = capacity.observe({"jobs": [job("someone-else", "2026-11-17T00:00:00Z")]}, fetched_at=now, now=now,
+                             max_age_seconds=900)
+        self.assertTrue(capacity.admit_expensive(p, reserved=0, estimated_jobs=1, policy=pol)[0])
+        p = capacity.observe({"jobs": [job("riseproject-upstreaming", "2026-11-17T00:00:00Z")]}, fetched_at=now,
+                             now=now, max_age_seconds=900)
+        self.assertFalse(capacity.admit_expensive(p, reserved=0, estimated_jobs=1, policy=pol)[0])
+
+
+class TestScopeAndProvision(unittest.TestCase):
+    def setUp(self):
+        from upstreaming.tests.helpers import contribution
+        self.rec = contribution(phase="investigation", activity="waiting_human", revision=1,
+                                dossier_evidence_id="dossier-x", fork=None,
+                                owners={"primary": None, "backup": None, "submitter": None,
+                                        "handoff_reviewer": None}, admission_class=None)
+        self.rec["upstream"]["base_sha"] = None
+
+    def apply(self, rec, body, **kw):
+        return lifecycle.apply_command(rec, commands.parse(body), command_id="c", actor=dict(OWNER), now=NOW, **kw)
+
+    def test_approve_scope_then_provision(self):
+        bk = dict(BACKUP)
+        out = self.apply(self.rec, f"/upstreaming approve-scope revision=1 class=configuration_integration "
+                                   f"backup={bk['login']}", backup_user=bk)
+        self.assertTrue(out.accepted, out.reason)
+        r = out.record
+        self.assertEqual((r["phase"], r["revision"], r["owners"]["primary"]["id"], r["owners"]["backup"]["id"]),
+                         ("provisioning", 2, OWNER["id"], bk["id"]))
+        self.assertEqual(r["pending_human_action"]["kind"], "provision_fork")
+        self.assertIsNotNone(lifecycle.write_admission(r))          # no fork yet
+        bad = self.apply(r, "/upstreaming provision revision=2", provisioning={"error": "no riscv64 branch"})
+        self.assertFalse(bad.accepted)
+        self.assertIn("riscv64", bad.reason)
+        prov = {"fork": "riseproject-upstreaming/proj", "fork_id": 9, "head_sha": SHA_A, "upstream_id": 1,
+                "base_ref": "main", "base_sha": SHA_A}
+        out = self.apply(r, "/upstreaming provision revision=2", provisioning=prov)
+        self.assertTrue(out.accepted, out.reason)
+        d = out.record
+        self.assertEqual((d["phase"], d["activity"], d["fork"]["repository_id"], d["upstream"]["base_sha"]),
+                         ("development", "idle", 9, SHA_A))
+        self.assertIsNone(lifecycle.write_admission(d))
+        from upstreaming import controller
+        self.assertEqual(controller._actionable(d), "development_patch")
+
+    def test_approve_scope_needs_dossier_and_other_backup(self):
+        bk = dict(BACKUP)
+        no_dossier = dict(self.rec, dossier_evidence_id=None)
+        self.assertFalse(self.apply(no_dossier, "/upstreaming approve-scope revision=1 class=configuration_integration "
+                                                f"backup={bk['login']}", backup_user=bk).accepted)
+        self.assertFalse(self.apply(self.rec, "/upstreaming approve-scope revision=1 class=configuration_integration "
+                                              f"backup={OWNER['login']}", backup_user=dict(OWNER)).accepted)
+        self.assertFalse(self.apply(self.rec, "/upstreaming approve-scope revision=1 class=configuration_integration "
+                                              "backup=nobody", backup_user=None).accepted)
+        with self.assertRaises(commands.CommandError):
+            commands.parse("/upstreaming approve-scope revision=1 class=whatever backup=x")
+        c = commands.parse('/upstreaming approve-scope revision=1 class=configuration_integration backup=x '
+                           'paths=".github/workflows/*,pyproject.toml"')
+        self.assertEqual(c.args["paths"], ".github/workflows/*,pyproject.toml")

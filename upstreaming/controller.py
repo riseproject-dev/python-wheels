@@ -32,6 +32,8 @@ class Inputs:
     comments: list[dict] = field(default_factory=list)        # {"issue_number", "comment", "event_body"}
     pressure: capacity.Pressure | None = None
     verified_prs: dict[str, dict] = field(default_factory=dict)  # url -> verified PR resource
+    users: dict[str, dict | None] = field(default_factory=dict)  # login -> {"id","login"} or None
+    provisioning: dict[str, dict] = field(default_factory=dict)  # contribution -> verify_provisioning()
     resolution_evidence: dict[str, dict] = field(default_factory=dict)
     acceptances: dict[int, int] = field(default_factory=dict)     # issue id -> accepting actor id
     requests_today: dict[int, int] = field(default_factory=dict)  # actor id -> count
@@ -98,6 +100,8 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
               if c["phase"] not in lifecycle.TERMINAL}
     known = [c["tracking_issue"]["id"] for c in by_id.values()]
     for issue in inputs.issues:
+        if issue.get("id") in known:
+            continue      # already a contribution; the form is not re-read
         try:
             req = intake.parse_request(issue, policy)
         except intake.IntakeError as e:
@@ -256,7 +260,9 @@ def _apply(cmd: Command, receipt: dict, by_id: dict, operations: dict, inputs: I
     verified = inputs.verified_prs.get(cmd.args.get("url", "")) if cmd.verb == "register-upstream-pr" else None
     try:
         out = lifecycle.apply_command(rec, cmd, command_id=receipt["command_id"], actor=actor,
-                                      now=now, verified_pr=verified)
+                                      now=now, verified_pr=verified,
+                                      provisioning=inputs.provisioning.get(rec["contribution_id"]),
+                                      backup_user=inputs.users.get(cmd.args.get("backup", "")))
     except lifecycle.TransitionError as e:
         return dict(receipt, result="rejected", reason=str(e))
     if not out.accepted:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 name: Upstreaming worker
-description: Bounded riscv64 upstreaming task (investigate, patch or repair one contribution)
+description: Bounded riscv64 upstreaming task (patch, repair or revise one contribution)
 on:
   workflow_dispatch:
 permissions:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 engine:
   id: pi
-model: anthropic/opus-5.5
+model: anthropic/claude-opus-5-5
 concurrency:
   job-discriminator: ${{ github.run_id }}
 network:
@@ -69,9 +69,9 @@ pre-agent-steps:
         [[ "$fork" =~ ^riseproject-upstreaming/[A-Za-z0-9_.-]+$ ]] || { echo "bad fork"; exit 1; }
         git remote add origin "https://github.com/$fork.git"
       fi
-      if [ -n "$base" ]; then git fetch -q --no-tags upstream "$base"; fi
+      if [ -n "$base" ]; then git fetch -q --no-tags --depth=200 upstream "$base"; fi
       if [ -n "$head" ]; then
-        git fetch -q --no-tags origin "$head"
+        git fetch -q --no-tags --depth=200 origin "$head"
         git checkout -q -B riscv64 "$head"
       elif [ -n "$base" ]; then
         git checkout -q -B riscv64 "$base"
@@ -121,6 +121,7 @@ jobs:
           mkdir -p ../in
           printf '%s' "$ASSIGNMENT" > ../in/assignment.json
           printf '%s' "$ASSIGNMENT" | jq '.claims[0].work' > ../in/task.json
+          [ "$(jq -r .task ../in/task.json)" != investigation ] || { echo "investigations run in upstreaming-investigator"; exit 1; }
           rc=0
           gh_aw=$(upstreaming/install_gh_aw.sh "$RUNNER_TEMP/gh-aw-cli") || rc=3
           if [ "$rc" = 0 ]; then
@@ -137,12 +138,6 @@ jobs:
           fi
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.artifact extract ../in/proposal.zip ../in
-          if [ "$(jq -r .task ../in/task.json)" = investigation ]; then
-            # Nothing to push: hand the dossier to the controller.
-            jq -n '{status:"investigation", failure_class:null, reason:null, stage:"result"}' > ../in/outcome.json
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.fork_publish preflight --record ../in/record.json --task ../in/task.json \
               --proposal ../in/proposal.json --out ../in/preflight.json
@@ -208,7 +203,7 @@ strict: true
 You handle exactly one task for the RISE riscv64 Python-wheels upstreaming
 pipeline. The trusted pre-agent step wrote the immutable task to
 `/tmp/gh-aw/agent/task.json` and checked out the contribution's `riscv64`
-branch (or the upstream base for an investigation) in `./fork`. The task's
+branch in `./fork`. The task's
 `plan` field says what to do; `reason_ids` and `context` say why.
 
 Only process the compiler-supplied `work_queue_assignment`. It has exactly
@@ -233,12 +228,6 @@ call: `{"path": "upstreaming-out", "name": "upstreaming-proposal"}`:
 - `patches.mbox`: for `append`, `git -C fork format-patch --stdout <expected_head>`;
   for `rewrite`, `git -C fork format-patch --stdout <base_sha>`. Omit it
   when `operation` is `none`.
-- For an investigation: `dossier.json` with the facts listed in the task
-  plan (release coverage, build backend, native dependencies, release
-  graph, existing architecture precedent with exact file paths, fork guards,
-  contribution rules, proposed admission class, allowed paths, target matrix,
-  risks), and a `proposal.json` with `outcome: "investigation"` and
-  `operation: "none"`.
 
 Then call `work_queue_claim_finish` with `outcome: "completed"`. If you
 cannot produce a useful result, stage `report_incomplete` explaining why and
@@ -263,7 +252,11 @@ into scripts or package publication step is rejected.
 3. Temporary fork-only changes that let CI run on the fork (for example
    removing `if: github.repository == 'owner/repo'`) go in a separate commit
    whose subject starts with `{debug}`. Never when `upstream_facing` is true.
-   Debug commits enable validation only, never publication or secrets.
+   Debug commits enable validation only, never publication or secrets. The
+   fork's CI must run the riscv64 wheel job on push to `riscv64`: if that
+   workflow does not trigger on pushes to `riscv64`, add the trigger in the
+   same `{debug}` commit. If the project already builds riscv64 wheels
+   upstream, the `{debug}` commit alone can be the whole series.
 4. Baseline code is `rv64gc`. Optional RVV only behind Linux `riscv_hwprobe`
    (`RISCV_HWPROBE_KEY_IMA_EXT_0` / `RISCV_HWPROBE_IMA_V`) with an `rv64gc`
    fallback. No global `-march=...v...` or `-march=native`.

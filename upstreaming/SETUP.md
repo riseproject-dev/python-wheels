@@ -11,7 +11,7 @@ its own GitHub Actions environment:
 | Environment | Job(s) | What it can do once it runs |
 |---|---|---|
 | `upstreaming-publish` | `publish` in `upstreaming-worker.lock.yml`; `publish` in `upstreaming-publish-retry.yml` | Mint a GitHub App token for **one** `riseproject-upstreaming/<fork>` (contents, workflows, pull-requests write) and push that fork's `riscv64` branch |
-| `upstreaming-state` | `reconcile` in `upstreaming-controller.yml` | Mint a GitHub App token for `riseproject-dev/python-wheels` (contents, actions write), push one validated state-only commit to `main`, launch the dispatcher and publish-only retries |
+| `upstreaming-state` | `reconcile` in `upstreaming-controller.yml` | Mint a GitHub App token for `riseproject-dev/python-wheels` (contents, actions write), push one validated state-only commit to `main`, launch the dispatcher (new work, or a dispatch that never reached the queue) and publish-only retries |
 
 The agent job, the dispatcher and the read-only `observe` job use neither
 environment.
@@ -97,10 +97,13 @@ dispatches workflows for the existing downstream jobs).
 ## Other one-time items (not environments)
 
 - **Secret `ANTHROPIC_API_KEY`:** already an org secret selected for this
-  repository. The worker (Pi, `anthropic/opus-5.5`), its threat detection and
-  the dispatcher use it. It is not placed in either environment because the
+  repository. All three gh-aw workflows run Pi on it, each with the model
+  advertised by the endpoint's live catalog: the worker (patch, repair and
+  revision tasks) `anthropic/claude-opus-5-5`, the investigator
+  `anthropic/claude-sonnet-5-5`, and the dispatcher, which only explains the
+  pre-staged plan, `anthropic/claude-haiku-5-5`. It is not placed in either environment because the
   agent jobs do not use environments.
-- **Label `upstreaming-request`:** create it (you said you will).
+- **Label `upstreaming-request`:** exists. Add it to a *Package build request* issue to start upstreaming that package.
 - **First queue submission:** creates the `work-queue` branch (you said you
   will). The dispatcher's first staged plan does this too.
 - **Actions settings:** **Settings → Actions → General → Workflow
