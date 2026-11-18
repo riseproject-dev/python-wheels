@@ -48,8 +48,33 @@ jobs:
       package: rs1090
       version: ${{ inputs.version }}
 
-  build_wheels:
+  # docs/packages/rs1090.yaml also declares musllinux targets, but the test
+  # step below needs pandas, which pypi.riseproject.dev ships for
+  # manylinux_riscv64 only (no musllinux_riscv64 wheel at all) -- confirmed
+  # against the Simple API, not assumed. Drop those rows here rather than
+  # build a wheel this job cannot test; this also keeps `publish`'s
+  # completeness check (ci_scripts/update_doc.py) from expecting a musllinux
+  # wheel that never gets uploaded.
+  manylinux_matrix:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+    steps:
+      - name: Drop musllinux rows
+        id: filter
+        env:
+          MATRIX: ${{ needs.setup.outputs.matrix }}
+        run: |
+          python3 -c "
+          import json, os
+          rows = [r for r in json.loads(os.environ['MATRIX']) if r['platform'] == 'manylinux']
+          print('matrix=' + json.dumps(rows))
+          " >> "$GITHUB_OUTPUT"
+
+  build_wheels:
+    needs: [setup, manylinux_matrix]
     if: needs.setup.outputs.versions != '[]'
     name: Build rs1090 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
@@ -57,21 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314"]
-        # No musllinux: rustup.rs ships no riscv64 musl toolchain, and
-        # maturin-action has no musllinux riscv64 container to build in (it
-        # falls back to the host, where its `pip install` hits PEP 668).
-        include:
-          - python: cp312
-            interpreter: python3.12
-            python-version: '3.12'
-          - python: cp313
-            interpreter: python3.13
-            python-version: '3.13'
-          - python: cp314
-            interpreter: python3.14
-            python-version: '3.14'
+        include: ${{ fromJSON(needs.manylinux_matrix.outputs.matrix) }}
 
     env:
       RS1090_VERSION: ${{ matrix.version }}
@@ -96,18 +107,25 @@ jobs:
       - name: Patch rs1090 source
         run: git apply python-wheels/patches/rs1090/${{ env.RS1090_VERSION }}/*.patch
 
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
           working-directory: python
           target: riscv64gc-unknown-linux-gnu
-          args: --release -i ${{ matrix.interpreter }} --out dist
+          args: --release -i ${{ steps.interp.outputs.value }} --out dist
           manylinux: '2_39'
 
       - name: Install Python
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ steps.interp.outputs.value }}
           activate-environment: true
           enable-cache: false
 
@@ -133,7 +151,7 @@ jobs:
 
   publish:
     name: Publish rs1090 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, manylinux_matrix, build_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
@@ -146,5 +164,5 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      matrix: ${{ needs.setup.outputs.matrix }}
+      matrix: ${{ needs.manylinux_matrix.outputs.matrix }}
       artifact-pattern: rs1090-${{ matrix.version }}-*riscv64

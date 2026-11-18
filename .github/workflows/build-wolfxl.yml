@@ -44,8 +44,34 @@ jobs:
       package: wolfxl
       version: ${{ inputs.version }}
 
-  build_wheels:
+  # docs/packages/wolfxl.yaml also declares musllinux targets, but the test
+  # dependencies this job installs (Pillow, at least) have no
+  # musllinux_riscv64 wheel on pypi.riseproject.dev (confirmed against the
+  # Simple API, not assumed) and the test suite below isn't set up to run
+  # inside a musllinux container. Drop those rows here rather than build a
+  # wheel this job cannot test; this also keeps `publish`'s completeness
+  # check (ci_scripts/update_doc.py) from expecting a musllinux wheel that
+  # never gets uploaded.
+  manylinux_matrix:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+    steps:
+      - name: Drop musllinux rows
+        id: filter
+        env:
+          MATRIX: ${{ needs.setup.outputs.matrix }}
+        run: |
+          python3 -c "
+          import json, os
+          rows = [r for r in json.loads(os.environ['MATRIX']) if r['platform'] == 'manylinux']
+          print('matrix=' + json.dumps(rows))
+          " >> "$GITHUB_OUTPUT"
+
+  build_wheels:
+    needs: [setup, manylinux_matrix]
     if: needs.setup.outputs.versions != '[]'
     name: Build wolfxl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
@@ -53,17 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # No abi3 (pyo3 has no abi3-pyNN feature here), so one wheel per interpreter.
-        python: ['cp312', 'cp313', 'cp314', 'cp314t']
-        include:
-          # gotcha 711: the RLIMIT_AS-headroom OOM test is defeated by cp314t's own
-          # allocator (confirmed off riscv64, off wolfxl's code, with a pure-stdlib
-          # repro) -- not a build or porting bug. Deselect it for cp314t only; the
-          # other three legs keep the full suite.
-          - python: 'cp314t'
-            test_deselect: >-
-              --deselect=tests/test_streaming_oom_error.py::test_allocation_failure_raises_memory_error_not_panic
+        include: ${{ fromJSON(needs.manylinux_matrix.outputs.matrix) }}
 
     env:
       WOLFXL_VERSION: ${{ matrix.version }}
@@ -185,6 +201,10 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
           CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
         run: |
+          # gotcha 711: the RLIMIT_AS-headroom OOM test is defeated by cp314t's own
+          # allocator (confirmed off riscv64, off wolfxl's code, with a pure-stdlib
+          # repro) -- not a build or porting bug. Deselect it for cp314t only; the
+          # other legs keep the full suite.
           pytest tests -q -n auto --dist worksteal \
             --ignore=tests/vendored_openpyxl \
             --ignore-glob='tests/test_ooxml_*.py' \
@@ -198,7 +218,7 @@ jobs:
             --ignore=tests/test_openpyxl_compat_oracle.py \
             --ignore=tests/test_openpyxl_corpus_runner_summary.py \
             --deselect=tests/test_calc_functions.py::TestWhitelist::test_public_formula_counts_match_whitelist \
-            ${{ matrix.test_deselect }}
+            ${{ matrix.python == 'cp314t' && '--deselect=tests/test_streaming_oom_error.py::test_allocation_failure_raises_memory_error_not_panic' || '' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -208,7 +228,7 @@ jobs:
 
   publish:
     name: Publish wolfxl ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, manylinux_matrix, build_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
@@ -221,5 +241,5 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      matrix: ${{ needs.setup.outputs.matrix }}
+      matrix: ${{ needs.manylinux_matrix.outputs.matrix }}
       artifact-pattern: wolfxl-${{ matrix.version }}-*-manylinux_riscv64

@@ -5,9 +5,12 @@
 # https://github.com/WorksApplications/sudachi.rs/blob/v0.7.0/.github/workflows/build-python-wheels.yml
 # 0.7.0 switched the python/ build from setuptools-rust to maturin, whose
 # pyo3 dependency now enables the "abi3-py310" feature (python/Cargo.toml):
-# one cp310 wheel loads on every newer non-free-threaded CPython, so the
-# matrix collapses to it plus the separate free-threaded cp314t build
-# (CLAUDE.md gotcha 11), same shape as build-apache-tvm-ffi.yml.
+# one cp310 wheel loads on every newer non-free-threaded CPython, so a
+# version declared with a `3.10-abi3:manylinux` target collapses to it plus
+# the separate free-threaded cp314t build (CLAUDE.md gotcha 11), same shape
+# as build-apache-tvm-ffi.yml. needs.setup.outputs.matrix (_setup.yml) does
+# that collapsing per version already; a pre-0.7.0 version with no abi3
+# target instead gets one wheel per declared interpreter.
 name: Build sudachipy wheels (riscv64)
 
 on:
@@ -61,14 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp310", "cp314t"]
-        include:
-          # tokenizers has no free-threaded wheel anywhere (abi3-only); its sdist
-          # build is unproven here, so drop just the one test module that needs it.
-          - python: "cp314t"
-            drop_pretokenizer_test: "rm tests/test_pretokenizers.py &&"
-            test_requires: 'sudachidict_core'
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       SUDACHIPY_VERSION: ${{ matrix.version }}
@@ -111,11 +107,13 @@ jobs:
           CIBW_ENVIRONMENT: PATH="$PATH:$HOME/.cargo/bin" PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # pypi.riseproject.dev's newest tokenizers (0.22.2) is behind PyPI's
           # (0.23.2, no riscv64 wheel); pin so pip resolves to ours.
-          CIBW_TEST_REQUIRES: ${{ matrix.test_requires || 'tokenizers==0.22.2 sudachidict_core' }}
+          # tokenizers has no free-threaded wheel anywhere (abi3-only); its sdist
+          # build is unproven here, so drop just the one test module that needs it.
+          CIBW_TEST_REQUIRES: ${{ matrix.python == 'cp314t' && 'sudachidict_core' || 'tokenizers==0.22.2 sudachidict_core' }}
           # Upstream's own build_and_test.sh test command, run against {package}
           # (gotcha 5) since cibuildwheel tests from an empty scratch directory.
           CIBW_TEST_COMMAND: >-
-            bash -c "cd {package}/python && ${{ matrix.drop_pretokenizer_test }} python -m unittest discover -s tests -v"
+            bash -c "cd {package}/python && ${{ matrix.python == 'cp314t' && 'rm tests/test_pretokenizers.py &&' || '' }} python -m unittest discover -s tests -v"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
