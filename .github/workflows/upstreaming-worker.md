@@ -83,6 +83,17 @@ pre-agent-steps:
       git config user.email "noreply@riseproject.dev"
       echo "checked out $(git rev-parse HEAD) into ./fork"
 jobs:
+  safe_outputs:
+    pre-steps:
+      - name: Check out trusted native artifact compatibility patch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: native-artifact-compat
+          sparse-checkout: upstreaming
+      - name: Apply hash-pinned gh-aw v1.2.2 native artifact fix
+        run: python3 native-artifact-compat/upstreaming/gh_aw_compat.py "$RUNNER_TEMP/gh-aw/actions"
   publish:
     # Ordinary trusted job, not a safe output. Gated on the compiled
     # safe_outputs outcome, then on the exact Claim's verified Result as
@@ -214,7 +225,8 @@ one Claim; use its `handle` as `claim_handle` on every safe output and on
 
 Write these files into `upstreaming-out/` at the top of the workspace (next
 to `fork/`, not inside it) and upload them with a single `upload_artifact`
-call: `{"path": "upstreaming-out", "name": "upstreaming-proposal"}`:
+call: `{"path": "upstreaming-out"}` (the native handler names the artifact
+`claim-<hash>-upstreaming-out`):
 
 - `proposal.json`: a JSON object matching
   `upstreaming/schemas/proposal.schema.json` in the control repository.

@@ -1,0 +1,55 @@
+Upstream-Status: To upstream [Local reproduction validated; upstream submission requires separate authorization]
+
+diff --git a/actions/setup/js/upload_artifact.cjs b/actions/setup/js/upload_artifact.cjs
+index b9553d6..fefed59 100644
+--- a/actions/setup/js/upload_artifact.cjs
++++ b/actions/setup/js/upload_artifact.cjs
+@@ -55,6 +55,7 @@ const {
+   claimIdentity,
+   assertClaimIdentity,
+   receiptMatchesClaim,
++  withClaimResourceEffects,
+ } = require("./work_queue_claim_scope.cjs");
+ const { expectedGitHubHost } = require("./work_queue_host.cjs");
+ const privateDeliveryReceipts = new WeakMap();
+@@ -712,19 +713,33 @@ async function main(config = {}) {
+           uploadOpts.skipArchive = true;
+         }
+         const repository = process.env.GITHUB_REPOSITORY || "";
++        const uploadNativeArtifact = async () => {
++          const effect = recordClaimEffect({ kind: "artifact", repository, outcome: "unknown" });
++          const result = await client.uploadArtifact(artifactName, absoluteFiles, stagingDirectory(), uploadOpts);
++          if (effect) {
++            effect.outcome = "succeeded";
++            effect.id = String(result.id || "");
++          }
++          return result;
++        };
++        let uploadResult;
+         if (factoryClaim) {
+           if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error(`${ERR_VALIDATION}: Artifact upload requires the original native repository in owner/repo format`);
+           const [owner, repo] = repository.split("/");
+           const { data: nativeRepository } = await github.rest.repos.get({ owner, repo });
+           if (nativeRepository.full_name !== repository || !/^[1-9][0-9]*$/.test(String(nativeRepository.id)))
+             throw new Error(`${ERR_VALIDATION}: Artifact upload repository identity differs from its native target; scoped effects remain blocked`);
+-          await assertClaimAuthorized({ ...message, repo: repository }, { effect: true, resource: { repository, host: expectedGitHubHost(), repository_id: String(nativeRepository.id), run_id: process.env.GITHUB_RUN_ID } });
+-        }
+-        const effect = recordClaimEffect({ kind: "artifact", repository, outcome: "unknown" });
+-        const uploadResult = await client.uploadArtifact(artifactName, absoluteFiles, stagingDirectory(), uploadOpts);
+-        if (effect) {
+-          effect.outcome = "succeeded";
+-          effect.id = String(uploadResult.id || "");
++          // The trusted native target is the original bound worker run. Work
++          // cannot predict its future run ID at admission. Use the existing
++          // protected adapter frame, retaining immutable repository selectors
++          // and the independent exact Claim/run binding checks.
++          const target = { repository, host: expectedGitHubHost(), repository_id: String(nativeRepository.id), run_id: process.env.GITHUB_RUN_ID };
++          uploadResult = await withClaimResourceEffects([target], ["upload_artifact"], async () => {
++            await assertClaimAuthorized({ ...message, repo: repository }, { effect: true, resource: target });
++            return uploadNativeArtifact();
++          });
++        } else {
++          uploadResult = await uploadNativeArtifact();
+         }
+         artifactId = uploadResult.id;
+         trustedDigest = uploadResult.digest;
