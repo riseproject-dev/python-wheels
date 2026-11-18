@@ -220,6 +220,47 @@ jobs:
             # (`grep -rn 'GNUC_PREREQ (11'` over a matching glibc's headers), so this
             # only drops that one attribute form - _Float32/64/32x stay on regardless,
             # via the unconditional #define 1s above, not a version check.
+            #
+            # Real cp311 CI log (run 43459321054, job 133890865876) shows the next failure
+            # past all three fixes above: "redefinition of 'numeric_limits<float>'" (and
+            # <double>, <long double>) from this image's own
+            # /usr/lib/gcc/riscv64-redhat-linux/14/.../include/c++/14/limits. That header
+            # (verified byte-identical against a gcc-toolset-14 x86_64 install, since this
+            # is pure preprocessor logic, architecture-independent) hand-writes
+            # numeric_limits<float>/<double>/<long double> directly (lines 1670/1745/1820),
+            # then separately does:
+            #   #ifdef __FLT32_DIG__
+            #   __glibcxx_float_n(32)   // -> template<> struct numeric_limits<_Float32> {...}
+            #   #endif
+            #   #ifdef __FLT64_DIG__ ... __glibcxx_float_n(64)  // _Float64
+            #   #ifdef __FLT128_DIG__ ... __glibcxx_float_n(128) // _Float128
+            # (limits:1988-1997). __FLT32_DIG__/__FLT64_DIG__/__FLT128_DIG__ are GCC's own
+            # builtin predefines (confirmed via `g++-14 -E -dM -x c++ /dev/null`, real
+            # GCC-14 defines all three - this is what glibc's bits/floatn-common.h comment
+            # above calls "a Clang new enough" seeing, except here it's the REAL GCC being
+            # probed, which has always defined these), and they get captured into
+            # castxml-cc-gnu's predefine dump same as __GNUC__ above, so CastXML's internal
+            # Clang parse sees them defined too. Combined with this header's own
+            # `#define _Float32 float` etc. (object-like macros, so `_Float##BITSIZE`'s
+            # token-paste result rescans and expands), __glibcxx_float_n(32) literally
+            # expands to `template<> struct numeric_limits<float> {...}` - word-for-word
+            # colliding with the hand-written specialization already in the same header.
+            # Since _Float32/64/128 are aliased to float/double/long double here anyway,
+            # nothing needs their own separate numeric_limits specialization - the fix is
+            # to stop __glibcxx_float_n(32/64/128) from firing at all, by undefining their
+            # gating macros, the same #undef mechanism already used on __GNUC__ above.
+            # Verified offline (g++-14 14.2.0, matching this image's gcc-toolset-14 exactly
+            # - its libstdc++ `limits` is byte-identical to the one checked here): to
+            # reproduce, `g++-14 -fsyntax-only -include <this header without the 3 undefs
+            # below> -x c++ -` on a TU that just does `#include <limits>` gives the exact
+            # three "redefinition of 'numeric_limits<...>'" errors at limits:1989/1992/1995,
+            # matching the real log line-for-line; adding the three #undef below makes that
+            # same command exit 0, and a follow-up TU that static_asserts
+            # numeric_limits<float/double/long double>::max() still resolve to the real,
+            # hand-written specializations (not just "no error"), confirms the fix doesn't
+            # silently delete them - only the redundant macro-generated _Float32/64/128
+            # ones are suppressed. __STDCPP_FLOAT16_T__ (_Float16, line 1985-1987) isn't
+            # touched: it isn't aliased by this header and isn't part of the real failure.
             cat > /work/float128-workaround.h <<'HDREOF'
           #define _Float128 long double
           #define _Float32 float
@@ -231,6 +272,9 @@ jobs:
           #define __GNUC__ 10
           #undef __GNUC_MINOR__
           #define __GNUC_MINOR__ 0
+          #undef __FLT32_DIG__
+          #undef __FLT64_DIG__
+          #undef __FLT128_DIG__
           HDREOF
 
             "${cmake}" -S "${source_path}" -B "${build_path}" -G Ninja \
