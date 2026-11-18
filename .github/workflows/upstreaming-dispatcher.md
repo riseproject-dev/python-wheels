@@ -40,8 +40,10 @@ steps:
       uv run --no-project --with-requirements upstreaming/requirements.txt \
         python -m upstreaming plan --out /tmp/gh-aw/agent/upstreaming-plan.json \
           --control-repo-id "$CONTROL_REPO_ID"
+  # No `if: hashFiles(...)` here: hashFiles only sees the workspace, so a
+  # plan under /tmp always looked absent and the step was skipped. The
+  # script checks for the file itself.
   - name: Stage the plan as trusted queue intents
-    if: hashFiles('/tmp/gh-aw/agent/upstreaming-plan.json') != ''
     uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
     with:
       script: |
