@@ -98,24 +98,14 @@ jobs:
   build_wheels:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
-    name: Build boost-histogram ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build boost-histogram ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # hypothesis (a test dependency) ships no riscv64 wheel for PyPI's
-          # newest release on the free-threaded ABI; our own registry's older
-          # build does. Widening UV_ONLY_BINARY doesn't help - uv's resolver
-          # still picks the newest version first and tries to build its sdist
-          # (which needs a Rust toolchain riscv64 lacks) rather than falling
-          # back to a version with a usable wheel, so pin the version instead.
-          - python: "cp314t"
-            test_requires: "hypothesis==6.165.10"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       BOOST_HISTOGRAM_VERSION: ${{ matrix.version }}
@@ -135,11 +125,14 @@ jobs:
         with:
           package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
-          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
           CIBW_ARCHS: riscv64
           # numpy (a hard runtime dependency) ships no musllinux riscv64 wheel
           # anywhere, so musllinux is dropped (workflow-anatomy.md: an accepted
-          # outcome).
+          # outcome). docs/packages/boost-histogram.yaml still has pending
+          # musllinux entries (CLAUDE.md gotcha-index: platform exclusion has
+          # no --python-exclude equivalent), so those matrix legs still get
+          # scheduled; this CIBW_SKIP then leaves them with nothing to build.
           CIBW_SKIP: '*-musllinux_*'
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # CIBW_ENVIRONMENT replaces, rather than merges into, upstream's own
@@ -155,11 +148,17 @@ jobs:
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             UV_INDEX_STRATEGY=unsafe-best-match
-          CIBW_TEST_REQUIRES: ${{ matrix.test_requires }}
+          # hypothesis (a test dependency) ships no riscv64 wheel for PyPI's
+          # newest release on the free-threaded ABI; our own registry's older
+          # build does. Widening UV_ONLY_BINARY doesn't help - uv's resolver
+          # still picks the newest version first and tries to build its sdist
+          # (which needs a Rust toolchain riscv64 lacks) rather than falling
+          # back to a version with a usable wheel, so pin the version instead.
+          CIBW_TEST_REQUIRES: ${{ matrix.python == 'cp314t' && 'hypothesis==6.165.10' || '' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: boost-histogram-${{ env.BOOST_HISTOGRAM_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: boost-histogram-${{ env.BOOST_HISTOGRAM_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 

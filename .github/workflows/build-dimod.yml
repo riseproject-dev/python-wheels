@@ -113,22 +113,18 @@ jobs:
   build_wheels:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
-    name: Build dimod ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build dimod ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # From 0.12.23 upstream builds one cp312-abi3 wheel for CPython 3.12+ (the
-        # `cp31[!01]-*` override in pyproject.toml), so cp313/cp314 would only
-        # produce the same file name again; the free-threaded build stays separate.
-        python: ["cp312", "cp314t"]
-        include:
-          # pandas, a tests/requirements.txt dependency, has no riscv64 cp314t wheel yet.
-          - python: "cp314t"
-            test_skip: "*"
+        # `cp31[!01]-*` override in pyproject.toml); needs.setup.outputs.matrix
+        # already collapses cp313/cp314 onto that same cp312-abi3 leg, and keeps
+        # the free-threaded build separate.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       DIMOD_VERSION: ${{ matrix.version }}
@@ -148,10 +144,13 @@ jobs:
         with:
           package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
-          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
           CIBW_ARCHS: riscv64
           # Upstream itself skips musllinux (`skip = "pp* *musllinux*"` in pyproject.toml);
           # CIBW_BUILD overrides that config wholesale, so repeat the musllinux skip here.
+          # docs/packages/dimod.yaml never declares a musllinux entry, so
+          # needs.setup.outputs.matrix never emits a musllinux leg either; this
+          # stays purely as defense in depth.
           CIBW_SKIP: '*-musllinux_*'
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: >-
@@ -162,7 +161,8 @@ jobs:
             UV_PREFER_BINARY=1
             UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             UV_INDEX_STRATEGY=unsafe-best-match
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # pandas, a tests/requirements.txt dependency, has no riscv64 cp314t wheel yet.
+          CIBW_TEST_SKIP: ${{ matrix.python == 'cp314t' && '*' || '' }}
 
       - name: Check the Cython extensions made it into the wheel
         run: |
@@ -184,7 +184,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: dimod-${{ env.DIMOD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: dimod-${{ env.DIMOD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 

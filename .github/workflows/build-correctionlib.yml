@@ -98,23 +98,14 @@ jobs:
   build_wheels:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
-    name: Build correctionlib ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build correctionlib ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # pydantic (a hard runtime dependency) needs pandas+scipy's peer
-          # pydantic-core, which does publish a riscv64 cp314t wheel on PyPI -
-          # but pandas and scipy themselves (hard `test` dependency-group
-          # entries) publish no cp314t wheel for any platform yet, so the test
-          # env can't be installed. Build the wheel, skip only its tests.
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       CORRECTIONLIB_VERSION: ${{ matrix.version }}
@@ -134,17 +125,25 @@ jobs:
         with:
           package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
-          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
           CIBW_ARCHS: riscv64
           # numpy (a hard runtime dependency) ships no musllinux riscv64 wheel
           # anywhere, so musllinux is dropped (workflow-anatomy.md: an accepted
-          # outcome).
+          # outcome). docs/packages/correctionlib.yaml still has pending
+          # musllinux entries (CLAUDE.md gotcha-index: platform exclusion has
+          # no --python-exclude equivalent), so those matrix legs still get
+          # scheduled; this CIBW_SKIP then leaves them with nothing to build.
           CIBW_SKIP: '*-musllinux_*'
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=:all:
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # pydantic (a hard runtime dependency) needs pandas+scipy's peer
+          # pydantic-core, which does publish a riscv64 cp314t wheel on PyPI -
+          # but pandas and scipy themselves (hard `test` dependency-group
+          # entries) publish no cp314t wheel for any platform yet, so the test
+          # env can't be installed. Build the wheel, skip only its tests.
+          CIBW_TEST_SKIP: ${{ matrix.python == 'cp314t' && '*' || '' }}
           # CIBW_TEST_REQUIRES adds to, not replaces, the pyproject `test-groups`
           # dependency group, so it has to be cleared here (empty string wins
           # over the inherited value, same as CIBW_BEFORE_BUILD: '').
@@ -177,7 +176,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: correctionlib-${{ env.CORRECTIONLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: correctionlib-${{ env.CORRECTIONLIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
