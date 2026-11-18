@@ -58,53 +58,32 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build blastdns ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build blastdns ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # blastdns' pyo3 dependency has a plain `pyo3/extension-module` feature
-        # (no abi3-pyNN), so every interpreter needs its own build, matching
-        # upstream's own per-interpreter PyPI wheel matrix. pp311 is dropped:
-        # PyPy has no riscv64 port.
-        # cp313t is dropped: the riscv64 manylinux image ships no cp313t
-        # interpreter at all (unrelated to blastdns; every other riscv64 port
-        # hits the same gap).
-        python: ['cp39', 'cp310', 'cp311', 'cp312', 'cp313', 'cp314', 'cp314t']
-        include:
-          # pydantic>=2.12.4 (a runtime dependency) needs pydantic-core, which
-          # this registry has only for cp310-cp314. cp39 still builds and
-          # ships a wheel; it just can't exercise the real test suite here,
-          # so it gets an import check instead.
-          - python: cp39
-            test: smoke
-          - python: cp310
-            test: full
-          - python: cp311
-            test: full
-          - python: cp312
-            test: full
-          - python: cp313
-            test: full
-          - python: cp314
-            test: full
-          # orjson>=3.11.4 (a runtime dependency, imported by blastdns'
-          # __init__) has never published a free-threaded wheel for any
-          # platform, and its build.rs refuses free-threaded Python unless
-          # ORJSON_BUILD_FREETHREADED is set, so blastdns cannot be installed
-          # under cp314t anywhere. Upstream still ships a cp314t wheel, so
-          # build it and let "Check wheel contents" stand as the proof
-          # (gotcha 149).
-          - python: cp314t
-            test: none
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       BLASTDNS_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
+      # pydantic>=2.12.4 (a runtime dependency) needs pydantic-core, which
+      # this registry only ever has for cp310-cp314; any other interpreter
+      # still builds and ships a wheel, it just can't exercise the real test
+      # suite here, so it gets an import check instead. orjson>=3.11.4 (also
+      # a runtime dependency, imported by blastdns' __init__) has never
+      # published a free-threaded wheel for any platform, and its build.rs
+      # refuses free-threaded Python unless ORJSON_BUILD_FREETHREADED is set,
+      # so blastdns cannot be installed under any free-threaded interpreter
+      # anywhere; that wheel still builds and "Check wheel contents" stands
+      # as the proof (gotcha 149).
+      BLASTDNS_TEST: >-
+        ${{ endsWith(matrix.python, 't') && 'none'
+          || ((matrix.python == 'cp310' || matrix.python == 'cp311' || matrix.python == 'cp312' || matrix.python == 'cp313' || matrix.python == 'cp314') && 'full' || 'smoke') }}
 
     steps:
       - name: Checkout blastdns ${{ env.BLASTDNS_VERSION }}
@@ -160,7 +139,7 @@ jobs:
           EOF
 
       - name: Install Python
-        if: matrix.test != 'none'
+        if: env.BLASTDNS_TEST != 'none'
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           python-version: ${{ steps.interp.outputs.value }}
@@ -168,7 +147,7 @@ jobs:
           enable-cache: false
 
       - name: Install wheel
-        if: matrix.test != 'none'
+        if: env.BLASTDNS_TEST != 'none'
         env:
           # blastdns itself depends on orjson>=3.11.4 at runtime. PyPI lists
           # it sdist-only (no riscv64 wheel), so a plain --no-index install
@@ -186,12 +165,12 @@ jobs:
         run: uv pip install "blastdns==${BLASTDNS_VERSION}" --find-links dist --force-reinstall
 
       - name: Smoke test
-        if: matrix.test == 'smoke'
+        if: env.BLASTDNS_TEST == 'smoke'
         working-directory: ${{ runner.temp }}
         run: python3 -c "import blastdns._native as m; assert m.__file__.endswith('.so'), m.__file__"
 
       - name: Install test dependencies
-        if: matrix.test == 'full'
+        if: env.BLASTDNS_TEST == 'full'
         env:
           UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
           # PyPI lists pydantic-core/orjson by name (sdist only, no riscv64
@@ -219,7 +198,7 @@ jobs:
       # test asserts the first batches hold exactly 1000, which only holds when
       # the runner feeds results faster than that.
       - name: Run tests
-        if: matrix.test == 'full'
+        if: env.BLASTDNS_TEST == 'full'
         run: |
           sudo ./scripts/start-test-dns.sh
           mkdir "$RUNNER_TEMP/tests"
@@ -230,7 +209,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: blastdns-${{ env.BLASTDNS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: blastdns-${{ env.BLASTDNS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: dist/*.whl
           if-no-files-found: error
 
