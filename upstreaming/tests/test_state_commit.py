@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ci_scripts.upstreaming import state, state_commit
-from ci_scripts.upstreaming.tests.helpers import commit_files, contribution, git, init_repo, policy
+from upstreaming import state, state_commit
+from upstreaming.tests.helpers import commit_files, contribution, git, init_repo, policy
 
 
 class TestStateCommit(unittest.TestCase):

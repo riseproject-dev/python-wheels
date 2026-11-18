@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ci_scripts.upstreaming import publisher, state
-from ci_scripts.upstreaming.common import canonical_json
-from ci_scripts.upstreaming.tests.helpers import commit_files, contribution, git, init_repo, policy
+from upstreaming import publisher, state
+from upstreaming.common import canonical_json
+from upstreaming.tests.helpers import commit_files, contribution, git, init_repo, policy
 
 
 class TestStateDiff(unittest.TestCase):

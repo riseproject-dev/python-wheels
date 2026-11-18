@@ -19,7 +19,7 @@ in the credentialed publisher. Two parts:
 These supplement project CI and human review; they are not semantic proof.
 
 Usage (inside the sandbox):
-    python -m ci_scripts.upstreaming.probe WHEEL [--import NAME ...] [--install]
+    python -m upstreaming.probe WHEEL [--import NAME ...] [--install]
 """
 
 from __future__ import annotations

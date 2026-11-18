@@ -8,9 +8,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ci_scripts.upstreaming import (capacity, ci_evidence, commands, controller, recovery,
+from upstreaming import (capacity, ci_evidence, commands, controller, recovery,
                                     release, triggers)
-from ci_scripts.upstreaming.tests.helpers import (NOW, OWNER, SHA_A, SHA_B, comment, contribution,
+from upstreaming.tests.helpers import (NOW, OWNER, SHA_A, SHA_B, comment, contribution,
                                                   policy)
 
 T = datetime.fromisoformat(NOW)
@@ -211,7 +211,7 @@ class TestTriggers(unittest.TestCase):
         self.assertEqual(triggers.classify_commit(["upstreaming-state/a", "ci_scripts/b"]), "mixed")
 
     def test_repository_state_only_push_triggers_nothing(self):
-        root = Path(__file__).resolve().parents[3]
+        root = Path(__file__).resolve().parents[2]
         findings = triggers.audit(root / ".github/workflows", ["upstreaming-state/contributions/x.json"])
         self.assertEqual([f.workflow for f in findings if f.triggered], [])
         self.assertEqual(triggers.workflow_run_consumers(root / ".github/workflows"), [])
@@ -262,7 +262,7 @@ class TestTick(unittest.TestCase):
         self.assertEqual(res.requested_effects, [])
 
     def test_intake_creates_queued_contribution(self):
-        from ci_scripts.upstreaming.tests.test_commands_intake import issue
+        from upstreaming.tests.test_commands_intake import issue
         res = controller.tick(contributions={}, operations={}, consumed={}, projects={},
                               policy=policy(), inputs=controller.Inputs(
                                   now=T, issues=[issue()], acceptances={77: OWNER["id"]}))

@@ -10,7 +10,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from ci_scripts.upstreaming import probe
+from upstreaming import probe
 
 
 def elf(arch=b"rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0", needed=(), machine=243, flags=0x5):

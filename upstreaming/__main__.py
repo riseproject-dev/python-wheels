@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: MIT
 """Command-line entry points.
 
-    python -m ci_scripts.upstreaming validate-state [ROOT]
-    python -m ci_scripts.upstreaming check-state-diff BASE CANDIDATE
-    python -m ci_scripts.upstreaming audit-triggers [--paths P ...]
-    python -m ci_scripts.upstreaming parse-command FILE|-
-    python -m ci_scripts.upstreaming capacity [--file usage.json]
-    python -m ci_scripts.upstreaming observe [ROOT]     # read-only tick
+    python -m upstreaming validate-state [ROOT]
+    python -m upstreaming check-state-diff BASE CANDIDATE
+    python -m upstreaming audit-triggers [--paths P ...]
+    python -m upstreaming parse-command FILE|-
+    python -m upstreaming capacity [--file usage.json]
+    python -m upstreaming observe [ROOT]     # read-only tick
 
 All subcommands are local or read-only. None performs a remote write.
 """
@@ -132,7 +132,7 @@ def cmd_observe(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m ci_scripts.upstreaming")
+    ap = argparse.ArgumentParser(prog="python -m upstreaming")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("validate-state"); p.add_argument("root", nargs="?")
     p.set_defaults(fn=cmd_validate_state)

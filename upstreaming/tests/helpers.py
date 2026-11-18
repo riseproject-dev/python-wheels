@@ -9,8 +9,8 @@ import os
 import subprocess
 from pathlib import Path
 
-from ci_scripts.upstreaming import lifecycle
-from ci_scripts.upstreaming.common import load_policy
+from upstreaming import lifecycle
+from upstreaming.common import load_policy
 
 NOW = "2026-11-18T12:00:00+00:00"
 OWNER = {"id": 1001, "login": "owner"}

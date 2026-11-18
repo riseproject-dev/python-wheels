@@ -6,7 +6,7 @@ unverified needs explicit authorization before anyone tests it remotely.
 
 ## Verified locally (2026-11-18)
 
-- `python3 -m unittest discover -s ci_scripts/upstreaming/tests -t .`
+- `python3 -m unittest discover -s upstreaming/tests -t .`
   passes. These are the plan section 21 rows that can be exercised without
   remote access. See the table below.
 - **Trigger audit (6.4).** A static reading of every `on.push` filter in
@@ -16,7 +16,7 @@ unverified needs explicit authorization before anyone tests it remotely.
   unfiltered-by-package push trigger (`docs/**`, `ci_scripts/dashboard/**`),
   and `build-*.yml` push triggers are limited to each package's own
   workflow/YAML. `upstreaming-validate.yml` runs on
-  `ci_scripts/upstreaming/**` and its own workflow files. The audit runs in
+  `upstreaming/**` and its own workflow files. The audit runs in
   CI on every PR, so a new workflow with a broad `push` trigger fails it.
   This is static evidence only: confirming GitHub's real behavior for
   App-token pushes is still a Stage A item.
@@ -82,7 +82,7 @@ Each item needs explicit authorization before it is tested remotely.
    `max_pending_age_seconds` with the runner operators. The historical
    snapshot (113 pending for RISE) already exceeds the proposed 100, so the
    observer would defer expensive work.
-9. **Isolation.** Provision the disposable VM for `repro/run.sh`. Run the
+9. **Isolation.** Provision the disposable VM for `image/run.sh`. Run the
    hostile-Docker/host-network test from plan 13.2, and test the
    CPU/memory/disk/network limits enforced outside the guest. GHCR
    publication of the repro image needs separate authorization.
@@ -107,7 +107,7 @@ Each item needs explicit authorization before it is tested remotely.
 | Debug head, clean rewrite, upstream-facing | `test_debug_commits_and_upstream_facing`, `TestHandoff` | Pilot |
 | Wheel payload/linkage/RVV leak, hidden index | `test_probe`, `probe.install_and_import` | Clean target sandbox run |
 | Runtime floor, compressed/abi3/free-threaded tags | `TestRelease` | Floor install test |
-| QEMU nested build, hostile Docker | `repro/run.sh` guards | Stage A item 9 |
+| QEMU nested build, hostile Docker | `image/run.sh` guards | Stage A item 9 |
 | hwprobe/RVV dispatch, benchmarks | static RVV leak check only | Stage E |
 | Merge stops development, release polling, yanks | `TestMergeAndRelease`, `TestRelease` | Cleanup route |
 | Budgets do not reset, no-progress review | `TestCapacityBudgets` | Billing ceilings |

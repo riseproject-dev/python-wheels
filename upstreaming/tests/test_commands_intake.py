@@ -4,8 +4,8 @@
 
 import unittest
 
-from ci_scripts.upstreaming import commands, intake
-from ci_scripts.upstreaming.tests.helpers import NOW, OWNER, STRANGER, comment, policy
+from upstreaming import commands, intake
+from upstreaming.tests.helpers import NOW, OWNER, STRANGER, comment, policy
 
 FORM = """### Upstream repository
 

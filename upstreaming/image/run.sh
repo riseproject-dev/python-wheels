@@ -10,7 +10,7 @@
 # image is pinned by digest.
 #
 #   UPSTREAMING_DISPOSABLE_HOST=1 \
-#   ci_scripts/upstreaming/repro/run.sh IMAGE@sha256:... ./approved-repro.sh
+#   upstreaming/image/run.sh IMAGE@sha256:... ./approved-repro.sh
 #
 # The checkout, output and cache paths are mounted at the same absolute
 # path inside the outer container so cibuildwheel's inner manylinux/

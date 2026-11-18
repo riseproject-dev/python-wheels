@@ -34,7 +34,7 @@ authorization before it is turned on.
 | `triggers.py` | Trigger-compatibility audit of `.github/workflows` | 6.4 |
 | `controller.py` | One deterministic tick. Effects are requested, not executed. | 9 |
 | `collect.py` | Read-only GitHub/PyPI/usage collectors | Stage B |
-| `repro/` | Runner-free `linux/riscv64` reproduction image definition and guarded launcher | 13 |
+| `image/` | Runner-free `linux/riscv64` reproduction image definition and guarded launcher | 13 |
 | `gh-aw/upstreaming-worker.md.draft` | Uncompiled design sketch of the bounded worker | 5.1, 15 |
 | `tests/` | Executable acceptance tests mapped to plan section 21 | 21 |
 
@@ -50,22 +50,25 @@ The repository also gets:
   are commented out until Stage B is approved.
 - `upstreaming-state/`, the state root (6.1). It is empty for now.
 
-Upstreaming docs stay out of `docs/`, because a push touching `docs/**`
-deploys the website.
+The pipeline is deliberately separate from the downstream build machinery
+in this repository: nothing here is imported by, or calls into,
+`ci_scripts/`, `_setup.yml`, `_publish-wheel.yml` or the `build-*.yml`
+workflows, and they do not use it. Upstreaming docs stay out of `docs/`,
+because a push touching `docs/**` deploys the website.
 
 ## Usage
 
 ```sh
 # Tests (stdlib unittest; needs jsonschema, packaging, pyyaml)
-python3 -m unittest discover -s ci_scripts/upstreaming/tests -t .
+python3 -m unittest discover -s upstreaming/tests -t .
 
-python3 -m ci_scripts.upstreaming validate-state
-python3 -m ci_scripts.upstreaming audit-triggers --expect-none --paths upstreaming-state/x.json
-python3 -m ci_scripts.upstreaming check-state-diff <trusted-base> <candidate>
-python3 -m ci_scripts.upstreaming parse-command comment.txt
-python3 -m ci_scripts.upstreaming capacity [--file usage.json]
-python3 -m ci_scripts.upstreaming observe [--offline]     # read-only tick
-python3 -m ci_scripts.upstreaming.probe some.whl [--install --import mod]
+python3 -m upstreaming validate-state
+python3 -m upstreaming audit-triggers --expect-none --paths upstreaming-state/x.json
+python3 -m upstreaming check-state-diff <trusted-base> <candidate>
+python3 -m upstreaming parse-command comment.txt
+python3 -m upstreaming capacity [--file usage.json]
+python3 -m upstreaming observe [--offline]     # read-only tick
+python3 -m upstreaming.probe some.whl [--install --import mod]
 ```
 
 None of these perform remote writes.

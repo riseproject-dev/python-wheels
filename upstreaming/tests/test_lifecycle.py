@@ -4,8 +4,8 @@
 
 import unittest
 
-from ci_scripts.upstreaming import commands, lifecycle, schemas
-from ci_scripts.upstreaming.tests.helpers import (BACKUP, NOW, OWNER, SHA_A, SHA_B, SHA_C,
+from upstreaming import commands, lifecycle, schemas
+from upstreaming.tests.helpers import (BACKUP, NOW, OWNER, SHA_A, SHA_B, SHA_C,
                                                   contribution)
 
 
