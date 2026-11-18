@@ -42,7 +42,8 @@ def contract_for(record: dict, contracts: dict[str, dict]) -> dict:
     c = contracts.get(record.get("target_contract_id") or "") or {}
     data = c.get("data") or {}
     return {"required_job_patterns": data.get("required_job_patterns") or ["riscv64"],
-            "expected_wheels": data.get("expected_wheels") or []}
+            "expected_wheels": data.get("expected_wheels") or [],
+            "require_wheel_artifact": data.get("require_wheel_artifact", True)}
 
 
 def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dict[str, dict],
@@ -81,7 +82,13 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
         repo_for_ci = cur["upstream"]["full_name"] if upstream_facing else fork
         snap = collect.ci_snapshot(api, repo_for_ci, head["head"])
         ctr = contract_for(cur, contracts)
-        verdict = collect.evaluate_snapshot(snap, **ctr)
+        verdict = collect.evaluate_snapshot(snap, required_job_patterns=ctr["required_job_patterns"],
+                                            expected_wheels=ctr["expected_wheels"])
+        if verdict.state == "passed" and ctr["require_wheel_artifact"] \
+                and not collect.wheel_names_from_artifacts(snap):
+            # Green jobs without a riscv64 wheel artifact are not wheel success.
+            verdict.state = "failed"
+            verdict.problems.append("no riscv64 wheel artifact was uploaded")
         entry["ci"] = {"repository": repo_for_ci, "state": verdict.state, "problems": verdict.problems[:10]}
         latest = ci_evidence.latest_attempts([r for r in snap.runs if r["head_sha"] == head["head"]])
         new_activity = {"passed": "idle", "failed": "fix_needed", "pending": "waiting_ci",

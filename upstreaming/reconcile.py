@@ -215,7 +215,8 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
          issues: list[dict] | None = None, comments: list[dict] | None = None,
          verified_prs: dict[str, dict] | None = None, acceptances: dict[int, int] | None = None,
          observe: bool = True, dispatcher_runs: list[dict] | None = None,
-         queue_works: dict[str, str] | None = None) -> TickOutput:
+         queue_works: dict[str, str] | None = None, users: dict | None = None,
+         provisioning: dict | None = None) -> TickOutput:
     out = TickOutput()
     iso = now.isoformat()
     contributions = dict(snap.contributions)
@@ -287,6 +288,7 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
                           projects=snap.projects, policy=policy,
                           inputs=controller.Inputs(now=now, issues=issues or [], comments=comments or [],
                                                    pressure=pressure, verified_prs=verified_prs or {},
+                                                   users=users or {}, provisioning=provisioning or {},
                                                    acceptances=acceptances or {}))
     out.staged.extend(res.staged)
     out.report["controller"] = res.report

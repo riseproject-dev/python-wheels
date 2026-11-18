@@ -159,7 +159,8 @@ def _reject(record: dict, reason: str) -> Outcome:
 
 
 def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, now: str,
-                  verified_pr: dict | None = None) -> Outcome:
+                  verified_pr: dict | None = None, provisioning: dict | None = None,
+                  backup_user: dict | None = None) -> Outcome:
     """Apply an already authenticated, not-yet-consumed command.
 
     Actor authority, replay and digest checks happen in ``intake.accept_command``
@@ -302,6 +303,41 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
             rec["handoff_approval"] = None
         rec["target_contract_id"] = a["proposal"]
         rec["activity"] = "idle"
+        _bump(rec)
+        bumped = True
+    elif v == "approve-scope":
+        if phase != "investigation":
+            return _reject(record, f"approve-scope needs phase investigation, not {phase}")
+        if rec.get("active_work"):
+            return _reject(record, "the investigation is still running")
+        if not rec.get("dossier_evidence_id"):
+            return _reject(record, "no investigation dossier recorded yet")
+        if backup_user is None:
+            return _reject(record, f"backup owner {a['backup']!r} is not a known GitHub user")
+        if backup_user["id"] == actor["id"]:
+            return _reject(record, "the backup owner must be someone else")
+        rec["owners"] = dict(rec["owners"], primary=dict(actor), backup=dict(backup_user))
+        rec["admission_class"] = a["class"]
+        rec["scope_paths"] = [g for g in (a.get("paths") or "").split(",") if g] or None
+        rec["phase"] = "provisioning"
+        rec["activity"] = "waiting_human"
+        rec["pending_human_action"] = {"kind": "provision_fork", "requested_at": now,
+                                       "reminded_at": None, "escalated_at": None}
+        _bump(rec)
+        bumped = True
+    elif v == "provision":
+        if phase != "provisioning":
+            return _reject(record, f"provision needs phase provisioning, not {phase}")
+        if not provisioning or provisioning.get("error"):
+            return _reject(record, (provisioning or {}).get("error") or "fork not verified")
+        rec["fork"] = {"repository_id": provisioning["fork_id"], "name": provisioning["fork"],
+                       "head_ref": DEV_REF, "head_sha": provisioning["head_sha"], "pr_number": None}
+        rec["upstream"] = dict(rec["upstream"], repository_id=provisioning["upstream_id"],
+                               base_ref=provisioning["base_ref"], base_sha=provisioning["base_sha"])
+        rec["phase"] = "development"
+        rec["activity"] = "idle"
+        rec["pending_human_action"] = None
+        rec["last_ci_evidence_id"] = None
         _bump(rec)
         bumped = True
     elif v == "authorize-followup":

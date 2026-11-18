@@ -137,6 +137,51 @@ in this repository: nothing here is imported by, or calls into,
 workflows, and they do not use it. Upstreaming docs stay out of `docs/`,
 because a push touching `docs/**` deploys the website.
 
+## Onboarding a project (the whole loop)
+
+Every project goes through the same steps; numpy (#15, fork
+`riseproject-upstreaming/numpy`) is the reference run.
+
+1. **Request.** Add the `upstreaming-request` label to the project's
+   *Package build request* issue. The next controller tick creates the
+   contribution in `queued` and, unless paused, requests an investigation.
+2. **Investigation.** The dispatcher launches `upstreaming-investigator`.
+   Its dossier is recorded as evidence and the contribution waits in
+   `investigation` / `waiting_human` (`review_dossier`).
+3. **Approve the scope.** After reading the dossier:
+
+   ```text
+   /upstreaming approve-scope revision=N class=configuration_integration backup=<login>
+   ```
+
+   You become the primary owner, `<login>` the backup. Optional
+   `paths=".github/workflows/*,pyproject.toml"` narrows or widens the patch
+   surface (default `.github/workflows/*`). Phase becomes `provisioning`.
+4. **Provision the fork** (a human step: the App cannot fork projects it is
+   not installed on):
+
+   ```sh
+   upstreaming/provision_fork.sh OWNER/REPO [BASE_REF]
+   ```
+
+   It forks into `riseproject-upstreaming/REPO`, creates `riscv64` at the
+   upstream base, and keeps the fork's Actions token read-only. Then:
+
+   ```text
+   /upstreaming provision revision=N+1
+   ```
+
+   The controller verifies the fork (fork of the right upstream by ID, not
+   archived, `riscv64` exists), records it and the base SHA, and moves to
+   `development`.
+5. **Development.** The next tick requests a `development_patch`; the
+   `upstreaming-worker` proposes a series, and its trusted `publish` job
+   (environment `upstreaming-publish`: approve the deployment) rebuilds and
+   pushes it to `riscv64`. Fork CI then runs on `ubuntu-24.04-riscv`; the
+   controller records CI evidence for the exact head and asks for repairs
+   while it fails. Passing means every required riscv64 job executed
+   natively and a riscv64 wheel artifact was uploaded.
+
 ## Commands on a tracking issue
 
 Post a command as its own comment on the request issue. The issue says which
@@ -157,6 +202,8 @@ work that moved meanwhile:
 
 ```text
 /upstreaming resume revision=1 reason="quota back"
+/upstreaming approve-scope revision=2 class=configuration_integration backup=<login>
+/upstreaming provision revision=3
 /upstreaming approve-handoff revision=4 head=<clean head sha>
 ```
 

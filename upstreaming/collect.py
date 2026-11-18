@@ -147,6 +147,56 @@ def pull_request(api: Api, url: str) -> dict:
     }
 
 
+def user(api: Api, login: str) -> dict | None:
+    """{"id", "login"} for a GitHub user, or None if there is no such user."""
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login):
+        return None
+    try:
+        u = api.get(f"/users/{login}")
+    except CollectError as e:
+        if "HTTP 404" in str(e):
+            return None
+        raise
+    return {"id": u["id"], "login": u["login"]} if u.get("type") == "User" else None
+
+
+FORK_ORG = "riseproject-upstreaming"
+
+
+def verify_provisioning(api: Api, record: dict) -> dict:
+    """Read-only check that a human-provisioned fork is ready (plan 10.1).
+
+    The fork is ``riseproject-upstreaming/<upstream repo name>``. It must be a
+    fork of the recorded upstream (same repository ID), not archived, and have
+    a ``riscv64`` branch. The upstream base is the upstream default branch's
+    current head unless the record names a base ref. Returns the facts the
+    ``provision`` command records, or {"error": why}.
+    """
+    up_name = record["upstream"]["full_name"]
+    fork = f"{FORK_ORG}/{up_name.split('/', 1)[1]}"
+    try:
+        upstream = api.get(f"/repos/{up_name}")
+        f = api.get(f"/repos/{fork}")
+    except CollectError as e:
+        return {"error": f"cannot read {fork} or {up_name}: {e}"}
+    if record["upstream"].get("repository_id") not in (None, upstream["id"]):
+        return {"error": "upstream repository ID changed"}
+    parent = f.get("parent") or {}
+    if not f.get("fork") or parent.get("id") != upstream["id"]:
+        return {"error": f"{fork} is not a fork of {up_name}"}
+    if f.get("archived"):
+        return {"error": f"{fork} is archived"}
+    head = branch_head(api, fork, "riscv64")
+    if head is None:
+        return {"error": f"{fork} has no riscv64 branch"}
+    base_ref = record["upstream"].get("base_ref") or upstream["default_branch"]
+    base = branch_head(api, up_name, base_ref)
+    if base is None:
+        return {"error": f"{up_name} has no branch {base_ref}"}
+    return {"fork": fork, "fork_id": f["id"], "head_sha": head["head"], "upstream_id": upstream["id"],
+            "base_ref": base_ref, "base_sha": base["head"]}
+
+
 # --------------------------------------------------------------------------
 # Fork / branch state
 
@@ -240,11 +290,13 @@ def ci_snapshot(api: Api, full_name: str, head_sha: str, *, max_runs: int = 30) 
 
 def wheel_names_from_artifacts(snap: CiSnapshot) -> list[str]:
     """Upload-artifact names are not file names; wheel jobs in this ecosystem
-    conventionally name artifacts after the wheel or ``wheels-<tag>``. This
-    returns names ending in .whl; callers that need exact files download the
-    artifact in a sandbox (never in a credentialed job)."""
+    conventionally name artifacts after the wheel or ``wheels-<tag>``, or
+    ``<python>-<platform>-...``. This returns names ending in .whl and the
+    names of artifacts that mention riscv64; callers that need exact files
+    download the artifact in a sandbox (never in a credentialed job)."""
     return sorted({a["name"] for arts in snap.artifacts_by_run.values() for a in arts
-                   if a["name"].endswith(".whl") and not a["expired"]})
+                   if not a["expired"] and (a["name"].endswith(".whl") or "riscv64" in a["name"])
+                   and a.get("size", 1) > 0})
 
 
 def evaluate_snapshot(snap: CiSnapshot, *, required_job_patterns: list[str], expected_wheels: list[str],

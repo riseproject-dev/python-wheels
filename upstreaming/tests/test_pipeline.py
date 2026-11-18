@@ -42,6 +42,10 @@ class FakeApi:
         raise AssertionError(path)
 
     def paginate(self, path, key=None, max_pages=10):
+        if "/artifacts" in path:
+            rid = int(path.split("/runs/")[1].split("/")[0])
+            return [{"id": rid * 10, "name": "cp312-manylinux_riscv64-", "size_in_bytes": 10, "expired": False}] \
+                if rid in self.jobs else []
         if "/actions/runs?" in path:
             sha = path.split("head_sha=")[1].split("&")[0]
             return [r for r in self.runs.get("all", []) if r["head_sha"] == sha]
