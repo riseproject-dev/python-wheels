@@ -47,6 +47,82 @@ class TickOutput:
 
 RETRY_BACKOFF_MINUTES = (15, 60, 240)
 
+# A dispatcher launch that has not shown up as a run by then is launched again.
+DISPATCH_LAUNCH_GRACE_MINUTES = 15
+DISPATCHER_WORKFLOW = ".github/workflows/upstreaming-dispatcher.lock.yml"
+
+
+def dispatch_recovery(contributions: dict[str, dict], *, runs: list[dict] | None,
+                      queue_works: dict[str, str] | None, now: datetime, policy: dict) -> tuple[list[dict], list[tuple[str, dict]], list[dict]]:
+    """Requested tasks whose dispatch never reached the queue (plan 15.3).
+
+    ``runs`` are recent dispatcher workflow runs (GitHub API objects);
+    ``queue_works`` maps a Work's ``graph_id`` to its queue state, from the
+    pinned gh-aw CLI's validating replay ({} when the queue does not exist
+    yet). Either being None means "unknown": nothing is decided this tick.
+
+    For each ``active_work`` (oldest first) whose Work is absent from the
+    queue, or admitted but still unclaimed:
+
+    * a dispatcher run created after the request is still queued/running: wait;
+    * no dispatcher run after the request, past a short grace: launch again
+      (the launch itself was lost);
+    * otherwise every such run finished without its Work being claimed. If
+      fewer than ``1 + retries.infrastructure_per_head_failure`` runs did,
+      launch the dispatcher again (it replays the same committed request, so
+      the queue sees the identical Work); else give up and wait for a human.
+
+    Returns (relaunch requests, staged records, report). No model is involved
+    in deciding; a relaunch is an ordinary dispatcher run.
+    """
+    from datetime import timedelta
+    from . import work
+    relaunch: list[dict] = []
+    staged: list[tuple[str, dict]] = []
+    report: list[dict] = []
+    if runs is None or queue_works is None:
+        return relaunch, staged, report
+    limit = 1 + ((policy.get("retries") or {}).get("infrastructure_per_head_failure", 2))
+    iso = now.isoformat()
+    pending = sorted(((k, c) for k, c in contributions.items() if c.get("active_work")),
+                     key=lambda kc: kc[1]["active_work"]["requested_at"])
+    for key, c in pending:
+        aw = c["active_work"]
+        state = queue_works.get(work.graph_id(aw["dedupe_key"]))
+        if state not in (None, "available"):
+            continue      # claimed, running or finished: the worker outcome or the deadline decides
+        requested = datetime.fromisoformat(aw["requested_at"])
+        after = [r for r in runs if datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) >= requested]
+        entry = {"contribution": c["contribution_id"], "task": aw["task"], "queue_state": state,
+                 "dispatcher_runs": [r["id"] for r in after]}
+        if any(r.get("status") != "completed" for r in after):
+            report.append(entry | {"decision": "dispatcher running"})
+            continue
+        latest = max(after, key=lambda r: r["created_at"], default=None)
+        if latest is not None and str(latest["id"]) != str(aw.get("dispatched_run_id")):
+            c = dict(c, active_work=dict(aw, dispatched_run_id=str(latest["id"])))
+            contributions[key] = c
+            staged.append(("contributions", c))
+        if not after:
+            if now - requested < timedelta(minutes=DISPATCH_LAUNCH_GRACE_MINUTES):
+                report.append(entry | {"decision": "waiting for the dispatcher to start"})
+                continue
+            relaunch.append({"type": "relaunch_dispatcher", "contribution_id": c["contribution_id"]})
+            report.append(entry | {"decision": "relaunch: no dispatcher run"})
+            continue
+        # Every finished dispatcher run since the request left the Work unclaimed.
+        if len(after) < limit:
+            relaunch.append({"type": "relaunch_dispatcher", "contribution_id": c["contribution_id"]})
+            report.append(entry | {"decision": f"relaunch: dispatch attempt {len(after) + 1} of {limit}"})
+            continue
+        new = dict(c, active_work=None, activity="waiting_human", updated_at=iso,
+                   pending_human_action={"kind": "dispatch_failed", "requested_at": iso,
+                                         "reminded_at": None, "escalated_at": None})
+        contributions[key] = new
+        staged.append(("contributions", new))
+        report.append(entry | {"decision": "dispatch failed; waiting for a human"})
+    return relaunch[: max(1, policy["concurrency"]["coding_workers"])], staged, report
+
 
 def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None = None,
                       worker_run_id: str | None = None) -> tuple[dict, list[tuple[str, dict]]]:
@@ -138,7 +214,8 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
          publications: list[dict], pressure: capacity.Pressure,
          issues: list[dict] | None = None, comments: list[dict] | None = None,
          verified_prs: dict[str, dict] | None = None, acceptances: dict[int, int] | None = None,
-         observe: bool = True) -> TickOutput:
+         observe: bool = True, dispatcher_runs: list[dict] | None = None,
+         queue_works: dict[str, str] | None = None) -> TickOutput:
     out = TickOutput()
     iso = now.isoformat()
     contributions = dict(snap.contributions)
@@ -186,6 +263,14 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
                               "requested_at": aw["requested_at"]})
     out.report["timed_out_work"] = timed_out
 
+    # 1c. Requested tasks whose dispatch never reached the queue: relaunch the
+    # dispatcher (bounded), then wait for a human.
+    relaunch, staged, rep = dispatch_recovery(contributions, runs=dispatcher_runs, queue_works=queue_works,
+                                              now=now, policy=policy)
+    out.staged.extend(staged)
+    out.report["dispatch_recovery"] = rep
+    out.report["dispatch_relaunch"] = relaunch
+
     # 2. Live branch and CI observation.
     if observe:
         contracts = {e["evidence_id"]: e for e in snap.evidence.values() if e.get("kind") == "target_contract"}
@@ -210,7 +295,8 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
     retries = []
     for c in contributions.values():
         pp = c.get("pending_publication")
-        if pp and not pp.get("exhausted") and not c.get("paused") and c["phase"] in lifecycle.WRITE_PHASES \
+        if pp and not pp.get("exhausted") and not c.get("paused") \
+                and c["phase"] in lifecycle.WRITE_PHASES | {"investigation"} \
                 and datetime.fromisoformat(pp["next_attempt_at"]) <= now:
             retries.append({"type": "retry_publication", "contribution_id": c["contribution_id"],
                             "worker_run_id": pp["worker_run_id"], "attempt": pp["attempts"] + 1})

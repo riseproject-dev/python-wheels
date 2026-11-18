@@ -24,14 +24,17 @@ COMMENT_ACTIONS = frozenset({"created", "edited"})
 
 _REPO_URL = re.compile(r"^https://github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9_.-]{1,100}?)(?:\.git)?/?$")
 _DIST = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
-_BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,255}$")
 
-# Headings produced by .github/ISSUE_TEMPLATE/upstreaming-request.yml.
+# Headings produced by .github/ISSUE_TEMPLATE/package-request.yml (the
+# "Package build request" form). Upstreaming uses the same issues that track
+# a package's riscv64 work; an issue enters intake only when it also carries
+# the upstreaming-request label.
 FIELDS = {
-    "Upstream repository": "upstream",
-    "PyPI distributions": "distributions",
-    "Upstream target branch": "target_branch",
-    "Additional notes": "notes",
+    "Package name (on PyPI)": "distributions",
+    "Source repository": "upstream",
+    "Version(s) requested": "versions",
+    "Why is this needed?": "why",
+    "Additional context": "notes",
 }
 
 
@@ -133,13 +136,14 @@ def parse_request(issue: dict, policy: dict) -> Request:
         raise IntakeError("at least one PyPI distribution is required")
     if len(dists) > policy["intake"]["max_distributions"]:
         raise IntakeError("too many distributions")
-    branch = form.get("target_branch", "").strip() or None
-    if branch is not None and (not _BRANCH.match(branch) or ".." in branch):
-        raise IntakeError("invalid target branch")
+    # The package form has no target-branch field: investigation determines
+    # the upstream contribution branch.
+    branch = None
     return Request(
         issue_id=issue["id"], issue_number=issue["number"], actor_id=issue["user"]["id"],
         upstream=upstream, distributions=tuple(dists), target_branch=branch,
-        notes=form.get("notes", ""), digest=sha256_text(body),
+        notes="\n\n".join(x for x in (form.get("why", ""), form.get("notes", "")) if x),
+        digest=sha256_text(body),
     )
 
 

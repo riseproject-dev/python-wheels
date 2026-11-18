@@ -85,9 +85,12 @@ The fork push is a separate pipeline operation with its own receipt.
 
 The repository also gets:
 
-- `.github/ISSUE_TEMPLATE/upstreaming-request.yml`, the intake form (7.1). It
-  needs an `upstreaming-request` label, which an authorized person has to
-  create.
+- Intake (7.1) uses the existing **Package build request** issues
+  (`.github/ISSUE_TEMPLATE/package-request.yml`), which already track each
+  package's riscv64 work. Add the `upstreaming-request` label to such an
+  issue to start upstreaming it. The controller reads its *Source
+  repository* and *Package name (on PyPI)* fields; *Why is this needed?* and
+  *Additional context* become notes for the investigation.
 - `.github/workflows/upstreaming-validate.yml`, which runs the tests, state
   validation and the state-only trigger audit on PRs and pushes.
 - `.github/workflows/upstreaming-controller.yml`: `observe` (read-only
@@ -97,10 +100,31 @@ The repository also gets:
 - `.github/workflows/upstreaming-image.yml`: rebuilds and publishes the
   reproduction image weekly, on changes to `upstreaming/image/`, and on demand.
 - `.github/workflows/upstreaming-publish-retry.yml`: publish-only retry of
-  one finished worker run (no agent), launched by `reconcile`.
-- `.github/workflows/upstreaming-worker.md` / `.lock.yml` and
-  `upstreaming-dispatcher.md` / `.lock.yml`: the gh-aw workflows, compiled
-  with gh-aw v1.2.2 (`upstreaming/check_gh_aw.sh` verifies the locks).
+  one finished worker or investigator run (no agent), launched by `reconcile`.
+- The gh-aw workflows, compiled with gh-aw v1.2.2
+  (`upstreaming/check_gh_aw.sh` verifies the locks). Two worker profiles
+  share the `upstreaming` pool; `work.profile_for` routes each task:
+  - `upstreaming-investigator.md` / `.lock.yml`: investigations
+    (`anthropic/claude-sonnet-5-5`). Read and report only; its trusted
+    `record` job checks the verified Result and hands the dossier to the
+    controller. No fork token, no environment.
+  - `upstreaming-worker.md` / `.lock.yml`: development patch, repair and
+    upstream revision (`anthropic/claude-opus-5-5`), with the trusted
+    `publish` job.
+  - `upstreaming-dispatcher.md` / `.lock.yml`
+    (`anthropic/claude-haiku-5-5`): stages the task the controller already
+    committed in `active_work` (`python -m upstreaming plan`) and launches
+    one worker. The model only explains the plan.
+
+  A dispatch that never reaches the queue (the dispatcher failed, was
+  skipped, or never started) is detected by `reconcile`: it reads the
+  dispatcher's runs and the queue (gh-aw `work-queue replay --json`) and,
+  while the task's Work is absent or unclaimed, launches the dispatcher
+  again, up to `1 + retries.infrastructure_per_head_failure` dispatcher
+  runs. Then the contribution waits for a human (`dispatch_failed`). Each
+  relaunch replays the same committed request, so the queue sees identical
+  Work. If the runs or the queue cannot be read, nothing is decided that
+  tick.
   `.github/workflows/aw.json` (queue settings: one `upstreaming` pool,
   concurrency 1), `.github/workflows/shared/work-queue-staged-plan.md`
   (gh-aw v1.2.2's shared dispatcher contract, copied verbatim),

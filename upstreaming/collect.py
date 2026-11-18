@@ -112,6 +112,12 @@ def intake_issues(api: Api, max_pages: int = 3) -> list[dict]:
     return [i for i in items if "pull_request" not in i]
 
 
+def dispatcher_runs(api: Api, workflow_file: str = "upstreaming-dispatcher.lock.yml") -> list[dict]:
+    """Recent runs of the dispatcher workflow (newest first)."""
+    return api.paginate(f"/repos/{CONTROL_REPO}/actions/workflows/{workflow_file}/runs?per_page=30",
+                        key="workflow_runs", max_pages=1)
+
+
 def command_comments(api: Api, issue_numbers: Iterable[int], since: str | None) -> list[dict]:
     """Comments on tracking issues that look like commands, for controller.Inputs.comments."""
     from .commands import looks_like_command

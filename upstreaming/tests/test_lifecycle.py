@@ -194,3 +194,18 @@ class TestMergeAndRelease(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStopEndsRequestedWork(unittest.TestCase):
+    def test_stop_commands_clear_active_work(self):
+        from upstreaming import commands as C
+        from upstreaming.tests.helpers import NOW, OWNER, contribution
+        rec = contribution(phase="investigation", activity="agent_running", revision=1)
+        rec["active_work"] = {"dedupe_key": "k", "task": "investigation", "revision": 1,
+                              "requested_at": NOW, "deadline_at": NOW, "dispatched_run_id": None}
+        for body in ("/upstreaming pause", "/upstreaming abandon reason=x", "/upstreaming park reason=x",
+                     "/upstreaming block reason=x"):
+            out = lifecycle.apply_command(rec, C.parse(body), command_id="c", actor=dict(OWNER), now=NOW)
+            self.assertTrue(out.accepted, body)
+            self.assertIsNone(out.record["active_work"], body)
+            self.assertNotEqual(out.record["activity"], "agent_running", body)

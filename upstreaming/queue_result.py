@@ -129,6 +129,20 @@ def replay(gh_aw: str, repo: str, timeout: int = 600) -> dict:
     return json.loads(p.stdout)
 
 
+def queue_work_states(gh_aw: str, repo: str, timeout: int = 600) -> dict[str, str]:
+    """``graph_id -> state`` for every Work in the live queue, from the same
+    validating replay. A queue that does not exist yet is empty. Any other
+    failure raises OSError: the caller must treat the queue as unknown."""
+    p = subprocess.run([gh_aw, "work-queue", "--repo", repo, "replay", "--json"],
+                       capture_output=True, text=True, timeout=timeout)
+    if p.returncode != 0:
+        if "queue_missing" in p.stderr:
+            return {}
+        raise OSError(f"gh aw work-queue replay failed: {p.stderr.strip()[-300:]}")
+    works = (json.loads(p.stdout).get("works") or {}).values()
+    return {w["graph_id"]: w.get("state") or "unknown" for w in works if w.get("graph_id")}
+
+
 def _write_status(out, status: str, failure_class: str, reason: str) -> None:
     from pathlib import Path
     Path(out).mkdir(parents=True, exist_ok=True)

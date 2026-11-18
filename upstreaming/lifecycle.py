@@ -312,6 +312,15 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
     else:  # pragma: no cover - grammar and this table must agree
         raise TransitionError(f"unhandled verb {v}")
 
+    # Stopping a contribution or moving it to a new revision ends any
+    # requested task: a late worker outcome is then ignored as stale, and
+    # dispatch recovery must not launch it again.
+    if rec.get("active_work") and (rec["paused"] or rec["phase"] in TERMINAL | {"parked"}
+                                   or rec["revision"] != record["revision"] or rec.get("blocked_reason")):
+        rec["active_work"] = None
+        if rec["activity"] == "agent_running":
+            rec["activity"] = "idle"
+
     if rec != record or v == "authorize-followup":
         schemas.validate("contribution", rec)
     kind = f"command:{v}"

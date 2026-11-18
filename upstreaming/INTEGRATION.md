@@ -46,7 +46,8 @@ unverified needs explicit authorization before anyone tests it remotely.
   `linux-arm64`, SHA-256 matches the release `checksums.txt`
   (`a1dd217c...d11fe3`), kept in `.git/pw-scratch/upstreaming/gh-aw`.
   `upstreaming/check_gh_aw.sh <binary>` passes:
-  - `upstreaming-worker.md` and `upstreaming-dispatcher.md` compile under
+  - `upstreaming-worker.md`, `upstreaming-investigator.md` and
+    `upstreaming-dispatcher.md` compile under
     strict mode and the committed locks are byte-identical to the
     compiler's output.
   - In the worker lock: the agent job has read-only permissions; the only
@@ -70,8 +71,11 @@ unverified needs explicit authorization before anyone tests it remotely.
   `barrier: "verified"` and `result` only in `settleVerifiedDelivery`, which
   requires delivery evidence from `verified_receipts` for the dispatch's
   bound run, attempt 1.
-- **Engine.** Worker and dispatcher use `engine: pi` with
-  `model: anthropic/opus-5.5`; both compile, the lock validates
+- **Engine.** All three gh-aw workflows use `engine: pi` with a model ID
+  taken from the Anthropic endpoint's live catalog (run 44380728778 showed
+  that `anthropic/opus-5.5` is not in it): worker `anthropic/claude-opus-5-5`,
+  investigator `anthropic/claude-sonnet-5-5`, dispatcher
+  `anthropic/claude-haiku-5-5`. All compile, the locks validate
   `ANTHROPIC_API_KEY`, and threat detection also runs on Anthropic.
 - **Local end to end.** `tests/test_pipeline.py` runs controller selection,
   Work construction, a simulated agent series, Result resolution, artifact
@@ -97,8 +101,9 @@ Each item needs explicit authorization before it is tested remotely.
    not yet observed), (b) the `publish` job gate fires only on that Result,
    (c) the replay in `publish` already sees the Result written by the same
    run's `safe_outputs` job, (d) the `pre-agent-steps` checkout of `./fork`
-   works inside the gh-aw sandbox, (e) Pi with `anthropic/opus-5.5` resolves
-   (the compiler cannot check model availability offline). Needs: the
+   works inside the gh-aw sandbox, (e) Pi resolves each workflow's model
+   against the live catalog (the compiler cannot check model availability
+   offline). Needs: the
    `work-queue` branch bootstrapped by the first trusted submission, and the
    environments in [`SETUP.md`](SETUP.md). If any of (a)-(d) fails, report it as a
    blocker; do not switch routes.
@@ -140,7 +145,7 @@ Each item needs explicit authorization before it is tested remotely.
    hostile-Docker/host-network test from plan 13.2, and test the
    CPU/memory/disk/network limits enforced outside the guest. GHCR
    publication of the repro image needs separate authorization.
-10. **Label.** Create the `upstreaming-request` label.
+10. **Label.** The `upstreaming-request` label exists; add it to a Package build request issue to start intake.
 
 ## Section 21 coverage
 

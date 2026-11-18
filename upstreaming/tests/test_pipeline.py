@@ -239,3 +239,78 @@ class TestPublicationRetry(unittest.TestCase):
         ok = {"status": "published", "task": self.task, "worker_run_id": "4242", "publication_artifact_id": 5,
               "operation": None, "artifact": None}
         self.assertIsNone(self.final(self.tick(rec, [ok]))["pending_publication"])
+
+
+class TestDispatchRecovery(unittest.TestCase):
+    """A requested task whose dispatch never reached the queue (live run
+    44379808515: the dispatcher failed before submitting, and its rerun was
+    skipped) is dispatched again, then handed to a human."""
+
+    def setUp(self):
+        self.now = datetime(2026, 11, 18, 20, tzinfo=timezone.utc)
+        self.rec = contribution(phase="investigation", activity="agent_running", revision=1)
+        self.rec["active_work"] = {"dedupe_key": "example--proj/12@1:investigation", "task": "investigation",
+                                   "revision": 1, "requested_at": "2026-11-18T19:22:14+00:00",
+                                   "deadline_at": "2026-11-19T01:22:14+00:00", "dispatched_run_id": None}
+        self.gid = work.graph_id(self.rec["active_work"]["dedupe_key"])
+
+    def tick(self, runs, queue, rec=None, now=None):
+        snap = reconcile.Snapshot(contributions={"c": rec or self.rec}, operations={}, consumed={},
+                                  projects={}, evidence={})
+        return reconcile.tick(None, snap, policy=policy(read_only=False), now=now or self.now, publications=[],
+                              pressure=capacity.Pressure(ok=True), observe=False,
+                              dispatcher_runs=runs, queue_works=queue)
+
+    @staticmethod
+    def drun(i, conclusion="failure", status="completed", at="2026-11-18T19:22:19Z"):
+        return {"id": i, "status": status, "conclusion": conclusion, "created_at": at}
+
+    def final(self, t):
+        recs = [r for k, r in t.staged if k == "contributions"]
+        return recs[-1] if recs else self.rec
+
+    def test_failed_dispatch_is_relaunched_then_waits_for_human(self):
+        t = self.tick([self.drun(1)], {})
+        self.assertEqual(len(t.report["dispatch_relaunch"]), 1)
+        rec = self.final(t)
+        self.assertEqual(rec["active_work"]["dispatched_run_id"], "1")       # recorded, still requested
+        self.assertEqual(rec["activity"], "agent_running")
+        # Retry budget: 1 + retries.infrastructure_per_head_failure (2) dispatcher runs.
+        t = self.tick([self.drun(2, "success"), self.drun(1)], {}, rec=rec)
+        self.assertEqual(len(t.report["dispatch_relaunch"]), 1)
+        t = self.tick([self.drun(3), self.drun(2, "success"), self.drun(1)], {}, rec=self.final(t))
+        self.assertEqual(t.report["dispatch_relaunch"], [])
+        rec = self.final(t)
+        self.assertEqual((rec["activity"], rec["active_work"], rec["pending_human_action"]["kind"]),
+                         ("waiting_human", None, "dispatch_failed"))
+
+    def test_running_dispatcher_or_claimed_work_is_left_alone(self):
+        t = self.tick([self.drun(1, None, "in_progress")], {})
+        self.assertEqual(t.report["dispatch_relaunch"], [])
+        for state in ("claimed", "completed", "cancelled"):
+            t = self.tick([self.drun(1)], {self.gid: state})
+            self.assertEqual(t.report["dispatch_relaunch"], [], state)
+            self.assertEqual(t.report["dispatch_recovery"], [], state)
+
+    def test_lost_launch_after_grace_and_unknown_queue(self):
+        t = self.tick([], {}, now=datetime(2026, 11, 18, 19, 30, tzinfo=timezone.utc))
+        self.assertEqual(t.report["dispatch_relaunch"], [])                  # within the grace period
+        self.assertEqual(len(self.tick([], {}).report["dispatch_relaunch"]), 1)
+        # Runs from before the request do not count.
+        self.assertEqual(len(self.tick([self.drun(9, at="2026-11-18T18:00:00Z")], {}).report["dispatch_relaunch"]), 1)
+        # Queue or runs unknown (CLI/API failure): decide nothing.
+        self.assertEqual(self.tick(None, {}).report["dispatch_relaunch"], [])
+        self.assertEqual(self.tick([self.drun(1)], None).report["dispatch_relaunch"], [])
+
+    def test_plan_replays_committed_request_with_profile_per_task(self):
+        req = work.request_from_active(self.rec)
+        n = work.node(req, self.rec, control_repo_id="1", allowed_paths=["x"])
+        self.assertEqual((n["worker_profile"], n["graph_id"]), ("upstreaming-investigator", self.gid))
+        # Identical across replays (the queue admits an identical node once).
+        self.assertEqual(n, work.node(work.request_from_active(self.rec), self.rec, control_repo_id="1",
+                                      allowed_paths=["x"]))
+        dev = dict(self.rec, phase="development", active_work=dict(self.rec["active_work"], task="development_patch"))
+        self.assertEqual(work.node(work.request_from_active(dev), dev, control_repo_id="1",
+                                   allowed_paths=["x"])["worker_profile"], "upstreaming-worker")
+        self.assertIsNone(work.request_from_active(dict(self.rec, paused=True)))
+        self.assertIsNone(work.request_from_active(dict(self.rec, revision=2)))
