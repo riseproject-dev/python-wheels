@@ -19,7 +19,7 @@ authorization before it is turned on.
 | Path | Purpose | Plan |
 |---|---|---|
 | `schemas/*.schema.json` | Contribution, project, operation, command, event, evidence, agent proposal and policy schemas (v1) | 6.2 |
-| `policy.json` | Reviewed policy: proposed numeric defaults, command authority, `read_only: true` | 7, 16, 19 |
+| `policy.json` | Reviewed policy: proposed numeric defaults, command authority (`660779` = `@luhenry`; immutable user IDs, since logins can be renamed), `read_only: true` | 7, 16, 19 |
 | `commands.py` | Strict `/upstreaming` command grammar | 7.3 |
 | `intake.py` | Issue-form parsing, cheap event filter, admission, command acceptance/replay rules | 7.1-7.3 |
 | `lifecycle.py` | Phases, ordinary transitions, command effects, revision rule, publication check, write admission | 8 |

@@ -70,9 +70,10 @@ Each item needs explicit authorization before it is tested remotely.
    fork. Check runner-group/selected-repository settings and confirm that
    the fork's default `GITHUB_TOKEN` is read-only, with no OIDC and no
    inherited secrets.
-6. **Owners and policy.** Fill `policy.json` `command_authority.actor_ids`
-   with immutable GitHub user IDs. Name the primary/backup owner, submitter
-   and reviewer. Approve the proposed numeric defaults, or change them.
+6. **Owners and policy.** `command_authority.actor_ids` currently holds only
+   `660779` (`@luhenry`), as an interim setting. Name the primary/backup
+   owner, submitter and reviewer; a backup owner is required before write
+   admission. Approve the proposed numeric defaults, or change them.
 7. **Pilot contract.** Choose the pilot project (an existing `@luhenry`
    project), its frozen target rows, the dependency contract, the required
    job patterns, and either a safe rehearsal or an explicit release
