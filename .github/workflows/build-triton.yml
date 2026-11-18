@@ -101,16 +101,46 @@ jobs:
           # clones triton-lang/triton and Triton's own cmake clones googletest.
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          # release.sh docker-runs quay.io/pypa/manylinux_2_39_riscv64 itself when
-          # IN_DOCKER is unset, so nothing here needs to set up that container.
+          # Real riscv64 CI (run 44157994959, job 134304033843): the previous
+          # plain `./scripts/release.sh cp312-cp312 riscv64` invocation let
+          # release.sh's own docker-run wrap the build in a fresh container
+          # with no concurrency cap, and the "Building editable for triton"
+          # step was silently SIGKILLed (exit 137) after ~1h40m with no other
+          # error text - gotcha 421's signature (this fleet's riscv64 runners
+          # have ~15GB RAM and no usable swap, and release.sh's own docker-run
+          # forwards no MAX_JOBS/CMAKE_BUILD_PARALLEL_LEVEL into the container
+          # the way their own ci.yml sets on the host).
           #
-          # NB: if this OOMs, it's the same root cause as gotcha 421 (this
-          # fleet's riscv64 runners have ~15GB RAM and no usable swap) -
-          # release.sh's docker run does not forward MAX_JOBS/
-          # CMAKE_BUILD_PARALLEL_LEVEL into the container the way their own
-          # ci.yml sets them on the host, so a fix would need to cap
-          # concurrency inside the container rather than in this step's env.
-          ./scripts/release.sh cp312-cp312 riscv64
+          # release.sh already supports being invoked with IN_DOCKER pre-set
+          # (it then skips its own docker-run wrapping entirely and proceeds
+          # straight to the build), so this reproduces its exact documented
+          # riscv64 container invocation (same image, same volumes, same env
+          # vars - see the `if [ -z "${IN_DOCKER:-}" ]` branch in
+          # scripts/release.sh) with one addition: --cpuset-cpus, to restrict
+          # the affinity mask ninja/make read when picking their default -j,
+          # since nproc/hardware_concurrency() respect cpuset affinity but not
+          # a cgroup CPU quota (--cpus alone would not actually reduce the
+          # inferred build parallelism). Halving the visible cores (floor 2)
+          # is a cap, not a tune - the exact number matters far less than
+          # having one at all.
+          total_cpus="$(nproc)"
+          half_cpus="$(( total_cpus / 2 ))"
+          [ "${half_cpus}" -lt 2 ] && half_cpus=2
+          [ "${half_cpus}" -gt "${total_cpus}" ] && half_cpus="${total_cpus}"
+          docker run --rm -i --cpuset-cpus="0-$((half_cpus - 1))" \
+            -e IN_DOCKER=1 \
+            -e PY_TAG=cp312-cp312 \
+            -e TARGET_ARCH=riscv64 \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
+            -e HOME=/workspace \
+            -e GITHUB_TOKEN \
+            -v "$(pwd):/workspace/triton-riscv" \
+            -v /tmp/triton_riscv_docker_dnf_cache:/var/cache/dnf \
+            -v /tmp/triton_riscv_docker_pip_cache:/workspace/.cache/pip \
+            -w /workspace/triton-riscv \
+            quay.io/pypa/manylinux_2_39_riscv64:latest \
+            /bin/bash ./scripts/release.sh cp312-cp312 riscv64
           ls -la build/release/riscv64/cp312-cp312/
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
