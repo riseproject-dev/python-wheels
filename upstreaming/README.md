@@ -80,7 +80,7 @@ The fork push is a separate pipeline operation with its own receipt.
 | `fork_publish.py` | Trusted fork publisher: preflight, fresh rebuild of the patch series, validation, leased push, readback | 10.4, 15.3, 16.3 |
 | `reconcile.py` | One reconciliation tick: publications, live observation, controller | 9 |
 | `check_gh_aw.sh` | Locks match the pinned gh-aw v1.2.2 compiler; rejected-route fixtures still rejected | 22 |
-| `image/` | Runner-free `linux/riscv64` reproduction image definition and guarded launcher | 13 |
+| `image/` | Runner-free `linux/riscv64` reproduction image (latest runner `:prod`, host Docker daemon, rebuilt weekly by `upstreaming-image.yml`) and guarded launcher | 13 |
 | `tests/` | Executable acceptance tests mapped to plan section 21 | 21 |
 
 The repository also gets:
@@ -94,6 +94,8 @@ The repository also gets:
   report) and `reconcile` (state writer, active only when `read_only` is
   false). `workflow_dispatch` only; the schedule and issue triggers are
   commented out until the rollout stage is approved.
+- `.github/workflows/upstreaming-image.yml`: rebuilds and publishes the
+  reproduction image weekly, on changes to `upstreaming/image/`, and on demand.
 - `.github/workflows/upstreaming-publish-retry.yml`: publish-only retry of
   one finished worker run (no agent), launched by `reconcile`.
 - `.github/workflows/upstreaming-worker.md` / `.lock.yml` and

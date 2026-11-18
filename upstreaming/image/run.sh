@@ -7,7 +7,9 @@
 # ONLY on an approved, dedicated, disposable VM (plan 13.2): the Docker
 # socket gives the workload host-level control. Refuses to run unless
 # UPSTREAMING_DISPOSABLE_HOST=1 is set by that host's provisioning, and the
-# image is pinned by digest.
+# image is pinned by digest. Use the digest of a published
+# ghcr.io/riseproject-dev/python-wheels/upstreaming-repro build (rebuilt
+# weekly from the runner image's :prod, see .github/workflows/upstreaming-image.yml).
 #
 #   UPSTREAMING_DISPOSABLE_HOST=1 \
 #   upstreaming/image/run.sh IMAGE@sha256:... ./approved-repro.sh
@@ -40,10 +42,11 @@ mkdir -p "$out"
     echo "started=$(date -u +%FT%TZ)"
 } > "$out/provenance.txt"
 set +e
-docker run --rm --platform linux/riscv64 \
+docker run --rm --init --platform linux/riscv64 \
   --mount "type=bind,src=$work,dst=$work" \
   --mount "type=bind,src=$out,dst=$out" \
   --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+  --group-add "$(stat -c %g /var/run/docker.sock)" \
   --workdir "$work" -e REPRO_OUT="$out" \
   "$image" bash -lc "uname -m; python3 --version; docker version --format '{{.Server.Version}}'; bash $script"
 rc=$?

@@ -31,8 +31,13 @@ unverified needs explicit authorization before anyone tests it remotely.
   `ghcr.io/riseproject-dev/riscv-runner/runner/ubuntu-24.04:prod` is index
   `sha256:48874e63b5f9007cf0424488182ce2845d303a92a211c92fd459c29a0a0620ef`
   (linux/riscv64 manifest `sha256:9f35ce18...`). The entrypoint is
-  `docker-init -- riscv-runner-entrypoint.sh` and the user is `runner`. The
-  repro Dockerfiles pin this index. They have not been built.
+  `docker-init -- riscv-runner-entrypoint.sh` and the user is `runner`.
+  Per review, the repro Dockerfiles build from the moving `:prod` tag and
+  `.github/workflows/upstreaming-image.yml` rebuilds them weekly (and on
+  changes), recording the resolved base digest as an image label. The repro
+  image uses the host's Docker daemon through the mounted socket; the
+  runner image's dockerd, docker-proxy and docker-init are removed and
+  `docker run --init` reaps children. Not built yet.
 - `actionlint` and `shellcheck` pass on the hand-written workflows and
   scripts. (actionlint reports a few items in the gh-aw-generated locks,
   such as `concurrency.queue`, that newer Actions features use; the locks
