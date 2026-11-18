@@ -137,6 +137,12 @@ jobs:
           fi
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.artifact extract ../in/proposal.zip ../in
+          if [ "$(jq -r .task ../in/task.json)" = investigation ]; then
+            # Nothing to push: hand the dossier to the controller.
+            jq -n '{status:"investigation", failure_class:null, reason:null, stage:"result"}' > ../in/outcome.json
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.fork_publish preflight --record ../in/record.json --task ../in/task.json \
               --proposal ../in/proposal.json --out ../in/preflight.json
@@ -188,6 +194,8 @@ jobs:
             in/result.json
             in/preflight.json
             in/outcome.json
+            in/proposal.json
+            in/dossier.json
           if-no-files-found: ignore
           retention-days: 30
 timeout-minutes: 120

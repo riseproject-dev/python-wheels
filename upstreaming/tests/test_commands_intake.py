@@ -46,7 +46,8 @@ class TestCommandGrammar(unittest.TestCase):
             "    /upstreaming pause contribution=x/1 revision=1 reason=r",
             "please /upstreaming pause contribution=x/1 revision=1 reason=r",
             "/upstreaming pause contribution=x/1 revision=1 reason=r\n/upstreaming resume contribution=x/1 revision=1 reason=r",
-            "/upstreaming pause contribution=x/1 revision=1",
+            "/upstreaming resume reason=r",
+            "/upstreaming approve-handoff head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "/upstreaming pause contribution=x/1 revision=1 reason=r extra=1",
             "/upstreaming pause contribution=x/1 revision=1 reason=r version=2",
             "/upstreaming explode contribution=x/1",
@@ -58,6 +59,23 @@ class TestCommandGrammar(unittest.TestCase):
         for body in bad:
             with self.subTest(body=body), self.assertRaises(commands.CommandError):
                 commands.parse(body)
+
+
+class TestShortCommands(unittest.TestCase):
+    def test_stop_commands_need_no_ids(self):
+        for body in ("/upstreaming pause", "/upstreaming pause reason=\"test\"",
+                     "/upstreaming park reason=x", "/upstreaming block reason=x", "/upstreaming abandon reason=x"):
+            with self.subTest(body):
+                c = commands.parse(body)
+                self.assertIsNone(c.contribution)
+                self.assertIsNone(c.revision)
+
+    def test_work_changing_commands_still_need_revision(self):
+        self.assertEqual(commands.parse("/upstreaming resume revision=3 reason=r").revision, 3)
+        with self.assertRaises(commands.CommandError):
+            commands.parse("/upstreaming resume reason=r")
+        with self.assertRaises(commands.CommandError):
+            commands.parse("/upstreaming park")        # park still needs a reason
 
 
 class TestCommandAcceptance(unittest.TestCase):

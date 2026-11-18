@@ -45,16 +45,12 @@ GitHub: **Settings → Environments → New environment** in
 3. **Deployment branches and tags:** choose **Selected branches and tags**,
    **Add deployment branch or tag rule**, type `main`, ref type **Branch**.
    Do not add any other rule.
-4. **Environment secrets:** **Add environment secret**
-   - Name `RISEPROJECT_APP_PRIVATE_KEY`, value: the same private key (PEM,
-     including the `-----BEGIN` and `-----END` lines) as the
-     `RISEPROJECT_APP_PRIVATE_KEY` org secret.
-   An environment secret takes precedence over the org secret of the same
-   name for jobs in this environment. This keeps the pipeline working if the
-   org secret's repository access is later narrowed (step 6).
+4. **Environment secrets:** none. The `RISEPROJECT_APP_PRIVATE_KEY` org
+   secret is already available to `python-wheels`, and jobs in an
+   environment still see organization and repository secrets.
 5. **Environment variables:** none. `RISEPROJECT_APP_CLIENT_ID` is already an
    org variable visible to this repository (`Iv23libkhGSOLc70e3vl`).
-6. **Not now:** once both environments hold the key, remove
+6. **Not now:** if the key is ever moved into the environments, remove
    `python-wheels` from the org secret `RISEPROJECT_APP_PRIVATE_KEY`'s
    selected repositories (**Org settings → Secrets and variables → Actions →
    RISEPROJECT_APP_PRIVATE_KEY → Repository access**), **if** no other
@@ -82,8 +78,7 @@ by the task.
    - **Allow administrators to bypass:** untick.
 3. **Deployment branches and tags:** **Selected branches and tags**, one rule:
    `main`, type **Branch**.
-4. **Environment secrets:** `RISEPROJECT_APP_PRIVATE_KEY`, same value as
-   above.
+4. **Environment secrets:** none (same as above).
 5. **Environment variables:** none.
 
 The App's installation on `riseproject-dev` needs **Contents: write** and
@@ -120,11 +115,8 @@ From a checkout, with `gh` authenticated as a repository admin:
 gh api repos/riseproject-dev/python-wheels/environments --jq '.environments[] | {name, protection_rules, deployment_branch_policy}'
 gh api repos/riseproject-dev/python-wheels/environments/upstreaming-publish/deployment-branch-policies --jq '.branch_policies[] | {name, type}'
 gh api repos/riseproject-dev/python-wheels/environments/upstreaming-state/deployment-branch-policies --jq '.branch_policies[] | {name, type}'
-gh api repos/riseproject-dev/python-wheels/environments/upstreaming-publish/secrets --jq '.secrets[].name'
-gh api repos/riseproject-dev/python-wheels/environments/upstreaming-state/secrets --jq '.secrets[].name'
 ```
 
 Expected: both environments exist; each has exactly one branch policy
-`main` of type `branch`; each lists the secret `RISEPROJECT_APP_PRIVATE_KEY`;
-`upstreaming-publish` has a `required_reviewers` rule while the pilot is
-gated.
+`main` of type `branch`; `upstreaming-publish` has a `required_reviewers`
+rule while the pilot is gated.

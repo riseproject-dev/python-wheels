@@ -123,10 +123,16 @@ def cmd_observe(args) -> int:
                                     max_age_seconds=policy["capacity"]["max_age_seconds"])
     except Exception as e:  # unavailable data is "no expensive admission", not zero load
         pressure = capacity.Pressure(ok=False, reason=f"usage unavailable: {e}")
-    issues = collect.intake_issues(collect.Api()) if not args.offline else []
+    api = collect.Api()
+    issues = collect.intake_issues(api) if not args.offline else []
+    # Commands on tracked issues and on intake issues (a command can be posted
+    # on a request before its contribution is first persisted).
+    numbers = sorted({c["tracking_issue"]["number"] for c in contributions.values()}
+                     | {i["number"] for i in issues})
+    comments = collect.command_comments(api, numbers, None) if not args.offline else []
     res = controller.tick(contributions=contributions, operations=operations, consumed=consumed,
                           projects=projects, policy=dict(policy, read_only=True),
-                          inputs=controller.Inputs(now=now, issues=issues, pressure=pressure))
+                          inputs=controller.Inputs(now=now, issues=issues, comments=comments, pressure=pressure))
     res.report["would_stage"] = [state.record_path(k, r) if k != "events" else f"events/{r['contribution_id']}"
                                  for k, r in res.staged]
     res.report["requested_effects"] = res.requested_effects
@@ -201,9 +207,17 @@ def cmd_reconcile(args) -> int:
         o["worker_run_id"] = w.read_text().strip() if w.exists() else p.parent.name
         aid = p.parent / "artifact-id"
         o["publication_artifact_id"] = int(aid.read_text().strip()) if aid.exists() else None
+        for name, key in (("dossier.json", "dossier"), ("proposal.json", "proposal"), ("result.json", "artifact")):
+            f = p.parent / name
+            if f.exists() and key not in o:
+                try:
+                    o[key] = json.loads(f.read_text())
+                except json.JSONDecodeError:
+                    pass
         pubs.append(o)
     issues = [] if args.offline else collect.intake_issues(api)
-    tracking = [c["tracking_issue"]["number"] for c in snap.contributions.values()]
+    tracking = sorted({c["tracking_issue"]["number"] for c in snap.contributions.values()}
+                      | {i["number"] for i in issues})
     comments = [] if args.offline else collect.command_comments(api, tracking, args.since)
     out = reconcile.tick(api, snap, policy=policy, now=datetime.now(timezone.utc), publications=pubs,
                          pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline)

@@ -57,6 +57,8 @@ def _actionable(c: dict) -> str | None:
         return None
     if c.get("pending_publication"):
         return None   # a delivered proposal is still being published; never re-run the agent for it
+    if c.get("active_work"):
+        return None   # a task was already requested for this contribution; wait for its outcome
     if c.get("active_operation_id") or c["activity"] in ("agent_running", "waiting_human",
                                                           "waiting_ci", "waiting_capacity"):
         return None
@@ -70,6 +72,10 @@ def _actionable(c: dict) -> str | None:
         return "development_patch"
     return None
 
+
+# A requested task that produced no outcome by then is given up on: the
+# contribution waits for a human instead of being retried blindly.
+WORK_DEADLINE_HOURS = 6
 
 PRIORITY = {"upstream_revision": 0, "development_repair": 1, "development_patch": 2,
             "investigation": 3}
@@ -86,38 +92,7 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
                 "read_only": policy["read_only"], "commands": [], "intake": [],
                 "operations": [], "selected": [], "deferred": [], "alerts": []})
 
-    # 1-2. Authorized commands, urgent stops first.
-    decisions = []
-    for item in inputs.comments:
-        d = intake.accept_command(comment=item["comment"], issue_number=item["issue_number"],
-                                  event_body=item.get("event_body"), policy=policy,
-                                  consumed=consumed, now=now)
-        decisions.append(d)
-    decisions.sort(key=lambda d: 0 if d.command and d.command.verb in URGENT else 1)
-    for d in decisions:
-        if d.receipt["comment_id"] in consumed and not d.accepted:
-            rep["commands"].append({"comment": d.receipt["comment_id"], "result": d.reason})
-            continue
-        receipt = dict(d.receipt)
-        if d.accepted:
-            receipt = _apply(d.command, receipt, by_id, operations, inputs, res, now)
-        consumed[receipt["comment_id"]] = receipt
-        res.stage("commands", receipt)
-        rep["commands"].append({"comment": receipt["comment_id"], "result": receipt["result"],
-                                "reason": receipt.get("reason")})
-
-    # 3. Uncertain operations before any replacement.
-    blocked_by_op: set[str] = set()
-    for op in operations.values():
-        if op["status"] in recovery.OPEN:
-            blocked_by_op.add(op["contribution_id"])
-            due = recovery.next_discovery_at(op, policy)
-            rep["operations"].append({"id": op["operation_id"], "status": op["status"],
-                                      "next_discovery": due.isoformat() if due else None})
-            for a in recovery.alerts(op, inputs.now):
-                rep["alerts"].append({"operation": op["operation_id"], "alert": a})
-
-    # 4. Intake.
+    # 1. Intake first, so a command posted on a brand-new request applies to it.
     parked = [p["upstream"]["full_name"] for p in projects.values() if p.get("parked")]
     active = {c["upstream"]["full_name"]: c["contribution_id"] for c in by_id.values()
               if c["phase"] not in lifecycle.TERMINAL}
@@ -161,6 +136,37 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         projects[project_id] = proj
         res.stage("projects", proj)
 
+    # 2. Authorized commands, urgent stops first, all before any work is selected.
+    decisions = []
+    for item in inputs.comments:
+        d = intake.accept_command(comment=item["comment"], issue_number=item["issue_number"],
+                                  event_body=item.get("event_body"), policy=policy,
+                                  consumed=consumed, now=now)
+        decisions.append(d)
+    decisions.sort(key=lambda d: 0 if d.command and d.command.verb in URGENT else 1)
+    for d in decisions:
+        if d.receipt["comment_id"] in consumed and not d.accepted:
+            rep["commands"].append({"comment": d.receipt["comment_id"], "result": d.reason})
+            continue
+        receipt = dict(d.receipt)
+        if d.accepted:
+            receipt = _apply(d.command, receipt, by_id, operations, inputs, res, now)
+        consumed[receipt["comment_id"]] = receipt
+        res.stage("commands", receipt)
+        rep["commands"].append({"comment": receipt["comment_id"], "result": receipt["result"],
+                                "reason": receipt.get("reason")})
+
+    # 3. Uncertain operations before any replacement.
+    blocked_by_op: set[str] = set()
+    for op in operations.values():
+        if op["status"] in recovery.OPEN:
+            blocked_by_op.add(op["contribution_id"])
+            due = recovery.next_discovery_at(op, policy)
+            rep["operations"].append({"id": op["operation_id"], "status": op["status"],
+                                      "next_discovery": due.isoformat() if due else None})
+            for a in recovery.alerts(op, inputs.now):
+                rep["alerts"].append({"operation": op["operation_id"], "alert": a})
+
     # 8-10. Select bounded work, honouring capacity and one worker.
     candidates = []
     for c in by_id.values():
@@ -178,7 +184,7 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         candidates.append((PRIORITY[kind], c["updated_at"], kind, c))
     candidates.sort(key=lambda x: (x[0], x[1]))
     slots = policy["concurrency"]["coding_workers"] - sum(
-        1 for c in by_id.values() if c["activity"] == "agent_running")
+        1 for c in by_id.values() if c["activity"] == "agent_running" or c.get("active_work"))
     pressure = inputs.pressure
     for _p, _t, kind, c in candidates:
         if slots <= 0:
@@ -205,6 +211,18 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         }
         res.requested_effects.append(work)
         rep["selected"].append({"contribution": c["contribution_id"], "task": kind})
+        # Record the request in the same state commit, so the next tick does
+        # not request it again. Cleared by the task's outcome or by timeout.
+        from datetime import timedelta
+        claimed = dict(c, activity="agent_running", updated_at=now, active_work={
+            "dedupe_key": work["dedupe_key"], "task": kind, "revision": c["revision"],
+            "requested_at": now,
+            "deadline_at": (inputs.now + timedelta(hours=WORK_DEADLINE_HOURS)).isoformat(),
+            "dispatched_run_id": None})
+        if kind == "investigation" and claimed["phase"] == "queued":
+            claimed["phase"] = "investigation"
+        by_id[c["contribution_id"]] = claimed
+        res.stage("contributions", claimed)
 
     if policy["read_only"]:
         rep["note"] = "read-only: requested effects are reported, not executed"
@@ -226,9 +244,15 @@ def _apply(cmd: Command, receipt: dict, by_id: dict, operations: dict, inputs: I
         operations[op["operation_id"]] = new
         res.stage("operations", new)
         return receipt
-    rec = by_id.get(cmd.contribution or "")
+    # The contribution is the one tracked by the issue the comment was posted on.
+    rec = intake.contribution_for_issue(by_id.values(), receipt["issue_number"])
     if rec is None:
-        return dict(receipt, result="rejected", reason="unknown contribution")
+        return dict(receipt, result="rejected", reason="this issue tracks no contribution")
+    if cmd.contribution is not None and cmd.contribution != rec["contribution_id"]:
+        return dict(receipt, result="rejected",
+                    reason=f"command names {cmd.contribution}, but this issue tracks {rec['contribution_id']}")
+    receipt = dict(receipt, contribution_id=rec["contribution_id"],
+                   revision=cmd.revision if cmd.revision is not None else rec["revision"])
     verified = inputs.verified_prs.get(cmd.args.get("url", "")) if cmd.verb == "register-upstream-pr" else None
     try:
         out = lifecycle.apply_command(rec, cmd, command_id=receipt["command_id"], actor=actor,

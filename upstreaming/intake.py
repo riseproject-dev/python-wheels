@@ -230,6 +230,15 @@ def accept_command(*, comment: dict, issue_number: int, event_body: str | None,
     return CommandDecision(True, None, cmd, receipt("accepted", None, cmd))
 
 
+def contribution_for_issue(contributions, issue_number: int):
+    """The contribution a tracking issue's commands apply to: the newest
+    non-terminal one tracked by that issue, else the newest one."""
+    from .lifecycle import TERMINAL
+    tracked = [c for c in contributions if c["tracking_issue"]["number"] == issue_number]
+    live = [c for c in tracked if c["phase"] not in TERMINAL]
+    return max(live or tracked, key=lambda c: c["created_at"]) if tracked else None
+
+
 # --------------------------------------------------------------------------
 # Fairness
 

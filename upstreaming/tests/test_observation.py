@@ -261,6 +261,70 @@ class TestTick(unittest.TestCase):
                               inputs=controller.Inputs(now=T, pressure=capacity.Pressure(ok=True)))
         self.assertEqual(res.requested_effects, [])
 
+    def test_dispatch_once_per_task_then_timeout(self):
+        from datetime import timedelta
+        from upstreaming import reconcile
+        rec = contribution(phase="queued", activity="idle")
+        contribs = {"c": rec}
+        dispatched = []
+        for i in range(4):
+            snap = reconcile.Snapshot(contributions=contribs, operations={}, consumed={}, projects={}, evidence={})
+            out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T + timedelta(minutes=15 * i),
+                                 publications=[], pressure=capacity.Pressure(ok=True), observe=False)
+            dispatched += [e["task"] for e in out.report["requested_effects"]]
+            for k, r in out.staged:
+                if k == "contributions":
+                    contribs = {"c": r}
+        self.assertEqual(dispatched, ["investigation"])
+        self.assertEqual(contribs["c"]["phase"], "investigation")
+        self.assertEqual(contribs["c"]["activity"], "agent_running")
+        # No outcome for longer than the deadline: wait for a human, never re-dispatch.
+        snap = reconcile.Snapshot(contributions=contribs, operations={}, consumed={}, projects={}, evidence={})
+        out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T + timedelta(hours=7),
+                             publications=[], pressure=capacity.Pressure(ok=True), observe=False)
+        self.assertEqual(out.report["requested_effects"], [])
+        self.assertEqual(len(out.report["timed_out_work"]), 1)
+        final = [r for k, r in out.staged if k == "contributions"][-1]
+        self.assertEqual((final["activity"], final["active_work"]), ("waiting_human", None))
+
+    def test_investigation_outcome_records_dossier_and_waits(self):
+        from upstreaming import reconcile
+        rec = contribution(phase="investigation", activity="agent_running")
+        rec["active_work"] = {"dedupe_key": "k", "task": "investigation", "revision": 0,
+                              "requested_at": NOW, "deadline_at": NOW}
+        pub = {"status": "investigation", "task": {"contribution_id": rec["contribution_id"], "revision": 0},
+               "worker_run_id": "7", "publication_artifact_id": 3,
+               "dossier": {"build_backend": "meson-python"}, "proposal": {"diagnosis": "numpy builds with meson"},
+               "artifact": {"digest": "sha256:" + "0" * 64}}
+        snap = reconcile.Snapshot(contributions={"c": rec}, operations={}, consumed={}, projects={}, evidence={})
+        out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T, publications=[pub],
+                             pressure=capacity.Pressure(ok=True), observe=False)
+        ev = [r for k, r in out.staged if k == "evidence"]
+        self.assertEqual(ev[0]["kind"], "dossier")
+        self.assertEqual(ev[0]["data"], {"build_backend": "meson-python"})
+        final = [r for k, r in out.staged if k == "contributions"][-1]
+        self.assertEqual(final["dossier_evidence_id"], ev[0]["evidence_id"])
+        self.assertEqual((final["activity"], final["active_work"]), ("waiting_human", None))
+        self.assertEqual(final["pending_human_action"]["kind"], "review_dossier")
+        self.assertEqual(out.report["requested_effects"], [])
+
+    def test_command_resolves_contribution_from_issue(self):
+        rec = contribution(activity="waiting_ci")
+        res = controller.tick(contributions={"a": rec}, operations={}, consumed={}, projects={}, policy=policy(),
+                              inputs=controller.Inputs(now=T, comments=[
+                                  {"issue_number": 12, "comment": comment('/upstreaming pause reason="test"', cid=7)},
+                                  {"issue_number": 999, "comment": comment("/upstreaming pause", cid=8)},
+                                  {"issue_number": 12, "comment": comment(
+                                      "/upstreaming pause contribution=other--x/1", cid=9)}]))
+        by = {c["comment"]: c for c in res.report["commands"]}
+        self.assertEqual(by[7]["result"], "accepted")
+        self.assertEqual(by[8]["result"], "rejected")
+        self.assertIn("tracks no contribution", by[8]["reason"])
+        self.assertIn("this issue tracks", by[9]["reason"])
+        receipt = [r for k, r in res.staged if k == "commands" and r["comment_id"] == 7][0]
+        self.assertEqual((receipt["contribution_id"], receipt["revision"]), (rec["contribution_id"], 0))
+        self.assertTrue([r for k, r in res.staged if k == "contributions"][-1]["paused"])
+
     def test_intake_creates_queued_contribution(self):
         from upstreaming.tests.test_commands_intake import issue
         res = controller.tick(contributions={}, operations={}, consumed={}, projects={},
@@ -275,3 +339,16 @@ class TestTick(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPauseOnFreshRequest(unittest.TestCase):
+    def test_pause_posted_with_the_request_stops_the_first_dispatch(self):
+        from upstreaming.tests.test_commands_intake import issue
+        iss = issue(actor={"id": 1001, "login": "owner"}, number=4935)
+        res = controller.tick(contributions={}, operations={}, consumed={}, projects={}, policy=policy(),
+                              inputs=controller.Inputs(now=T, issues=[iss], pressure=capacity.Pressure(ok=True),
+                                                       comments=[{"issue_number": 4935, "comment": comment(
+                                                           '/upstreaming pause reason="test"', cid=5)}]))
+        self.assertEqual(res.report["commands"][0]["result"], "accepted")
+        self.assertEqual(res.requested_effects, [])
+        self.assertTrue([r for k, r in res.staged if k == "contributions"][-1]["paused"])
