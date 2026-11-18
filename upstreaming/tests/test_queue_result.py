@@ -20,7 +20,7 @@ def projection():
                          "result_commit_id": "q_r",
                          "result": {"version": 1, "outputs": [{"type": "upload_artifact", "resource": {
                              "kind": "artifact", "repository": "o/r", "id": "55", "target_run_id": "100",
-                             "name": "claim-abc-upstreaming-proposal", "digest": DIGEST}}]}}},
+                             "name": "claim-abc-upstreaming-out", "digest": DIGEST}}]}}},
         "claims": {"c1": {"kind": "Claim", "work_id": "w1", "claim_id": "c1", "dispatch_id": "d1",
                           "handle": "h", "state": "completed"}},
         "dispatches": {"d1": {"dispatch_id": "d1", "state": "bound", "run": {
@@ -32,6 +32,19 @@ def resolve(p, **kw):
     args = dict(work_id="w1", claim_id="c1", dispatch_id="d1", run_id="100", workflow=WF)
     args.update(kw)
     return qr.resolve(p, **args)
+
+
+class TestReplayOutput(unittest.TestCase):
+    def test_projection_on_stdout_or_stderr(self):
+        import json
+        import subprocess
+        data = json.dumps(projection())
+        for stdout, stderr in ((data, ""), ("", data)):
+            p = subprocess.CompletedProcess([], 0, stdout, stderr)
+            self.assertEqual(qr.replay_output(p), projection())
+        for data in ('{}', '[]', 'warning\n{}'):
+            with self.assertRaises(ValueError):
+                qr.replay_output(subprocess.CompletedProcess([], 0, "", data))
 
 
 class TestResolve(unittest.TestCase):

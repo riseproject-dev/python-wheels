@@ -121,7 +121,7 @@ class TestPipeline(unittest.TestCase):
             "works": {"w1": {"claim_id": "c1", "barrier": "verified", "result_commit_id": "q_r", "result": {
                 "version": 1, "outputs": [{"type": "upload_artifact", "resource": {
                     "kind": "artifact", "repository": "riseproject-dev/python-wheels", "id": "900",
-                    "target_run_id": "4242", "name": "claim-x-upstreaming-proposal", "digest": digest}}]}}},
+                    "target_run_id": "4242", "name": "claim-x-upstreaming-out", "digest": digest}}]}}},
             "claims": {"c1": {"work_id": "w1", "claim_id": "c1", "dispatch_id": "d1", "state": "completed"}},
             "dispatches": {"d1": {"run": {"run_id": "4242", "run_attempt": 1, "workflow": WF}}}}
         art = queue_result.resolve(projection, work_id="w1", claim_id="c1", dispatch_id="d1",

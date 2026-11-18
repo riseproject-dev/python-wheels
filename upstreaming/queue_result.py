@@ -33,7 +33,9 @@ import json
 import subprocess
 from dataclasses import dataclass
 
-PROPOSAL_ARTIFACT_SUFFIX = "upstreaming-proposal"
+# Native safe-output tool accepts path, not a name override. Uploading the
+# upstreaming-out directory yields claim-<hash>-upstreaming-out.
+PROPOSAL_ARTIFACT_SUFFIX = "upstreaming-out"
 GH_AW_VERSION = "v1.2.2"
 
 
@@ -126,7 +128,16 @@ def replay(gh_aw: str, repo: str, timeout: int = 600) -> dict:
         # Network/auth failures and ledger validation failures look alike here;
         # either way nothing may be published now, and retrying is safe.
         raise OSError(f"gh aw work-queue replay failed: {p.stderr.strip()[-300:]}")
-    return json.loads(p.stdout)
+    return replay_output(p)
+
+
+def replay_output(result: subprocess.CompletedProcess) -> dict:
+    """The v1.2.2 CLI emits replay JSON on stderr; accept stdout on versions
+    that use it, but only a complete JSON object, never mixed diagnostics."""
+    value = json.loads(result.stdout if result.stdout.strip() else result.stderr)
+    if not isinstance(value, dict) or not isinstance(value.get("works"), dict):
+        raise ValueError("replay output is not a queue projection")
+    return value
 
 
 def queue_work_states(gh_aw: str, repo: str, timeout: int = 600) -> dict[str, str]:
@@ -139,7 +150,7 @@ def queue_work_states(gh_aw: str, repo: str, timeout: int = 600) -> dict[str, st
         if "queue_missing" in p.stderr:
             return {}
         raise OSError(f"gh aw work-queue replay failed: {p.stderr.strip()[-300:]}")
-    works = (json.loads(p.stdout).get("works") or {}).values()
+    works = (replay_output(p).get("works") or {}).values()
     return {w["graph_id"]: w.get("state") or "unknown" for w in works if w.get("graph_id")}
 
 
