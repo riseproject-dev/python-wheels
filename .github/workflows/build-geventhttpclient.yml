@@ -45,23 +45,22 @@ jobs:
     with:
       package: geventhttpclient
       version: ${{ inputs.version }}
+      # Matches the python list this replaces, which only ever built
+      # cp312-cp314t; preserved rather than silently widened to cp310/cp311/cp315*.
+      python-exclude: 'cp39 cp310 cp311 cp315*'
 
   build_wheels:
     needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
+    # musllinux is skipped: our registry carries gevent and brotli for
+    # manylinux riscv64 only, so a musl wheel could be neither installed nor tested.
+    if: needs.setup.outputs.versions != '[]' && matrix.platform == 'manylinux'
     name: Build geventhttpclient ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # gevent, a hard runtime dependency, publishes no free-threaded wheel on
-          # any platform, so the cp314t wheel cannot be installed to be tested.
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       GEVENTHTTPCLIENT_VERSION: ${{ matrix.version }}
@@ -91,8 +90,6 @@ jobs:
             git apply -v "$patches"/*.patch
           fi
 
-      # musllinux is skipped: our registry carries gevent and brotli for
-      # manylinux riscv64 only, so a musl wheel could be neither installed nor tested.
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         env:
           CIBW_ARCHS: riscv64
@@ -100,7 +97,9 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # gevent and brotli have no riscv64 wheel on public PyPI.
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # gevent, a hard runtime dependency, publishes no free-threaded wheel on
+          # any platform, so the cp314t wheel cannot be installed to be tested.
+          CIBW_TEST_SKIP: ${{ matrix.python == 'cp314t' && '*' || '' }}
           # pyproject.toml registers the `network` marker.
           CIBW_TEST_SOURCES: tests pyproject.toml
           # Up to 2.5.1 the test tools are the `dev` extra; from 2.6.0 they are the `dev`

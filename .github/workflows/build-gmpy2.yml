@@ -45,29 +45,24 @@ jobs:
     with:
       package: gmpy2
       version: ${{ inputs.version }}
+      # Matches the python list this replaces, which only ever built
+      # cp312-cp314t; preserved rather than silently widened to cp310/cp311/cp315*.
+      python-exclude: 'cp39 cp310 cp311 cp315*'
 
   build_wheels:
     needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
+    # musllinux dropped: test-extras' numpy and cython both have no
+    # musllinux riscv64 wheel on PyPI or our registry, so CIBW_TEST_EXTRAS
+    # cannot resolve in a musl venv (same reasoning as the tree-sitter-*
+    # family dropping musllinux for its own test dependency).
+    if: needs.setup.outputs.versions != '[]' && matrix.platform == 'manylinux'
     name: Build gmpy2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # Cython, a hard test-only requirement (test-extras builds and imports
-          # a Cython extension against gmpy2's headers), publishes no
-          # free-threaded wheel on any architecture, so the suite cannot run
-          # under cp314t.
-          - python: "cp314t"
-            test_skip: "*"
-        # musllinux dropped: test-extras' numpy and cython both have no
-        # musllinux riscv64 wheel on PyPI or our registry, so CIBW_TEST_EXTRAS
-        # cannot resolve in a musl venv (same reasoning as the tree-sitter-*
-        # family dropping musllinux for its own test dependency).
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       GMPY2_VERSION: ${{ matrix.version }}
@@ -108,7 +103,11 @@ jobs:
             PYTEST_ADDOPTS=--verbose
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GMPY2=${{ env.GMPY2_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # Cython, a hard test-only requirement (test-extras builds and imports
+          # a Cython extension against gmpy2's headers), publishes no
+          # free-threaded wheel on any architecture, so the suite cannot run
+          # under cp314t.
+          CIBW_TEST_SKIP: ${{ matrix.python == 'cp314t' && '*' || '' }}
 
       - name: Check the extension made it into the wheel
         run: |

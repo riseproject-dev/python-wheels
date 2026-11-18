@@ -46,23 +46,22 @@ jobs:
     with:
       package: fastparquet
       version: ${{ inputs.version }}
+      # Matches the python list this replaces, which only ever built
+      # cp312-cp314t; preserved rather than silently widened to cp310/cp311.
+      python-exclude: 'cp39 cp310 cp311'
 
   build_wheels:
     needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
+    # Our registry carries numpy and pandas for manylinux riscv64 only, so a
+    # musllinux leg could be neither built nor tested.
+    if: needs.setup.outputs.versions != '[]' && matrix.platform == 'manylinux'
     name: Build fastparquet ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # pandas, a hard runtime requirement, publishes no free-threaded wheel on
-          # any architecture, so the suite cannot run under cp314t.
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       FASTPARQUET_VERSION: ${{ matrix.version }}
@@ -100,7 +99,9 @@ jobs:
           # pandas and cramjam are newer on PyPI than the riscv64 wheels we ship;
           # refusing sdists makes pip resolve back to the versions we have.
           CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # pandas, a hard runtime requirement, publishes no free-threaded wheel on
+          # any architecture, so the suite cannot run under cp314t.
+          CIBW_TEST_SKIP: ${{ matrix.python == 'cp314t' && '*' || '' }}
           CIBW_TEST_REQUIRES: pytest "pandas<3"
           CIBW_TEST_SOURCES: fastparquet/test test-data pyproject.toml
           # test/util.py resolves test-data relative to the working directory, and

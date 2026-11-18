@@ -45,22 +45,23 @@ jobs:
     with:
       package: gseapy
       version: ${{ inputs.version }}
+      # Matches the python list this replaces, which only ever built
+      # cp312-cp314t; preserved rather than silently widened to cp310/cp311.
+      python-exclude: 'cp39 cp310 cp311'
 
   build_wheels:
     needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
+    # docs/packages/gseapy.yaml declares manylinux-only files, so this filter
+    # is a no-op today; kept so a future musllinux entry does not silently
+    # duplicate the (hardcoded-manylinux) build below under another name.
+    if: needs.setup.outputs.versions != '[]' && matrix.platform == 'manylinux'
     name: Build gseapy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # pandas, a hard runtime dependency, has no cp314t riscv64 wheel on pypi.riseproject.dev.
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       GSEAPY_VERSION: ${{ matrix.version }}
@@ -92,7 +93,8 @@ jobs:
           CIBW_TEST_EXTRAS: test
           CIBW_TEST_SOURCES: tests pyproject.toml
           CIBW_TEST_COMMAND: pytest tests
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # pandas, a hard runtime dependency, has no cp314t riscv64 wheel on pypi.riseproject.dev.
+          CIBW_TEST_SKIP: ${{ matrix.python == 'cp314t' && '*' || '' }}
 
       - name: Check the Rust extension is in the wheel
         run: python3 -m zipfile -l wheelhouse/*.whl | grep -E 'gseapy/gse\..*\.so'
