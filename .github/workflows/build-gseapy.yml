@@ -49,18 +49,14 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build gseapy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build gseapy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # pandas, a hard runtime dependency, has no cp314t riscv64 wheel on pypi.riseproject.dev.
-          - python: "cp314t"
-            test_skip: "*"
+        # pandas, a hard runtime dependency, has no cp314t riscv64 wheel on pypi.riseproject.dev.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       GSEAPY_VERSION: ${{ matrix.version }}
@@ -77,7 +73,7 @@ jobs:
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BEFORE_ALL_LINUX: >-
@@ -92,14 +88,14 @@ jobs:
           CIBW_TEST_EXTRAS: test
           CIBW_TEST_SOURCES: tests pyproject.toml
           CIBW_TEST_COMMAND: pytest tests
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_SKIP: ${{ case(endsWith(matrix.python, 't'), '*', '') }}
 
       - name: Check the Rust extension is in the wheel
         run: python3 -m zipfile -l wheelhouse/*.whl | grep -E 'gseapy/gse\..*\.so'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: gseapy-${{ env.GSEAPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: gseapy-${{ env.GSEAPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 

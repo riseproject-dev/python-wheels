@@ -48,23 +48,17 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build demoparser2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build demoparser2 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # demoparser2's pyo3 dependency has a plain `features = ["extension-module",
-        # "generate-import-lib"]` (no abi3-pyNN), so every interpreter needs its own build.
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # demoparser2's own Requires-Dist hard-pins pandas, which ships no cp314t
-          # wheel at all (any version, our registry or PyPI) -- cibuildwheel's own
-          # test-install step fails resolving it before CIBW_TEST_COMMAND even runs,
-          # so the wheel builds fine but the test phase must be skipped here.
-          - python: "cp314t"
-            test_skip: "*"
+        # demoparser2's own Requires-Dist hard-pins pandas, which ships no cp314t
+        # wheel at all (any version, our registry or PyPI) -- cibuildwheel's own
+        # test-install step fails resolving it before CIBW_TEST_COMMAND even runs,
+        # so the wheel builds fine but the test phase must be skipped here.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       DEMOPARSER2_VERSION: ${{ matrix.version }}
@@ -83,7 +77,7 @@ jobs:
           package-dir: src/python
           output-dir: wheelhouse/
         env:
-          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # demoparser2 ships no [tool.cibuildwheel], so the Rust toolchain its maturin
           # backend needs is installed in-container here. Upstream's own before-script-linux
@@ -130,11 +124,11 @@ jobs:
           CIBW_TEST_COMMAND: >-
             python -c "import demoparser2.demoparser2 as m; assert m.__file__.endswith('.so'), m.__file__" &&
             cd src/python && python tests/signature_tests.py
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_SKIP: ${{ case(endsWith(matrix.python, 't'), '*', '') }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: demoparser2-${{ env.DEMOPARSER2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: demoparser2-${{ env.DEMOPARSER2_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 

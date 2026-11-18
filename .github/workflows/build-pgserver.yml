@@ -48,18 +48,14 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build pgserver ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build pgserver ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # The test extra's psycopg2-binary publishes no free-threaded wheel for any platform (gotcha 149).
-          - python: "cp314t"
-            test_skip: "*"
+        # The test extra's psycopg2-binary publishes no free-threaded wheel for any platform (gotcha 149).
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       PGSERVER_VERSION: ${{ matrix.version }}
@@ -85,14 +81,14 @@ jobs:
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # initdb/postgres are non-PIE; keep their base above vm.mmap_min_addr once auditwheel's patchelf prepends a segment (gotcha 595).
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             LDFLAGS="-Wl,-Ttext-segment=0x200000"
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_SKIP: ${{ case(endsWith(matrix.python, 't'), '*', '') }}
           # sqlalchemy-utils 0.42.1 (latest) still imports the removed
           # sqlalchemy.orm.attributes.ScalarAttributeImpl, so pgserver's unpinned
           # `sqlalchemy>=2` test extra resolves to a broken combo now that sqlalchemy 2.1
@@ -120,7 +116,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pgserver-${{ env.PGSERVER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: pgserver-${{ env.PGSERVER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 

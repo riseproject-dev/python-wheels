@@ -48,26 +48,16 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build biotraj ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build biotraj ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # Matches upstream's own CIBW_BUILD: no cp314/free-threaded wheels published.
-        include:
-          - python: cp310
-            test_requires: pytest psutil
-          - python: cp311
-            test_requires: pytest psutil
-          # pypi.riseproject.dev ships netcdf4 only for cp312+, so only these two
-          # exercise the real netCDF4 backend; the others fall back to biotraj's
-          # scipy implementation, which the suite covers unconditionally either way.
-          - python: cp312
-            test_requires: pytest psutil netcdf4>=1.7.1
-          - python: cp313
-            test_requires: pytest psutil netcdf4>=1.7.1
+        # pypi.riseproject.dev ships netcdf4 only for cp312+, so only these two
+        # exercise the real netCDF4 backend; the others fall back to biotraj's
+        # scipy implementation, which the suite covers unconditionally either way.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       BIOTRAJ_VERSION: ${{ matrix.version }}
 
@@ -83,7 +73,7 @@ jobs:
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # numpy/scipy: pypi.riseproject.dev trails PyPI's newest patch release for
@@ -91,12 +81,12 @@ jobs:
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,scipy
-          CIBW_TEST_REQUIRES: ${{ matrix.test_requires }}
+          CIBW_TEST_REQUIRES: ${{ case(matrix.python == 'cp310', 'pytest psutil', matrix.python == 'cp311', 'pytest psutil', matrix.python == 'cp312', 'pytest psutil netcdf4>=1.7.1', matrix.python == 'cp313', 'pytest psutil netcdf4>=1.7.1', '') }}
           CIBW_TEST_COMMAND: pytest {project}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: biotraj-${{ env.BIOTRAJ_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: biotraj-${{ env.BIOTRAJ_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 

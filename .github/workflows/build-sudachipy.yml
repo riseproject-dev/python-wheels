@@ -55,20 +55,15 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build sudachipy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build sudachipy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp310", "cp314t"]
-        include:
-          # tokenizers has no free-threaded wheel anywhere (abi3-only); its sdist
-          # build is unproven here, so drop just the one test module that needs it.
-          - python: "cp314t"
-            drop_pretokenizer_test: "rm tests/test_pretokenizers.py &&"
-            test_requires: 'sudachidict_core'
+        # tokenizers has no free-threaded wheel anywhere (abi3-only); its sdist
+        # build is unproven here, so drop just the one test module that needs it.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       SUDACHIPY_VERSION: ${{ matrix.version }}
@@ -96,7 +91,7 @@ jobs:
           package-dir: .
         env:
           CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
           CIBW_SKIP: '*-musllinux_*'  # rustup.rs has no riscv64 musl toolchain
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # cibuildwheel's audit step needs a host `uv`, which the self-hosted
@@ -111,15 +106,15 @@ jobs:
           CIBW_ENVIRONMENT: PATH="$PATH:$HOME/.cargo/bin" PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # pypi.riseproject.dev's newest tokenizers (0.22.2) is behind PyPI's
           # (0.23.2, no riscv64 wheel); pin so pip resolves to ours.
-          CIBW_TEST_REQUIRES: ${{ matrix.test_requires || 'tokenizers==0.22.2 sudachidict_core' }}
+          CIBW_TEST_REQUIRES: ${{ case(endsWith(matrix.python, 't'), 'sudachidict_core', '') || 'tokenizers==0.22.2 sudachidict_core' }}
           # Upstream's own build_and_test.sh test command, run against {package}
           # (gotcha 5) since cibuildwheel tests from an empty scratch directory.
           CIBW_TEST_COMMAND: >-
-            bash -c "cd {package}/python && ${{ matrix.drop_pretokenizer_test }} python -m unittest discover -s tests -v"
+            bash -c "cd {package}/python && ${{ case(endsWith(matrix.python, 't'), 'rm tests/test_pretokenizers.py &&', '') }} python -m unittest discover -s tests -v"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: sudachipy-${{ env.SUDACHIPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: sudachipy-${{ env.SUDACHIPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 

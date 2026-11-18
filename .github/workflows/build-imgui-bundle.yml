@@ -50,17 +50,13 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build imgui-bundle ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    name: Build imgui-bundle ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # Upstream's own cibuildwheel build list is cp311-cp314 (no free-threaded
-        # variants); cp311 is dropped to match this repo's numpy-driven cp312 floor.
-        python: ["cp312", "cp313", "cp314"]
-        libc: [manylinux, musllinux]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       IMGUI_BUNDLE_VERSION: ${{ matrix.version }}
@@ -77,7 +73,7 @@ jobs:
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
@@ -89,7 +85,7 @@ jobs:
           # below), which installs the X11/GL dev headers GLFW's CMake needs -
           # repeat that command here per libc.
           CIBW_BEFORE_ALL: >-
-            ${{ matrix.libc == 'musllinux' && 'apk add xorg-server-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev mesa-dev mesa-gl cmake curl bash' || 'yum install -y libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel mesa-libGL-devel' }} &&
+            ${{ matrix.platform == 'musllinux' && 'apk add xorg-server-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev mesa-dev mesa-gl cmake curl bash' || 'yum install -y libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel mesa-libGL-devel' }} &&
             echo 'nanobind<3' > /nanobind-constraint.txt
           # scikit-build-core provisions cmake/ninja from PyPI when not already on
           # PATH; both are published to our registry for riscv64, so pin pip/uv to
@@ -108,7 +104,7 @@ jobs:
             UV_ONLY_BINARY=numpy,cmake,ninja
             UV_CONSTRAINT=/nanobind-constraint.txt
             UV_BUILD_CONSTRAINT=/nanobind-constraint.txt
-            ${{ matrix.libc == 'musllinux' && 'CMAKE_ARGS=-DIMGUI_BUNDLE_PYTHON_DISABLE_OPENGL2=ON' || '' }}
+            ${{ matrix.platform == 'musllinux' && 'CMAKE_ARGS=-DIMGUI_BUNDLE_PYTHON_DISABLE_OPENGL2=ON' || '' }}
           # Upstream's test-requires (pytest, pytest-asyncio, numpy) needs numpy, which
           # has no riscv64 musllinux wheel in our registry (manylinux_riscv64 only) -
           # skip the test-install/test-command on musllinux legs, keeping the build.
@@ -116,7 +112,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: imgui-bundle-${{ env.IMGUI_BUNDLE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          name: imgui-bundle-${{ env.IMGUI_BUNDLE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
