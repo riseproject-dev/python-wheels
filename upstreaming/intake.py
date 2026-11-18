@@ -72,6 +72,19 @@ def parse_issue_form(body: str) -> dict[str, str]:
     return {k: ("" if v == "_No response_" else v) for k, v in out.items()}
 
 
+_TITLE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s+riscv64 support\s*$", re.I)
+_REPO_IN_TEXT = re.compile(r"https://github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9_.-]{1,100})(?=[/\s)#?]|$)")
+
+
+def _freeform(issue: dict) -> dict[str, str]:
+    m = _TITLE.match(issue.get("title") or "")
+    repos = {f"{o}/{n.removesuffix('.git')}" for o, n in _REPO_IN_TEXT.findall(issue.get("body") or "")}
+    if not m or len(repos) != 1:
+        return {}
+    return {"upstream": f"https://github.com/{repos.pop()}", "distributions": m.group(1),
+            "notes": (issue.get("body") or "")[:4000]}
+
+
 def canonical_repo(url: str) -> str:
     """Accept canonical GitHub repository URLs only. No credentials, other
     hosts, query strings, fragments or extra path components."""
@@ -121,6 +134,11 @@ def parse_request(issue: dict, policy: dict) -> Request:
     if len(body.encode("utf-8")) > policy["intake"]["max_request_bytes"]:
         raise IntakeError("request too large")
     form = parse_issue_form(body)
+    if not form.get("upstream"):
+        # Older Package build request issues predate the form. Accept them
+        # only when the body names exactly one GitHub repository and the
+        # title is "<distribution> riscv64 support".
+        form = _freeform(issue)
     upstream = canonical_repo(form.get("upstream", ""))
     dists: list[str] = []
     for line in form.get("distributions", "").splitlines():
