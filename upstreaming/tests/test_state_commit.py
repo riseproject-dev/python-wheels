@@ -22,6 +22,10 @@ class TestStateCommit(unittest.TestCase):
         git(self.other, "push", "-q", "origin", "HEAD:main")
         self.pub = root / "pub"
         git(root, "clone", "-q", str(self.origin), str(self.pub))
+        # CI runners have no global identity; the reconcile job sets one with
+        # ci_scripts/git-identity.sh before state_commit runs.
+        git(self.pub, "config", "user.name", "T")
+        git(self.pub, "config", "user.email", "t@example.com")
         self.rec = contribution()
         self.path = state.record_path("contributions", self.rec)
         self.p = policy(read_only=False)
