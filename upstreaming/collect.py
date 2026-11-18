@@ -112,6 +112,22 @@ def intake_issues(api: Api, max_pages: int = 3) -> list[dict]:
     return [i for i in items if "pull_request" not in i]
 
 
+def label_acceptances(api: Api, issues: Iterable[dict], label: str, authority: Iterable[int]) -> dict[int, int]:
+    """issue id -> the authorized actor who added ``label`` (from the issue's
+    events). Adding the intake label is how a RISE owner accepts a request
+    filed by someone else; anyone else adding it accepts nothing."""
+    auth = set(authority)
+    out: dict[int, int] = {}
+    for i in issues:
+        if i["user"]["id"] in auth:
+            continue
+        for ev in api.paginate(f"/repos/{CONTROL_REPO}/issues/{int(i['number'])}/events?per_page=100", max_pages=3):
+            if ev.get("event") == "labeled" and (ev.get("label") or {}).get("name") == label \
+                    and (ev.get("actor") or {}).get("id") in auth:
+                out[i["id"]] = ev["actor"]["id"]
+    return out
+
+
 def dispatcher_runs(api: Api, workflow_file: str = "upstreaming-dispatcher.lock.yml") -> list[dict]:
     """Recent runs of the dispatcher workflow (newest first)."""
     return api.paginate(f"/repos/{CONTROL_REPO}/actions/workflows/{workflow_file}/runs?per_page=30",

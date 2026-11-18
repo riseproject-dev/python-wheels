@@ -195,3 +195,31 @@ class TestIntake(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFreeformAndAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.p = policy()
+
+    def test_freeform_package_request(self):
+        body = ("Work has already begun:\n\nhttps://github.com/example/proj/pull/31488\n"
+                "https://github.com/example/proj/pull/31522\n")
+        i = dict(issue(body=body), title="proj-core riscv64 support")
+        r = intake.parse_request(i, self.p)
+        self.assertEqual((r.upstream, r.distributions), ("example/proj", ("proj-core",)))
+        two = dict(issue(body="https://github.com/a/b and https://github.com/c/d"), title="x riscv64 support")
+        with self.assertRaises(intake.IntakeError):
+            intake.parse_request(two, self.p)
+        with self.assertRaises(intake.IntakeError):
+            intake.parse_request(dict(issue(body=body), title="something else"), self.p)
+
+    def test_label_added_by_owner_accepts(self):
+        from upstreaming import collect
+
+        class Api:
+            def paginate(self, path, max_pages=3):
+                return [{"event": "labeled", "label": {"name": "upstreaming-request"}, "actor": {"id": 99}},
+                        {"event": "labeled", "label": {"name": "upstreaming-request"}, "actor": dict(OWNER)}]
+        acc = collect.label_acceptances(Api(), [issue()], "upstreaming-request", [OWNER["id"]])
+        self.assertEqual(acc, {77: OWNER["id"]})
+        self.assertEqual(collect.label_acceptances(Api(), [issue()], "upstreaming-request", [5]), {})

@@ -255,6 +255,9 @@ def cmd_reconcile(args) -> int:
                       | {i["number"] for i in issues})
     comments = [] if args.offline else collect.command_comments(api, tracking, args.since)
     users, provisioning = _command_lookups(api, snap, comments) if not args.offline else ({}, {})
+    from .common import INTAKE_LABEL
+    acceptances = {} if args.offline else collect.label_acceptances(
+        api, issues, INTAKE_LABEL, policy["command_authority"]["actor_ids"])
     runs = queue = None
     if not args.offline and args.gh_aw:
         from . import queue_result
@@ -266,7 +269,8 @@ def cmd_reconcile(args) -> int:
             runs = queue = None
     out = reconcile.tick(api, snap, policy=policy, now=datetime.now(timezone.utc), publications=pubs,
                          pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline,
-                         dispatcher_runs=runs, queue_works=queue, users=users, provisioning=provisioning)
+                         dispatcher_runs=runs, queue_works=queue, users=users, provisioning=provisioning,
+                         acceptances=acceptances)
     for kind, rec in out.staged:
         store.stage(kind, rec)
     written = store.write_staged()
