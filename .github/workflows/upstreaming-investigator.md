@@ -69,9 +69,9 @@ pre-agent-steps:
         [[ "$fork" =~ ^riseproject-upstreaming/[A-Za-z0-9_.-]+$ ]] || { echo "bad fork"; exit 1; }
         git remote add origin "https://github.com/$fork.git"
       fi
-      if [ -n "$base" ]; then git fetch -q --no-tags upstream "$base"; fi
+      if [ -n "$base" ]; then git fetch -q --no-tags --depth=200 upstream "$base"; fi
       if [ -n "$head" ]; then
-        git fetch -q --no-tags origin "$head"
+        git fetch -q --no-tags --depth=200 origin "$head"
         git checkout -q -B riscv64 "$head"
       elif [ -n "$base" ]; then
         git checkout -q -B riscv64 "$base"

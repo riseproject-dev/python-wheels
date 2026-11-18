@@ -69,9 +69,9 @@ pre-agent-steps:
         [[ "$fork" =~ ^riseproject-upstreaming/[A-Za-z0-9_.-]+$ ]] || { echo "bad fork"; exit 1; }
         git remote add origin "https://github.com/$fork.git"
       fi
-      if [ -n "$base" ]; then git fetch -q --no-tags upstream "$base"; fi
+      if [ -n "$base" ]; then git fetch -q --no-tags --depth=200 upstream "$base"; fi
       if [ -n "$head" ]; then
-        git fetch -q --no-tags origin "$head"
+        git fetch -q --no-tags --depth=200 origin "$head"
         git checkout -q -B riscv64 "$head"
       elif [ -n "$base" ]; then
         git checkout -q -B riscv64 "$base"
@@ -252,7 +252,11 @@ into scripts or package publication step is rejected.
 3. Temporary fork-only changes that let CI run on the fork (for example
    removing `if: github.repository == 'owner/repo'`) go in a separate commit
    whose subject starts with `{debug}`. Never when `upstream_facing` is true.
-   Debug commits enable validation only, never publication or secrets.
+   Debug commits enable validation only, never publication or secrets. The
+   fork's CI must run the riscv64 wheel job on push to `riscv64`: if that
+   workflow does not trigger on pushes to `riscv64`, add the trigger in the
+   same `{debug}` commit. If the project already builds riscv64 wheels
+   upstream, the `{debug}` commit alone can be the whole series.
 4. Baseline code is `rv64gc`. Optional RVV only behind Linux `riscv_hwprobe`
    (`RISCV_HWPROBE_KEY_IMA_EXT_0` / `RISCV_HWPROBE_IMA_V`) with an `rv64gc`
    fallback. No global `-march=...v...` or `-march=native`.
