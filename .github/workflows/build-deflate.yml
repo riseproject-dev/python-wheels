@@ -49,22 +49,22 @@ jobs:
     with:
       package: deflate
       version: ${{ inputs.version }}
+      # Wheels are abi3 (pyproject sets wheel.py-api = "cp311"), so a single build
+      # is loadable on 3.11+. Our repo floor is cp312, so exclude cp310/cp311 to
+      # make the generated matrix build the abi3 leg there instead of on cp311;
+      # the plain (non-abi3) cp310 target that upstream also ships is dropped too.
+      python-exclude: 'cp39 cp310 cp311'
 
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build deflate ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    name: Build deflate ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # Wheels are abi3 (pyproject sets wheel.py-api = "cp311"), so a single
-        # build is loadable on 3.11+; only the free-threaded cp314t build needs
-        # its own wheel. Our repo floor is cp312, so build there instead of 3.11.
-        python: [cp312, cp314t]
-        libc: [manylinux, musllinux]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       DEFLATE_VERSION: ${{ matrix.version }}
@@ -83,7 +83,7 @@ jobs:
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
@@ -95,7 +95,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: deflate-${{ env.DEFLATE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          name: deflate-${{ env.DEFLATE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
