@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# Upstreaming controller (plan section 9). No model is invoked.
+#
+# observe:   read-only report of one tick (Stage B).
+# reconcile: folds worker publication outcomes, observes live fork/upstream
+#            CI, applies commands and intake, and, only when
+#            upstreaming/policy.json has read_only: false, commits the
+#            resulting state to main (one validated state-only commit) and
+#            launches the dispatcher if work was selected.
+#
+# The schedule and issue triggers stay commented out until the rollout
+# stage is approved; run it by hand with workflow_dispatch. See
+# upstreaming/INTEGRATION.md for the integration checks that gate writes.
+name: Upstreaming controller
+
+on:
+  # schedule:
+  #   - cron: '*/15 * * * *'
+  # issues:
+  #   types: [opened, labeled, reopened]
+  # issue_comment:
+  #   types: [created, edited]
+  workflow_dispatch:
+
+concurrency:
+  group: python-wheels-upstreaming-controller
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  # Cheap filter: unsupported events, missing labels and comments that are
+  # not commands never reach the tick.
+  filter:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'upstreaming-request')) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/upstreaming '))
+    steps:
+      - run: echo "event accepted for reconciliation"
+
+  observe:
+    needs: filter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Controller tick (read-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming observe > report.json
+          {
+            echo '## Upstreaming controller report (read-only)'
+            echo '```json'
+            cat report.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: upstreaming-controller-report
+          path: report.json
+          retention-days: 30
+
+  # Stage C writer: one reconciliation tick committed to main. Every write
+  # is behind policy.json read_only=false (checked in trusted code, not here)
+  # and the upstreaming-state environment.
+  reconcile:
+    needs: filter
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: upstreaming-state
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Is the policy read-only?
+        id: policy
+        run: echo "read_only=$(jq -r .read_only upstreaming/policy.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Collect publication outcomes of finished worker runs (read-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p publications
+          # Worker runs and publish-only retry runs both upload one
+          # upstreaming-publication artifact; each is folded in once
+          # (state records the artifact IDs already processed).
+          for wf in upstreaming-worker.lock.yml upstreaming-publish-retry.yml; do
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?status=completed&per_page=20" \
+              --jq '.workflow_runs[].id' | while read -r run; do
+              id=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" \
+                --jq '[.artifacts[] | select(.name == "upstreaming-publication" and (.expired | not))][0].id // empty')
+              [ -n "$id" ] || continue
+              mkdir -p "publications/$run"
+              gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "publications/$run/a.zip"
+              unzip -q -o -j "publications/$run/a.zip" -d "publications/$run" || true
+              printf '%s' "$id" > "publications/$run/artifact-id"
+            done
+          done
+
+      - name: Reconcile (writes changed state files locally)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming reconcile --publications publications --report report.json
+          {
+            echo '## Upstreaming reconciliation'
+            echo '```json'
+            cat report.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mint a control-repository token for the state commit
+        id: app-token
+        if: steps.policy.outputs.read_only == 'false'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-dev
+          repositories: python-wheels
+          permission-contents: write
+          permission-actions: write
+
+      - name: Publish one validated state-only commit on main
+        if: steps.policy.outputs.read_only == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          ci_scripts/git-identity.sh
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.state_commit --message "upstreaming: reconcile state (run ${GITHUB_RUN_ID})"
+
+      - name: Launch the dispatcher if work was selected
+        if: steps.policy.outputs.read_only == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "$(jq '.requested_effects | length' report.json)" -gt 0 ]; then
+            gh workflow run upstreaming-dispatcher.lock.yml --ref main
+          fi
+
+      - name: Launch publish-only retries that are due (no agent, no model call)
+        if: steps.policy.outputs.read_only == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          jq -r '.publication_retries[] | "\(.worker_run_id) \(.attempt)"' report.json | while read -r run attempt; do
+            gh workflow run upstreaming-publish-retry.yml --ref main -f worker-run-id="$run" -f attempt="$attempt"
+          done

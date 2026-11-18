@@ -1,0 +1,153 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# Publish-only retry (plan 5.2, 15.3): re-runs the trusted publish steps for
+# one finished worker run whose publication failed on infrastructure
+# (network, token, API). No agent, no model call. The same gates as the
+# worker's publish job apply: that run's Claim must have a verified native
+# Result in the queue (gh-aw v1.2.2 replay), the proposal artifact is
+# downloaded by the Result's ID and digest, preflight re-checks state and
+# fork identity, and the push uses the exact expected-head lease. If the push
+# already happened, discovery confirms it instead of pushing again.
+#
+# Launched by the controller's reconcile job (never by the agent), with the
+# worker run ID it recorded in upstreaming-state.
+name: Upstreaming publish retry
+
+on:
+  workflow_dispatch:
+    inputs:
+      worker-run-id:
+        description: Worker run whose publication should be retried
+        required: true
+        type: string
+      attempt:
+        description: Publish attempt number (recorded in the outcome)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: upstreaming-fork-writer
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: upstreaming-publish
+    steps:
+      - name: Validate inputs
+        env:
+          RUN: ${{ inputs.worker-run-id }}
+          ATTEMPT: ${{ inputs.attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN" =~ ^[0-9]{1,20}$ ]] || { echo "bad worker-run-id"; exit 1; }
+          [[ "$ATTEMPT" =~ ^[0-9]{1,3}$ ]] || { echo "bad attempt"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          path: control
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Re-resolve the original Claim's verified Result and artifact
+        id: result
+        working-directory: control
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ inputs.worker-run-id }}
+          WORKFLOW_PATH: .github/workflows/upstreaming-worker.lock.yml
+        run: |
+          set -euo pipefail
+          mkdir -p ../in ../prev
+          # The worker run must be a run of the worker workflow in this repository.
+          path=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN" --jq .path)
+          [ "${path%@*}" = "$WORKFLOW_PATH" ] || { echo "run $RUN is not an upstreaming worker run"; exit 1; }
+          # Its own publication record carries the original assignment.
+          id=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN/artifacts" \
+            --jq '[.artifacts[] | select(.name == "upstreaming-publication" and (.expired | not))] | if length == 1 then .[0].id else error("expected one publication artifact") end')
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > ../prev/p.zip
+          unzip -q -j ../prev/p.zip assignment.json task.json -d ../in
+          unzip -q -j -o ../prev/p.zip outcome.json -d ../prev 2>/dev/null || true
+          rc=0
+          gh_aw=$(upstreaming/install_gh_aw.sh "$RUNNER_TEMP/gh-aw-cli") || rc=3
+          if [ "$rc" = 0 ]; then
+            uv run --no-project --with-requirements upstreaming/requirements.txt \
+              python -m upstreaming.queue_result --gh-aw "$gh_aw" \
+                --assignment ../in/assignment.json --run-id "$RUN" \
+                --workflow "$WORKFLOW_PATH" --repo "$GITHUB_REPOSITORY" --out ../in || rc=$?
+          else
+            jq -n '{status:"infra_error", failure_class:"infrastructure", reason:"gh-aw install failed", stage:"result"}' > ../in/outcome.json
+          fi
+          if [ "$rc" != 0 ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.artifact extract ../in/proposal.zip ../in
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.fork_publish preflight --record ../in/record.json --task ../in/task.json \
+              --proposal ../in/proposal.json --out ../in/preflight.json
+          jq -r '"fork_name=" + .fork_name, "publish=" + (.publish|tostring)' ../in/preflight.json >> "$GITHUB_OUTPUT"
+          if [ "$(jq -r .publish ../in/preflight.json)" != true ]; then
+            jq '{status:"rejected", failure_class:(.failure_class // "validation"), reason, stage:"preflight"}' \
+              ../in/preflight.json > ../in/outcome.json
+          fi
+
+      - name: Mint a token for exactly this fork
+        id: fork-token
+        if: steps.result.outputs.publish == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-upstreaming
+          repositories: ${{ steps.result.outputs.fork_name }}
+          permission-contents: write
+          permission-workflows: write
+          permission-pull-requests: write
+
+      - name: Rebuild, validate and push to riscv64 (exact-head lease)
+        if: steps.result.outputs.publish == 'true'
+        working-directory: control
+        env:
+          UPSTREAMING_FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
+          UPSTREAMING_PUBLISH_ATTEMPT: ${{ inputs.attempt }}
+        run: |
+          set -euo pipefail
+          rc=0
+          prev=$(jq -r '.candidate // empty' ../prev/outcome.json 2>/dev/null || true)
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.fork_publish publish --record ../in/record.json --task ../in/task.json \
+              --proposal ../in/proposal.json --mbox ../in/patches.mbox --result ../in/result.json \
+              ${prev:+--previous-candidate "$prev"} --out ../in/outcome.json || rc=$?
+          jq . ../in/outcome.json >> "$GITHUB_STEP_SUMMARY"
+          exit $(( rc == 1 || rc == 3 ? 0 : rc ))
+
+      - name: Record which worker run this retry belongs to
+        if: always()
+        env:
+          RUN: ${{ inputs.worker-run-id }}
+        run: printf '%s' "$RUN" > in/worker-run-id
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: upstreaming-publication
+          path: |
+            in/assignment.json
+            in/task.json
+            in/result.json
+            in/preflight.json
+            in/outcome.json
+            in/worker-run-id
+          if-no-files-found: ignore
+          retention-days: 30

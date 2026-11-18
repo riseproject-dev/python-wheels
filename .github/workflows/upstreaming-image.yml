@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# Rebuild the runner-free reproduction image (upstreaming/image/) from the
+# latest ghcr.io/riseproject-dev/riscv-runner/runner/ubuntu-24.04:prod, at
+# least once a week, whenever upstreaming/image/ changes on main, and on
+# demand. Follows riscv-runner's deploy-runner.yml: QEMU + Buildx on
+# ubuntu-latest, docker/build-push-action, registry build cache.
+#
+# Published as ghcr.io/riseproject-dev/python-wheels/upstreaming-repro with
+# tags ubuntu-24.04 (moving) and ubuntu-24.04-<base digest prefix>, and the
+# exact base digest in the org.opencontainers.image.base.digest label.
+# Pull requests (and forks) build without pushing.
+name: Upstreaming reproduction image
+
+on:
+  schedule:
+    # Wednesdays 06:00 UTC: the runner image itself rebuilds Tuesdays 06:00.
+    - cron: '0 6 * * 3'
+  push:
+    branches: [main]
+    paths:
+      - 'upstreaming/image/**'
+      - '.github/workflows/upstreaming-image.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'upstreaming/image/**'
+      - '.github/workflows/upstreaming-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstreaming-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE: ghcr.io/riseproject-dev/riscv-runner/runner/ubuntu-24.04:prod
+  IMAGE: ghcr.io/riseproject-dev/python-wheels/upstreaming-repro
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      push-images: ${{ steps.variables.outputs.push-images }}
+    steps:
+      - name: Setup variables
+        id: variables
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eux -o pipefail
+          # Only push outside pull requests; PRs just make sure it builds.
+          if [ "$EVENT" = pull_request ]; then push=false; else push=true; fi
+          echo "push-images=$push" >> "$GITHUB_OUTPUT"
+
+  build-image:
+    runs-on: ubuntu-latest
+    needs: [setup]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Login to Container Registry
+        if: ${{ needs.setup.outputs.push-images == 'true' }}
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Resolve the current base digest
+        id: base
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "could not resolve $BASE"; exit 1; }
+          {
+            echo "digest=$digest"
+            echo "short=${digest:7:12}"
+            echo "ref=${BASE%:*}@$digest"
+          } >> "$GITHUB_OUTPUT"
+          echo "Base $BASE = $digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=ubuntu-24.04
+            type=raw,value=ubuntu-24.04-${{ steps.base.outputs.short }}
+          labels: |
+            org.opencontainers.image.base.name=${{ env.BASE }}
+            org.opencontainers.image.base.digest=${{ steps.base.outputs.digest }}
+
+      # Built from the exact digest resolved above, so the label and the
+      # layers cannot disagree if :prod moves during the build.
+      - name: Build reproduction image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        env:
+          SOURCE_DATE_EPOCH: 0  # No timestamps in layers
+        with:
+          context: upstreaming/image
+          file: upstreaming/image/Dockerfile
+          platforms: linux/riscv64
+          build-args: |
+            BASE=${{ steps.base.outputs.ref }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: |
+            ${{ github.ref_name == github.event.repository.default_branch && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
+          push: ${{ needs.setup.outputs.push-images == 'true' }}
+          pull: true

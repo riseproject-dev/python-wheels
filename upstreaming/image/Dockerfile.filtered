@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Filtered-copy variant: copies the runner image's filesystem into a fresh
+# image, excluding the Actions runner payload, so no final layer contains
+# its bytes. Larger build, cleaner provenance. See Dockerfile for context
+# (base tag, weekly rebuild, host Docker daemon, no docker-init).
+ARG BASE=ghcr.io/riseproject-dev/riscv-runner/runner/ubuntu-24.04:prod
+FROM --platform=linux/riscv64 ${BASE} AS src
+USER root
+RUN rm -rf /home/runner/actions-runner /usr/local/bin/riscv-runner-entrypoint.sh \
+           /usr/local/bin/docker-init /usr/local/bin/dockerd /usr/local/bin/docker-proxy \
+           /home/runner/.credentials /home/runner/.runner /proc/* /sys/* 2>/dev/null || true
+
+FROM scratch
+COPY --from=src / /
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/repro-entrypoint.sh
+ENV PATH=/home/runner/.local/bin:/home/runner/.rustup/bin:/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    DEBIAN_FRONTEND=noninteractive RUNNER_TOOL_CACHE=/opt/hostedtoolcache RUNNER_OS=Linux \
+    RUNNER_ARCH=RISCV64 RUSTUP_HOME=/home/runner/.rustup CARGO_HOME=/home/runner/.cargo \
+    UPSTREAMING_REPRO=1
+USER runner
+WORKDIR /home/runner
+ENTRYPOINT ["/usr/local/bin/repro-entrypoint.sh"]
+CMD ["bash", "-l"]
