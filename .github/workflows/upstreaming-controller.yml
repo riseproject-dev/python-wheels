@@ -109,10 +109,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p publications
-          # Worker runs and publish-only retry runs both upload one
+          # Worker, investigator and publish-only retry runs each upload one
           # upstreaming-publication artifact; each is folded in once
           # (state records the artifact IDs already processed).
-          for wf in upstreaming-worker.lock.yml upstreaming-publish-retry.yml; do
+          for wf in upstreaming-worker.lock.yml upstreaming-investigator.lock.yml upstreaming-publish-retry.yml; do
             gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?status=completed&per_page=20" \
               --jq '.workflow_runs[].id' | while read -r run; do
               id=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" \
@@ -130,8 +130,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The pinned gh-aw CLI reads the queue so that a requested task whose
+          # dispatch never reached it can be dispatched again. Without it,
+          # dispatch recovery is skipped for this tick (never guessed).
+          gh_aw=$(upstreaming/install_gh_aw.sh "$RUNNER_TEMP/gh-aw-cli") || gh_aw=
           uv run --no-project --with-requirements upstreaming/requirements.txt \
-            python -m upstreaming reconcile --publications publications --report report.json
+            python -m upstreaming reconcile --publications publications --report report.json \
+              ${gh_aw:+--gh-aw "$gh_aw"}
           {
             echo '## Upstreaming reconciliation'
             echo '```json'
@@ -163,13 +168,13 @@ jobs:
           uv run --no-project --with-requirements upstreaming/requirements.txt \
             python -m upstreaming.state_commit --message "upstreaming: reconcile state (run ${GITHUB_RUN_ID})"
 
-      - name: Launch the dispatcher if work was selected
+      - name: Launch the dispatcher if work was selected or a dispatch must be retried
         if: steps.policy.outputs.read_only == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          if [ "$(jq '.requested_effects | length' report.json)" -gt 0 ]; then
+          if [ "$(jq '(.requested_effects | length) + (.dispatch_relaunch // [] | length)' report.json)" -gt 0 ]; then
             gh workflow run upstreaming-dispatcher.lock.yml --ref main
           fi
 
