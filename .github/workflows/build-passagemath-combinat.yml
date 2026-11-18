@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# passagemath-combinat is split out of the passagemath/passagemath monorepo
+# (a SageMath fork) at pkgs/sagemath-combinat, tagged passagemath-<version>.
+# This replays build/pkgs/sagemath_combinat/spkg-src (./bootstrap renders
+# the package's pyproject.toml, then `python -m build --sdist --no-isolation`)
+# rather than the full ./configure && make python_build chain upstream's own
+# release tooling uses for the complete Sage distribution, same as
+# build-passagemath-objects.yml.
+name: Build passagemath-combinat wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/passagemath-combinat.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-passagemath-combinat.yml'
+      - 'docs/packages/passagemath-combinat.yaml'
+      - 'patches/passagemath-combinat/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-passagemath-combinat.yml'
+      - 'docs/packages/passagemath-combinat.yaml'
+      - 'patches/passagemath-combinat/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+  # build/pkgs/symmetrica's own pin (checksums.ini): no riscv64 package
+  # exists for it anywhere (not even in EPEL), so this always builds from
+  # the pinned sage-package release tarball, same as upstream's own
+  # spkg-configure.m4 fallback (it probes a system symmetrica but Sage's
+  # own packaging never ships one to probe).
+  SYMMETRICA_VERSION: 3.1.0
+  SYMMETRICA_SHA256: 2efc4b1d047c6fe036453882a20e906ca2bedecae888356c7626447db2b10fd3
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: passagemath-combinat
+      version: ${{ inputs.version }}
+
+  python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      PASSAGEMATH_COMBINAT_VERSION: ${{ matrix.version }}
+
+    steps:
+    - name: checkout passagemath/passagemath passagemath-${{ env.PASSAGEMATH_COMBINAT_VERSION }}
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        repository: passagemath/passagemath
+        ref: passagemath-${{ env.PASSAGEMATH_COMBINAT_VERSION }}
+        filter: blob:none
+        sparse-checkout: |
+          /bootstrap
+          /pyproject.toml
+          /VERSION.txt
+          build
+          m4
+          pkgs/sagemath-combinat
+          src/sage/algebras
+          src/sage/combinat
+          src/sage/monoids
+          src/sage/games
+          src/sage/sat
+          src/sage/groups/indexed_free_group.p*
+          src/sage/libs/lrcalc
+          src/sage/libs/symmetrica
+          src/sage/databases/cubic_hecke_db.py
+          src/sage/databases/findstat.py
+          src/sage/databases/oeis.py
+          src/sage/databases/sloane.py
+          src/sage/dynamics/cellular_automata
+          src/sage/dynamics/finite_dynamical_system*.p*
+          # sage_setup.find.find_python_sources() prunes any directory
+          # that has no __init__.py/__init__.pxd/all.py of its own unless
+          # it carries an all__sagemath_combinat.py marker for this
+          # distribution (see build-passagemath-categories.yml's longer
+          # note on the same mechanism); pull the marker wherever it
+          # exists rather than chasing every loose-file directory by hand.
+          src/sage/**/all__sagemath_combinat.py
+          src/sage/all__sagemath_combinat.py
+        sparse-checkout-cone-mode: false
+        persist-credentials: false
+
+    - name: Checkout python-wheels
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        path: python-wheels
+        persist-credentials: false
+
+    - name: Patch passagemath-combinat source
+      run: git apply python-wheels/patches/passagemath-combinat/${{ env.PASSAGEMATH_COMBINAT_VERSION }}/00*.patch
+
+    - name: Render pyproject.toml
+      run: ./bootstrap
+
+    # ./bootstrap's own per-package render (sage-package bootstrap) runs all
+    # ~650 spkgs in parallel batches and aborts a batch outright if any
+    # member fails (sage_conf's needs the full configure.ac, absent from
+    # this sparse checkout); render this one package ourselves so it is not
+    # at the mercy of that batch's luck.
+    - name: Render pkgs/sagemath-combinat/pyproject.toml.m4
+      working-directory: pkgs/sagemath-combinat
+      run: |
+        export M4PATH="$GITHUB_WORKSPACE/m4"
+        for f in *.m4; do m4 "$f" > "${f%.m4}"; done
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build sdist
+      working-directory: pkgs/sagemath-combinat
+      run: |
+        rm -rf dist/ *.egg-info
+        uv pip install build setuptools "passagemath-setup==${{ env.PASSAGEMATH_COMBINAT_VERSION }}" "passagemath-environment==${{ env.PASSAGEMATH_COMBINAT_VERSION }}"
+        python -m build --sdist --no-isolation --skip-dependency-check
+
+    - name: upload sdist artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: passagemath-combinat-${{ env.PASSAGEMATH_COMBINAT_VERSION }}-sdist
+        path: pkgs/sagemath-combinat/dist/*.tar.gz
+        if-no-files-found: error
+
+  linux:
+    needs: [setup, python_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build passagemath-combinat ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    env:
+      PASSAGEMATH_COMBINAT_VERSION: ${{ matrix.version }}
+
+    steps:
+    - name: Download sdist
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: passagemath-combinat-${{ env.PASSAGEMATH_COMBINAT_VERSION }}-sdist
+        path: dist/
+
+    - id: sdist_path
+      run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
+    - name: Build wheels
+      uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+      with:
+        package-dir: ${{ steps.sdist_path.outputs.path }}
+        output-dir: wheelhouse/
+        only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      env:
+        CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+        CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+        # Replays build/pkgs/symmetrica/spkg-install.in's ./configure &&
+        # make install chain against a fixed /usr/local prefix, skipping
+        # the Sage-specific sdh_* wrappers; gmp/mpc/mpfr (symmetrica's
+        # fellow setup.py spkgs) are system headers only, needed by
+        # gmpy2/cysignals, not by symmetrica itself.
+        CIBW_BEFORE_ALL_LINUX: |
+          set -euo pipefail
+          if command -v apk >/dev/null; then
+            apk add --no-cache gmp-dev mpfr-dev mpc1-dev curl
+          else
+            dnf install -y --setopt=install_weak_deps=False gmp-devel mpfr-devel libmpc-devel
+          fi
+          curl -fsSLo /tmp/symmetrica.tar.xz https://github.com/sagemath/sage-package/releases/download/tars/symmetrica-${{ env.SYMMETRICA_VERSION }}.tar.xz
+          echo "${{ env.SYMMETRICA_SHA256 }}  /tmp/symmetrica.tar.xz" | sha256sum -c -
+          tar xJf /tmp/symmetrica.tar.xz -C /tmp
+          cd /tmp/symmetrica-${{ env.SYMMETRICA_VERSION }}
+          CFLAGS="-O2 -g -fPIC -DFAST -DALLTRUE" ./configure --prefix=/usr/local --disable-static --enable-shared
+          make -j"$(nproc)"
+          make install
+          ldconfig || true
+        CIBW_ENVIRONMENT_LINUX: >-
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH
+          LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          CPATH=/usr/local/include:$CPATH
+        # sagemath-repl (the real test extra) is unported, so this
+        # exercises the symmetrica-backed Cython bindings directly,
+        # same minimal shape as the bliss/mcqd/cliquer sibling ports.
+        # Goes through sage.libs.symmetrica.all (not the raw symmetrica
+        # submodule) because that is what calls the library's own start()
+        # initializer, same as every real caller does.
+        #
+        # kostka_number itself only needs Partition/Integer (already live
+        # via passagemath-categories), so it is safe to test even though
+        # sage/libs/symmetrica/symmetrica.pxi's own late_import() - a
+        # separate call site from __init__.py's eager imports patch 0003
+        # drops - unconditionally reaches for sage.combinat.sf.sf (and
+        # sage.matrix.constructor, sage.combinat.schubert_polynomial),
+        # all three part of the unported passagemath-modules; patch 0004
+        # makes that failure quiet instead of a raw traceback, but every
+        # symmetrica function routes through the same late_import(), so
+        # the ones that actually need those three (schur.pxi's
+        # Schur/monomial/power-sum/homogeneous/elementary conversions and
+        # plethysm, sb.pxi's Schubert polynomial bindings, sc.pxi's
+        # chartafel/kranztafel) stay unusable on this wheel until
+        # passagemath-modules is ported - this test deliberately stays
+        # inside the subset that does not need it.
+        # 2 (not the nicer-looking 1) is correct here: it is upstream's
+        # own doctest example for this exact call
+        # (kostka_number_symmetrica's docstring in kostka.pxi).
+        CIBW_TEST_COMMAND: >-
+          python -c "from sage.libs.symmetrica.all import kostka_number;
+          r=kostka_number([2,1],[1,1,1]);
+          assert r==2, r;
+          print('symmetrica ok', r)"
+
+    - name: Check the wheel ships the extension and the vendored licence
+      run: |
+        python3 - wheelhouse/*.whl <<'EOF'
+        import sys, zipfile
+        for whl in sys.argv[1:]:
+            names = zipfile.ZipFile(whl).namelist()
+            assert any(n.startswith("sage/libs/symmetrica/symmetrica") and n.endswith(".so") for n in names), whl
+            libs = [n for n in names if n.startswith("passagemath_combinat.libs/")]
+            assert any("symmetrica" in n for n in libs), (whl, libs)
+            licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+            assert licences == {"LICENSE", "LICENSE.symmetrica"}, (whl, licences)
+            print(whl, "ok")
+        EOF
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: passagemath-combinat-${{ env.PASSAGEMATH_COMBINAT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        path: wheelhouse/*.whl
+        if-no-files-found: error
+
+  publish:
+    name: Publish passagemath-combinat ${{ matrix.version }}
+    needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      matrix: ${{ needs.setup.outputs.matrix }}
+      artifact-pattern: passagemath-combinat-${{ matrix.version }}-*_riscv64
