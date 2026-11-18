@@ -47,27 +47,13 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build pyvrp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build pyvrp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # Matches upstream's own cibuildwheel build glob (pyproject.toml), which
-        # excludes cp314t too.
-        python: ["cp311", "cp312", "cp313", "cp314"]
-        include:
-          # Upstream's baseline images were regenerated with matplotlib 3.11,
-          # which has no cp311 riscv64 wheel on our index; 3.10 renders these
-          # outside tol=8.5.
-          - python: cp311
-            pytest-args: >-
-              --deselect "tests/plotting/test_plotting.py::test_plot_solution[png]"
-              --deselect "tests/plotting/test_plotting.py::test_plot_result[png]"
-              --deselect "tests/plotting/test_plotting.py::test_plot_route_schedule[png]"
-              --deselect "tests/plotting/test_plotting.py::test_plot_route_schedule_shipments[png]"
-              --deselect "tests/plotting/test_plotting.py::test_plot_coordinates_shipments[png]"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       PYVRP_VERSION: ${{ matrix.version }}
@@ -96,7 +82,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          only: ${{ matrix.python }}-manylinux_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_BUILD_FRONTEND: build
           CIBW_ENVIRONMENT: >-
@@ -105,15 +91,18 @@ jobs:
           CIBW_TEST_REQUIRES: pytest pytest-cov pytest-xdist
           # 100 calls must finish inside a 10 ms MaxRuntime budget under
           # coverage tracing and xdist; the busy riscv64 runner overshoots it.
+          # Upstream's baseline images were regenerated with matplotlib 3.11,
+          # which has no cp311 riscv64 wheel on our index; 3.10 renders these
+          # outside tol=8.5.
           CIBW_TEST_COMMAND: >-
             cd {project}/tests && pytest -v
             --deselect "tests/stop/test_MaxRuntime.py::test_before_max_runtime[0.01]"
             --deselect "tests/stop/test_MultipleCriteria.py::test_before_max_runtime[0.01]"
-            ${{ matrix.pytest-args }}
+            ${{ matrix.python == 'cp311' && '--deselect "tests/plotting/test_plotting.py::test_plot_solution[png]" --deselect "tests/plotting/test_plotting.py::test_plot_result[png]" --deselect "tests/plotting/test_plotting.py::test_plot_route_schedule[png]" --deselect "tests/plotting/test_plotting.py::test_plot_route_schedule_shipments[png]" --deselect "tests/plotting/test_plotting.py::test_plot_coordinates_shipments[png]"' || '' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pyvrp-${{ env.PYVRP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: pyvrp-${{ env.PYVRP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 

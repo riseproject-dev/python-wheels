@@ -45,6 +45,11 @@ jobs:
     uses: $/.github/workflows/_setup.yml
     with:
       package: snowflake-connector-python
+      # docs/packages/snowflake-connector-python.yaml still carries pending
+      # 3.10/3.11:manylinux entries that this workflow has never built; keep
+      # excluding them so the generated matrix matches the long-standing
+      # cp312+ scope.
+      python-exclude: 'cp39 cp310 cp311'
       version: ${{ inputs.version }}
 
   build_wheels:
@@ -56,24 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # Per-interpreter (not abi3): the Cython extension links the version-specific ABI.
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        # `include` entries that share no key with another axis merge into every
-        # combination in order, so without the `python` axis above the last entry
-        # here (cp314t) silently overwrote matrix.python for every version and the
-        # cp312/cp313/cp314 legs never ran.
-        include:
-          - python: "cp312"
-            pytest_dist: "-n auto --dist loadfile"
-          - python: "cp313"
-            pytest_dist: "-n auto --dist loadfile"
-          - python: "cp314"
-            pytest_dist: "-n auto --dist loadfile"
-          # execnet's receiver thread segfaults intermittently under the
-          # free-threaded interpreter, so run this one in-process.
-          - python: "cp314t"
-            pytest_dist: "-n 0"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       SNOWFLAKE_CONNECTOR_VERSION: ${{ matrix.version }}
@@ -151,6 +139,8 @@ jobs:
           # connector's RetryRequest; on this riscv64 runner the reset surfaces as
           # OSError EINVAL from the test's own socket setup instead (failed twice in a
           # row on cp313 while the other 1777 unit tests pass).
+          # execnet's receiver thread segfaults intermittently under the
+          # free-threaded interpreter, so cp314t runs the suite in-process.
           CIBW_TEST_COMMAND: >-
             python -c "from snowflake.connector.nanoarrow_arrow_iterator import PyArrowRowIterator" &&
             pytest -m "unit and not sso and not pandas and not lambda and not aio"
@@ -164,7 +154,7 @@ jobs:
             and not test_put_error
             and not test_auth_keypair_ecdsa_unsupported_curve
             and not test_retry_connection_reset_error"
-            ${{ matrix.pytest_dist }}
+            ${{ matrix.python == 'cp314t' && '-n 0' || '-n auto --dist loadfile' }}
             --ignore {package}/test/unit/aio
             --ignore {package}/test/unit/test_ocsp.py
             --ignore {package}/test/unit/test_proxies.py

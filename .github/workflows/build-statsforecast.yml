@@ -42,6 +42,10 @@ jobs:
     uses: $/.github/workflows/_setup.yml
     with:
       package: statsforecast
+      # docs/packages/statsforecast.yaml still carries pending 3.10/3.11
+      # :manylinux entries that this workflow has never built; keep excluding
+      # them so the generated matrix matches the long-standing cp312+ scope.
+      python-exclude: 'cp39 cp310 cp311'
       version: ${{ inputs.version }}
 
   build_wheels:
@@ -53,18 +57,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pybind11 links the version-specific ABI, no abi3 build.
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # statsmodels (a hard, unguarded runtime dep) has no riscv64 wheel
-          # for cp314 or cp314t on pypi.riseproject.dev yet
-          # (build-statsmodels.yml's own matrix is cp312/cp313 only); pandas
-          # is also missing for cp314t. Build still runs for both.
-          - python: "cp314"
-            test_skip: "*"
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       STATSFORECAST_VERSION: ${{ matrix.version }}
@@ -101,7 +95,11 @@ jobs:
           CIBW_TEST_ENVIRONMENT: >-
             PIP_ONLY_BINARY=numpy,pandas,statsmodels,matplotlib,scikit-learn
             MPLBACKEND=Agg
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # statsmodels (a hard, unguarded runtime dep) has no riscv64 wheel
+          # for cp314 or cp314t on pypi.riseproject.dev yet
+          # (build-statsmodels.yml's own matrix is cp312/cp313 only); pandas
+          # is also missing for cp314t. Build still runs for both.
+          CIBW_TEST_SKIP: ${{ contains(fromJSON('["cp314","cp314t"]'), matrix.python) && '*' || '' }}
           # scikit-learn is an unguarded import inside MFLES's optimizer path
           # (statsforecast/mfles.py), not just SklearnModel's own tests.
           CIBW_TEST_REQUIRES: pytest matplotlib scikit-learn polars==1.44.1

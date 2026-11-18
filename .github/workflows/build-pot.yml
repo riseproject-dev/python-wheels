@@ -44,12 +44,16 @@ jobs:
     uses: $/.github/workflows/_setup.yml
     with:
       package: pot
+      # docs/packages/pot.yaml still carries pending 3.9/3.10/3.11:manylinux
+      # entries that this workflow has never built; keep excluding them so the
+      # generated matrix matches the long-standing cp312+ scope.
+      python-exclude: 'cp39 cp310 cp311'
       version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build pot ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build pot ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
     runs-on: ubuntu-24.04-riscv
     # 60m was too tight: cp314t's free-threaded build was still running tests
     # (no failures) when cancelled at exactly 60m, while cp312/313/314 finish
@@ -59,19 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          # test_BaseEstimator hits a real bug in ot.utils.BaseEstimator.get_params():
-          # it saves/restores warnings.filters via a bare `.pop(0)` in a finally
-          # block, mutating process-global state with no protection. Under cp314t
-          # something about the surrounding tests' warnings-filter state leaves
-          # that list already empty by the time this runs, so the pop() raises
-          # IndexError instead of the test's own expected ValueError -- a fragile
-          # global-state pattern in POT's own code, not a riscv64 issue (same
-          # class of free-threading-exposed fragility as this session's asv port).
-          - python: "cp314t"
-            extra_deselect: '--deselect "test/test_utils.py::test_BaseEstimator"'
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     env:
       POT_VERSION: ${{ matrix.version }}
@@ -97,7 +89,7 @@ jobs:
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # numpy/scipy are build- and run-time requirements; only our registry
@@ -114,7 +106,17 @@ jobs:
           # and imports openmp_helpers from there directly (not through the
           # installed `ot` package) -- needs staging alongside test/ too.
           CIBW_TEST_SOURCES: test ot/helpers
-          CIBW_TEST_COMMAND: python -m pytest --durations=20 -v test ${{ matrix.extra_deselect }}
+          # test_BaseEstimator hits a real bug in ot.utils.BaseEstimator.get_params():
+          # it saves/restores warnings.filters via a bare `.pop(0)` in a finally
+          # block, mutating process-global state with no protection. Under cp314t
+          # something about the surrounding tests' warnings-filter state leaves
+          # that list already empty by the time this runs, so the pop() raises
+          # IndexError instead of the test's own expected ValueError -- a fragile
+          # global-state pattern in POT's own code, not a riscv64 issue (same
+          # class of free-threading-exposed fragility as this session's asv port).
+          CIBW_TEST_COMMAND: >-
+            python -m pytest --durations=20 -v test
+            ${{ matrix.python == 'cp314t' && '--deselect "test/test_utils.py::test_BaseEstimator"' || '' }}
 
       - name: Check wheel contents
         run: |
@@ -130,7 +132,7 @@ jobs:
       - name: Store wheels
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pot-${{ env.POT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: pot-${{ env.POT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
