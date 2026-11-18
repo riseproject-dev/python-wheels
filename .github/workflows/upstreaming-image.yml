@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# Rebuild the runner-free reproduction image (upstreaming/image/) from the
+# latest ghcr.io/riseproject-dev/riscv-runner/runner/ubuntu-24.04:prod, at
+# least once a week, whenever upstreaming/image/ changes on main, and on
+# demand. Builds natively on the riscv64 runners.
+#
+# Published as ghcr.io/riseproject-dev/python-wheels/upstreaming-repro with
+# tags ubuntu-24.04 (moving) and ubuntu-24.04-<base digest prefix>, and the
+# exact base digest in the org.opencontainers.image.base.digest label.
+# On pull requests it builds without pushing.
+name: Upstreaming reproduction image
+
+on:
+  schedule:
+    # Wednesdays 06:00 UTC: the runner image itself rebuilds Tuesdays 06:00.
+    - cron: '0 6 * * 3'
+  push:
+    branches: [main]
+    paths:
+      - 'upstreaming/image/**'
+      - '.github/workflows/upstreaming-image.yml'
+  pull_request:
+    paths:
+      - 'upstreaming/image/**'
+      - '.github/workflows/upstreaming-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstreaming-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE: ghcr.io/riseproject-dev/riscv-runner/runner/ubuntu-24.04:prod
+  IMAGE: ghcr.io/riseproject-dev/python-wheels/upstreaming-repro
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Resolve the current base digest
+        id: base
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "could not resolve $BASE"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "short=${digest:7:12}" >> "$GITHUB_OUTPUT"
+          echo "Base $BASE = $digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push outside pull requests)
+        env:
+          DIGEST: ${{ steps.base.outputs.digest }}
+          SHORT: ${{ steps.base.outputs.short }}
+          PUSH: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -euo pipefail
+          output=--load
+          [ "$PUSH" = true ] && output=--push
+          # Build from the exact digest resolved above, so the label and the
+          # layers cannot disagree if :prod moves during the build.
+          docker buildx build upstreaming/image \
+            --platform linux/riscv64 \
+            --pull \
+            --build-arg "BASE=${BASE%:*}@${DIGEST}" \
+            --label "org.opencontainers.image.base.name=$BASE" \
+            --label "org.opencontainers.image.base.digest=$DIGEST" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$IMAGE:ubuntu-24.04" -t "$IMAGE:ubuntu-24.04-$SHORT" \
+            "$output"
+          if [ "$PUSH" = true ]; then
+            pushed=$(docker buildx imagetools inspect "$IMAGE:ubuntu-24.04-$SHORT" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "Pushed $IMAGE:ubuntu-24.04-$SHORT = $pushed" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Smoke test (no daemon inside, host socket only)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          docker run --rm --init -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add "$(stat -c %g /var/run/docker.sock)" "$IMAGE:ubuntu-24.04" \
+            bash -lc 'uname -m; python3 --version; ! command -v dockerd; ! test -e /usr/local/bin/docker-init; docker version --format "{{.Server.Version}}"'
