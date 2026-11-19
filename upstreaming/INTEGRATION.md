@@ -142,7 +142,12 @@ retention or release behavior change. It also requires per-file commit history,
 issue/PR/review research and policy evidence before editing changelogs or other
 policy-sensitive files. Existing PR CI that builds but intentionally does not
 upload artifacts is left unchanged; any extra acceptance evidence belongs in a
-separate trusted probe. If PR creation was confirmed before workflow registration
+separate trusted probe. The first repair performed the required history analysis
+and produced the correct rewrite, but built-in GitHub research labels reproduced
+the pinned gateway's queue-finish DIFC incompatibility. Current local workflow
+changes give the sandboxed worker the same token-authenticated, read-only custom
+GitHub MCP route as the investigator. The worker detector and sandbox remain
+enabled; only the GitHub research transport changes. If PR creation was confirmed before workflow registration
 was repaired, the controller records a separate `dev_pr_update` CI-bootstrap
 operation. That operation may enable safe workflows and reopen only the exact
 recorded marked PR, once, to emit the normal event without rewriting operation

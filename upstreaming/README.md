@@ -182,9 +182,9 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    Fork creation, one-fork Administration/settings, inherited-workflow disabling
    and exact base branch initialization are live-verified.
 4. **Development.** The next tick requests a `development_patch`. Before any
-   edit, the worker must inspect per-file commit history, analogous accepted and
-   rejected PRs, relevant issues/reviews and repository contribution/release
-   policy. Policy-sensitive files such as changelogs are changed only when that
+   edit, the worker must use its token-authenticated read-only GitHub research
+   server to inspect per-file commit history, analogous accepted and rejected
+   PRs, relevant issues/reviews and repository contribution/release policy. Policy-sensitive files such as changelogs are changed only when that
    evidence establishes the convention. Repair tasks also receive bounded durable
    evidence summaries for the exact review or CI feedback that caused them. The
    `upstreaming-worker` then proposes
