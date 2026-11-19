@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+name: Upstreaming fork provisioning
+run-name: "Upstreaming fork provision ${{ inputs.operation-id }}"
+on:
+  workflow_dispatch:
+    inputs:
+      operation-id:
+        description: Controller-recorded fork_provision operation
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: upstreaming-fork-writer
+  cancel-in-progress: false
+jobs:
+  provision:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: upstreaming-publish
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+      - name: Validate the controller-recorded scope and operation
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation-id }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.provisioning preflight --operation-id "$OPERATION" --out provisioning/plan.json
+      - name: Mint a creation-only destination token if the fork is absent
+        id: creator
+        if: steps.preflight.outputs.create == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        env:
+          # The pinned action's generic permission-input parser supports this
+          # new App permission even though its static action.yml predates it.
+          INPUT_PERMISSION-REPOSITORY-CREATION: write
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-upstreaming
+          permission-contents: read
+      - name: Create or independently verify the fork
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation-id }}
+          UPSTREAMING_CREATION_TOKEN: ${{ steps.creator.outputs.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.provisioning create --operation-id "$OPERATION" --out provisioning/fork.json
+      - name: Mint a separate token restricted to this verified fork
+        id: fork-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-upstreaming
+          repositories: ${{ steps.create.outputs.fork_name }}
+          permission-contents: write
+          permission-workflows: write
+          permission-actions: write
+      - name: Initialize read-only CI and the exact riscv64 base, then verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation-id }}
+          UPSTREAMING_FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.provisioning initialize --operation-id "$OPERATION" \
+              --plan provisioning/fork.json --out provisioning/outcome.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: upstreaming-provisioning
+          path: provisioning/*.json
+          if-no-files-found: ignore
+          retention-days: 30
