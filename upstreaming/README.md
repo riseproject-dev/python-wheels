@@ -197,9 +197,10 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    exact head and asks for repairs
    while it fails. Passing means every required riscv64 job executed
    natively and a riscv64 wheel artifact was uploaded.
-5. **Upstream handoff.** Human involvement begins only after bounded development,
-   cleanup and CI evidence are complete. A human approves the exact clean head
-   and opens or registers the upstream-facing PR.
+5. **Upstream handoff.** When the exact development head passes its frozen CI
+   contract and has no debug commits, observation automatically records it as the
+   clean head and enters `handoff`. Human involvement begins there: a human
+   approves that exact head and opens or registers the upstream-facing PR.
 
 Investigator inputs, mandatory history/dependency/report research and the trusted
 pre-Completion gate: [`INVESTIGATION.md`](INVESTIGATION.md). Weekly runtime,

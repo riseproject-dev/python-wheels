@@ -265,7 +265,8 @@ Result, token, expected-head or operation-receipt checks.
 6. **Develop, publish and open the fork PR through workflows.** Resolve the exact
    Claim Result, mint a single-fork token, independently rebuild/validate the
    series, push only `riscv64` with an exact-head lease, verify readback and record
-   receipts. Implement development-PR creation/discovery with an operation marker.
+   receipts. Development-PR creation/discovery and marker readback are now
+   live-verified.
 7. **Observe actual PR CI and repair within budget.** Verify native
    `ubuntu-24.04-riscv` execution, build plus tests, wheel identities and independent
    acceptance probes. No skipped-job success, weakened tests or manual CI substitute.
