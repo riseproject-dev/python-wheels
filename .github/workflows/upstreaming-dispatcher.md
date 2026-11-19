@@ -24,10 +24,9 @@ tools:
 safe-outputs:
   threat-detection: false
   dispatch-workflow:
-    # The legacy investigator remains installed for historical Work. New
-    # requests explicitly use the additive v3 profile. V3 keeps GitHub MCP at
-    # approved integrity and routes untrusted history through read-only web tools.
-    workflows: [upstreaming-worker, upstreaming-investigator-v3]
+    # One current investigator contract. Development queue resets replace stale
+    # contracts rather than accumulating workflow versions.
+    workflows: [upstreaming-worker, upstreaming-investigator]
     target-ref: ${{ github.event.repository.default_branch }}
     max: 1
 steps:
@@ -72,7 +71,7 @@ policyless ledger or a tool error is a failure, not an empty backlog.
 
 The trusted preparation step read the task the upstreaming controller
 requested in the committed `upstreaming-state/` and staged at most one task
-(for the `upstreaming-investigator-v3` or `upstreaming-worker` profile) followed by
+(for the `upstreaming-investigator` or `upstreaming-worker` profile) followed by
 `{"pool":"upstreaming","max_claims":1,"max_dispatches":1}`. Explain the
 staged plan in one short paragraph: the contribution, the task kind and the
 reason it was selected. Do not submit again, choose a winner, dispatch

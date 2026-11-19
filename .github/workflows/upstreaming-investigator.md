@@ -28,9 +28,6 @@ tools:
   work-queue:
     require-assignment: true
     worker: true
-  github:
-    toolsets: [repos, issues, pull_requests, actions]
-    min-integrity: none
   bash:
     - "*"
   edit:
@@ -197,6 +194,51 @@ jobs:
             in/dossier.json
           if-no-files-found: ignore
           retention-days: 30
+  notify:
+    # Publish only the independently resolved native Result, never agent prose
+    # or staging. The exact-Result marker makes retries idempotent.
+    needs: [safe_outputs, record]
+    if: needs.safe_outputs.outputs.work_queue_outcome == 'completed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          path: control
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: upstreaming-publication
+          path: publication
+      - name: Publish or discover the exact verified dossier comment
+        working-directory: control
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          outcome=../publication/in/outcome.json
+          [ -f "$outcome" ] || outcome=../publication/outcome.json
+          [ "$(jq -r .status "$outcome")" = investigation ] || { echo "verified investigation unavailable; no comment"; exit 0; }
+          input() { [ -f "../publication/in/$1" ] && printf '../publication/in/%s' "$1" || printf '../publication/%s' "$1"; }
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.dossier_comment \
+              --dossier "$(input dossier.json)" --proposal "$(input proposal.json)" \
+              --task "$(input task.json)" --result "$(input result.json)" \
+              --out ../notification/outcome.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: upstreaming-notification
+          path: notification/outcome.json
+          if-no-files-found: ignore
+          retention-days: 30
 timeout-minutes: 90
 max-turns: 300
 # Only the read-only investigator gets unrestricted research access.
@@ -219,6 +261,22 @@ field says what to do; `reason_ids` and `context` say why.
 Only process the compiler-supplied `work_queue_assignment`. It has exactly
 one Claim; use its `handle` as `claim_handle` on every safe output and on
 `work_queue_claim_finish`.
+
+You may use bounded research subagents through the installed extension. Give
+independent read-only tasks; do not have concurrent writers to the same files.
+Only the coordinating investigator writes the final dossier and proposal,
+requests the single artifact upload, and finishes the original Claim. Subagents
+must not perform remote mutations or call terminal safe outputs independently.
+
+## Research route
+
+Use the installed read-only web extension (`web_search`, `fetch_content`,
+`get_search_content`, and its GitHub issue/PR support) for historical issues,
+PRs, reviews, comments and linked pages. Cross-check important claims against
+direct URLs and record the route and source for every category. The pinned MCP
+gateway cannot compose a labeled GitHub source guard with its unlabeled native
+queue-control server, so this read-only investigator intentionally has no GitHub
+MCP server. Do not use authenticated mutation tools or omit inaccessible history.
 
 ## Required research (do this before drawing conclusions)
 
