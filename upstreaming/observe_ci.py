@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import ci_evidence, collect, lifecycle, recovery
+from . import ci_evidence, collect, lifecycle, recovery, schemas
 from .common import DEV_REF, safe_id
 
 WATCH_PHASES = {"development", "handoff", "upstream_review"}
@@ -118,6 +118,19 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
             if verdict.state == "passed" and cur.get("last_ci_evidence_id") != eid:
                 cur = dict(cur, last_ci_evidence_id=eid, updated_at=now)
                 obs.staged.append(("contributions", cur))
+            if verdict.state == "passed" and cur["phase"] == "development" and not cur.get("debug_commits"):
+                before = cur
+                cur = dict(cur, phase="handoff", activity="waiting_human", clean_head_sha=head["head"],
+                           handoff_request={"command_id": f"observation-{eid}", "head": head["head"],
+                                            "revision": cur["revision"]},
+                           pending_human_action={"kind": "approve_handoff", "requested_at": now,
+                                                 "reminded_at": None, "escalated_at": None},
+                           updated_at=now)
+                schemas.validate("contribution", cur)
+                obs.staged.append(("contributions", cur))
+                obs.staged.append(("events", lifecycle._event(before, cur, "handoff_ready", "observation", eid, now, False)))
+                new_activity = "waiting_human"
+                entry["handoff_ready"] = True
             entry["evidence"] = eid
         if cur["activity"] != new_activity and cur["activity"] != "agent_running":
             out = lifecycle.observe_status(cur, activity=new_activity, now=now)
