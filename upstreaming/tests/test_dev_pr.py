@@ -73,6 +73,7 @@ class FakeApi:
             self.actions_enabled = value["enabled"]
             if was_enabled is False and self.actions_enabled is True:
                 self.workflows_registered = True
+                self.workflow_active = True
         if path.endswith("/enable"):
             self.workflow_active = True
         return {}
@@ -134,6 +135,16 @@ class TestDevelopmentPR(unittest.TestCase):
             pr_write = next(call for call in api.writes if call[0] == "POST")
             self.assertEqual(pr_write[2]["head"], "riscv64")
             self.assertEqual(pr_write[2]["base"], "main")
+
+    def test_new_registration_reopens_existing_marked_pr_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rec, op = records(root); api = FakeApi(rec, op, existing=True)
+            api.workflows_registered = False; api.workflow_active = False
+            with patch("upstreaming.dev_pr.Api", return_value=api), \
+                 patch("upstreaming.dev_pr.provisioning.WriteApi", return_value=api):
+                receipt = dev_pr.publish(root, op["operation_id"], "token", "101")
+            self.assertEqual(receipt["pr_number"], 4)
+            self.assertEqual([call[2]["state"] for call in api.writes if call[0] == "PATCH"], ["closed", "open"])
 
     def test_existing_marked_pr_is_reused_without_duplicate(self):
         with tempfile.TemporaryDirectory() as td:

@@ -117,7 +117,8 @@ def request_from_active(rec: dict) -> dict | None:
         return None
     fork = rec.get("fork") or {}
     return {"type": "submit_work", "dedupe_key": aw["dedupe_key"], "contribution_id": rec["contribution_id"],
-            "revision": rec["revision"], "expected_head": fork.get("head_sha"), "task": aw["task"]}
+            "revision": rec["revision"], "expected_head": fork.get("head_sha"), "task": aw["task"],
+            "reason_ids": aw.get("reason_ids") or []}
 
 
 def node(request: dict, record: dict, **kw) -> dict:

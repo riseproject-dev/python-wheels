@@ -196,10 +196,17 @@ def cmd_plan(args) -> int:
         if not (rec["active_work"].get("tracking_issue") or {}).get("url"):
             raise ValueError("requested task lacks a frozen tracking-issue description; request a fresh revision")
         ctr = (contracts.get(rec.get("target_contract_id") or "") or {}).get("data") or {}
+        reason_evidence = []
+        for evidence_id in req.get("reason_ids") or []:
+            evidence = snap.evidence.get(evidence_id)
+            if evidence:
+                reason_evidence.append({key: evidence.get(key) for key in
+                                        ("evidence_id", "kind", "summary", "limitations")})
         nodes.append(work.node(req, rec, control_repo_id=args.control_repo_id,
                                allowed_paths=rec.get("scope_paths") or ctr.get("allowed_paths")
                                or [".github/workflows/*"],
-                               context={"requested_at": rec["active_work"]["requested_at"]}))
+                               context={"requested_at": rec["active_work"]["requested_at"],
+                                        "reason_evidence": reason_evidence}))
         selected.append({"contribution": rec["contribution_id"], "task": req["task"],
                          "worker_profile": nodes[-1]["worker_profile"]})
     print(json.dumps({"selected": selected}, indent=2))

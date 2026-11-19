@@ -113,7 +113,7 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
         "draft": False,
         "maintainer_can_modify": False,
     })
-    if matching and configured["enabled"]:
+    if matching and (configured["enabled"] or op["kind"] == "dev_pr_update"):
         api.mutate("PATCH", f"/repos/{repo['full_name']}/pulls/{pr['number']}", {"state": "closed"})
         pr = api.mutate("PATCH", f"/repos/{repo['full_name']}/pulls/{pr['number']}", {"state": "open"})
     observed = api.get(f"/repos/{repo['full_name']}/pulls/{pr['number']}")
