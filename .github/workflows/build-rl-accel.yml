@@ -53,39 +53,42 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build rl-accel ${{ matrix.version }} cp37-abi3-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "rl-accel"
+      version: "${{ matrix.version }}"
+      repository: "MrBitBucket/rl-accel-mirror"
+      ref: "c40d10c99b5a1a7e88146bacab67c36541a371ee"
+      artifact-tag: "cp37-abi3-manylinux_riscv64"
+      # setup.py's bdist_wheel_abi3 always tags the wheel cp37-abi3 on Linux
+      # (gotcha 34 shape), so build once and let cibuildwheel reuse+retest the
+      # same wheel on cp313/cp314 (gotcha 96). No free-threaded wheel: cp314t
+      # can't target Py_LIMITED_API, same as upstream builds only cp313-*.
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      cibw-test-command: "python {project}/tests/testcs.py && python {project}/tests/testrc.py | tee /tmp/testrc.out && ! grep -q 'reference counts changed' /tmp/testrc.out"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       RL_ACCEL_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout rl_accel ${{ env.RL_ACCEL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: MrBitBucket/rl-accel-mirror
-          ref: c40d10c99b5a1a7e88146bacab67c36541a371ee
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # setup.py's bdist_wheel_abi3 always tags the wheel cp37-abi3 on Linux
-          # (gotcha 34 shape), so build once and let cibuildwheel reuse+retest the
-          # same wheel on cp313/cp314 (gotcha 96). No free-threaded wheel: cp314t
-          # can't target Py_LIMITED_API, same as upstream builds only cp313-*.
-          CIBW_BUILD: >-
-            cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_COMMAND: >-
-            python {project}/tests/testcs.py &&
-            python {project}/tests/testrc.py | tee /tmp/testrc.out &&
-            ! grep -q 'reference counts changed' /tmp/testrc.out
+          name: rl-accel-${{ env.RL_ACCEL_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel is abi3 and carries the compiled extension + LICENSE
         run: |
@@ -100,15 +103,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: rl-accel-${{ env.RL_ACCEL_VERSION }}-cp37-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish rl-accel ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

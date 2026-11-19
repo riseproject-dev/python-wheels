@@ -50,118 +50,125 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pcapy-ng ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pcapy-ng"
+      version: "${{ matrix.version }}"
+      repository: "stamparm/pcapy-ng"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, at the project root, the licence of every shared library
+        # auditwheel vendors out of the build image alongside libpcap.
+        # setuptools' default LICENSE* glob copies them into the wheel.
+        set -euo pipefail
+
+        project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+        if command -v apk > /dev/null; then
+            # Alpine's libpcap links nothing but musl and ships no licence file,
+            # so take it from the matching upstream release tag.
+            mapfile -t deps < <(ldd /usr/lib/libpcap.so | tr ' ' '\n' | grep '^/' | grep -v '/ld-musl-' || true)
+            [ -z "${deps[0]:-}" ] || { echo "unexpected libpcap dependencies: ${deps[*]}" >&2; exit 1; }
+            version=$(basename "$(readlink -f /usr/lib/libpcap.so)" | sed 's/^libpcap\.so\.//')
+            curl -fsSL --retry 5 -o "$project/LICENSE.libpcap.LICENSE" \
+                "https://raw.githubusercontent.com/the-tcpdump-group/libpcap/libpcap-${version}/LICENSE"
+            ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+            exit 0
+        fi
+
+        # ldd is transitive, so libpcap alone covers its whole closure;
+        # ldd does not list the root itself, so resolve that too.
+        mapfile -t libs < <(
+            {
+                ldd /usr/lib64/libpcap.so | tr ' ' '\n' | grep '^/'
+                readlink -f /usr/lib64/libpcap.so
+            } | sort -u
+        )
+
+        # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+        # glibc and the gcc runtime are on auditwheel's manylinux allowlist and
+        # are never vendored into the wheel.
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$'
+        )
+
+        for pkg in "${pkgs[@]}"; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+            # Some subpackages leave the licence to a sibling of the same source RPM.
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
+
+            # Or to the uninstalled main package named after it (libibverbs -> rdma-core).
+            if [ -z "${files[0]:-}" ]; then
+                base=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg" | sed -E 's/-[^-]+-[^-]+\.src\.rpm$//')
+                if [ "$base" != "$pkg" ]; then
+                    dnf -y --disablerepo=extras install "$base" >/dev/null
+                    mapfile -t files < <(rpm -q --licensefiles "$base" 2>/dev/null || true)
+                fi
+            fi
+
+            # Others mark it %doc rather than %license, and the image installs no docs.
+            if [ -z "${files[0]:-}" ]; then
+                dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+            fi
+
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
+
+        ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+        COLLECT_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-before-all-linux: "(yum install -y libpcap-devel || dnf install -y libpcap-devel || true) && (apk add --no-cache libpcap-dev || true) && bash {project}/collect-licenses.sh {project}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PCAPY_NG_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pcapy-ng ${{ env.PCAPY_NG_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: stamparm/pcapy-ng
-          ref: ${{ env.PCAPY_NG_VERSION }}
-          persist-credentials: false
-
-      - name: Stage the licence-collection script
-        run: |
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, at the project root, the licence of every shared library
-          # auditwheel vendors out of the build image alongside libpcap.
-          # setuptools' default LICENSE* glob copies them into the wheel.
-          set -euo pipefail
-
-          project="${1:?usage: collect-licenses.sh <project-dir>}"
-
-          if command -v apk > /dev/null; then
-              # Alpine's libpcap links nothing but musl and ships no licence file,
-              # so take it from the matching upstream release tag.
-              mapfile -t deps < <(ldd /usr/lib/libpcap.so | tr ' ' '\n' | grep '^/' | grep -v '/ld-musl-' || true)
-              [ -z "${deps[0]:-}" ] || { echo "unexpected libpcap dependencies: ${deps[*]}" >&2; exit 1; }
-              version=$(basename "$(readlink -f /usr/lib/libpcap.so)" | sed 's/^libpcap\.so\.//')
-              curl -fsSL --retry 5 -o "$project/LICENSE.libpcap.LICENSE" \
-                  "https://raw.githubusercontent.com/the-tcpdump-group/libpcap/libpcap-${version}/LICENSE"
-              ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-              exit 0
-          fi
-
-          # ldd is transitive, so libpcap alone covers its whole closure;
-          # ldd does not list the root itself, so resolve that too.
-          mapfile -t libs < <(
-              {
-                  ldd /usr/lib64/libpcap.so | tr ' ' '\n' | grep '^/'
-                  readlink -f /usr/lib64/libpcap.so
-              } | sort -u
-          )
-
-          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
-          # glibc and the gcc runtime are on auditwheel's manylinux allowlist and
-          # are never vendored into the wheel.
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$'
-          )
-
-          for pkg in "${pkgs[@]}"; do
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
-
-              # Some subpackages leave the licence to a sibling of the same source RPM.
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
-
-              # Or to the uninstalled main package named after it (libibverbs -> rdma-core).
-              if [ -z "${files[0]:-}" ]; then
-                  base=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg" | sed -E 's/-[^-]+-[^-]+\.src\.rpm$//')
-                  if [ "$base" != "$pkg" ]; then
-                      dnf -y --disablerepo=extras install "$base" >/dev/null
-                      mapfile -t files < <(rpm -q --licensefiles "$base" 2>/dev/null || true)
-                  fi
-              fi
-
-              # Others mark it %doc rather than %license, and the image installs no docs.
-              if [ -z "${files[0]:-}" ]; then
-                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
-                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
-              fi
-
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-
-          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-          COLLECT_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            (yum install -y libpcap-devel || dnf install -y libpcap-devel || true) &&
-            (apk add --no-cache libpcap-dev || true) &&
-            bash {project}/collect-licenses.sh {project}
+          name: pcapy-ng-${{ env.PCAPY_NG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the extension and every vendored library's licence
         run: |
@@ -189,12 +196,6 @@ jobs:
           print("vendored:", sorted(vendored))
           assert vendored <= have_pkgs, vendored - have_pkgs
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pcapy-ng-${{ env.PCAPY_NG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -231,7 +232,7 @@ jobs:
 
   publish:
     name: Publish pcapy-ng ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

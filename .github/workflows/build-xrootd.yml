@@ -48,124 +48,131 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build xrootd ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "xrootd"
+      version: "${{ matrix.version }}"
+      repository: "xrootd/xrootd"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        echo -n '${{ matrix.version }}' > VERSION
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, at the project root, the licence of every shared library
+        # auditwheel vendors out of the build image alongside the XRootD
+        # client libraries (OpenSSL, Kerberos, libuuid and their closure).
+        # setuptools' default LICENSE* glob copies them into the wheel.
+        set -euo pipefail
+
+        project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+        # ldd is transitive, so these roots cover their whole closure; ldd
+        # does not list the roots themselves, so resolve those too. libcrypt
+        # is not pulled in by any -devel package above: XrdUtils' own CMake
+        # probes for crypt() directly and links libc-adjacent libxcrypt,
+        # which the base image already ships.
+        mapfile -t libs < <(
+            {
+                for root in libssl.so libcrypto.so libkrb5.so libuuid.so libcrypt.so; do
+                    path="/usr/lib64/${root}"
+                    [ -e "${path}" ] || continue
+                    ldd "${path}" | tr ' ' '\n' | grep '^/'
+                    readlink -f "${path}"
+                done
+            } | sort -u
+        )
+
+        # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+        # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist
+        # (confirmed against the upstream x86_64 wheel's auditwheel-vendored set)
+        # and are never vendored into the wheel; zlib-ng-compat also ships no
+        # licence file via any rpm metadata path, so it would break the loop below.
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+        )
+
+        for pkg in "${pkgs[@]}"; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+            # Some subpackages leave the licence to a sibling of the same source RPM.
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
+
+            # Others mark it %doc rather than %license, and the image installs no docs.
+            if [ -z "${files[0]:-}" ]; then
+                dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+            fi
+
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
+
+        ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+        COLLECT_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all-linux: "dnf install -y krb5-devel libuuid-devel openssl-devel && bash {project}/collect-licenses.sh {project}"
+      cibw-environment-linux: "CMAKE_ARGS=-DCMAKE_BUILD_TYPE=Release"
+      # Upstream's own manylinux job test step (python.yml): import the
+      # extension and the pure-Python client, then build a FileSystem
+      # object (no network I/O, so no server needed).
+      cibw-test-command: |-
+        python -m pip show xrootd &&
+        python -c "import XRootD; print(XRootD)" &&
+        python -c "import pyxrootd; print(pyxrootd)" &&
+        python -c "from XRootD import client; help(client)" &&
+        python -c "from XRootD import client; print(client.FileSystem('root://localhost'))"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       XROOTD_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout xrootd v${{ env.XROOTD_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: xrootd/xrootd
-          ref: v${{ env.XROOTD_VERSION }}
-          persist-credentials: false
-
-      # The tag's VERSION file is an unexpanded `git-archive` export-subst
-      # placeholder (`$Format:%(describe)$`); setup.py and CMake both fall
-      # back to `git describe`, which a shallow single-ref checkout can't
-      # answer. Writing the real version here is the officially supported
-      # override (cmake/XRootDVersion.cmake reads this file first).
-      - name: Set version from tag
-        run: echo -n '${{ env.XROOTD_VERSION }}' > VERSION
-
-      - name: Stage the licence-collection script
-        run: |
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, at the project root, the licence of every shared library
-          # auditwheel vendors out of the build image alongside the XRootD
-          # client libraries (OpenSSL, Kerberos, libuuid and their closure).
-          # setuptools' default LICENSE* glob copies them into the wheel.
-          set -euo pipefail
-
-          project="${1:?usage: collect-licenses.sh <project-dir>}"
-
-          # ldd is transitive, so these roots cover their whole closure; ldd
-          # does not list the roots themselves, so resolve those too. libcrypt
-          # is not pulled in by any -devel package above: XrdUtils' own CMake
-          # probes for crypt() directly and links libc-adjacent libxcrypt,
-          # which the base image already ships.
-          mapfile -t libs < <(
-              {
-                  for root in libssl.so libcrypto.so libkrb5.so libuuid.so libcrypt.so; do
-                      path="/usr/lib64/${root}"
-                      [ -e "${path}" ] || continue
-                      ldd "${path}" | tr ' ' '\n' | grep '^/'
-                      readlink -f "${path}"
-                  done
-              } | sort -u
-          )
-
-          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
-          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist
-          # (confirmed against the upstream x86_64 wheel's auditwheel-vendored set)
-          # and are never vendored into the wheel; zlib-ng-compat also ships no
-          # licence file via any rpm metadata path, so it would break the loop below.
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
-          )
-
-          for pkg in "${pkgs[@]}"; do
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
-
-              # Some subpackages leave the licence to a sibling of the same source RPM.
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
-
-              # Others mark it %doc rather than %license, and the image installs no docs.
-              if [ -z "${files[0]:-}" ]; then
-                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
-                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
-              fi
-
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-
-          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-          COLLECT_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y krb5-devel libuuid-devel openssl-devel &&
-            bash {project}/collect-licenses.sh {project}
-          CIBW_ENVIRONMENT: CMAKE_ARGS=-DCMAKE_BUILD_TYPE=Release
-          # Upstream's own manylinux job test step (python.yml): import the
-          # extension and the pure-Python client, then build a FileSystem
-          # object (no network I/O, so no server needed).
-          CIBW_TEST_COMMAND: |
-            python -m pip show xrootd &&
-            python -c "import XRootD; print(XRootD)" &&
-            python -c "import pyxrootd; print(pyxrootd)" &&
-            python -c "from XRootD import client; help(client)" &&
-            python -c "from XRootD import client; print(client.FileSystem('root://localhost'))"
+          name: xrootd-${{ env.XROOTD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the compiled extension and licences
         run: |
@@ -183,15 +190,9 @@ jobs:
           assert expected_pkgs <= have_pkgs, expected_pkgs - have_pkgs
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: xrootd-${{ env.XROOTD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish xrootd ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

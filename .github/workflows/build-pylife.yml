@@ -49,49 +49,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pylife ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pylife"
+      version: "${{ matrix.version }}"
+      repository: "boschresearch/pylife"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy/cython are build-time deps and numpy, scipy, pandas and h5py are runtime
+      # ones; only our registry has riscv64 wheels for them, and PIP_ONLY_BINARY keeps a
+      # newer PyPI sdist from winning the resolution and compiling from source.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,pandas,h5py,cython"
+      cibw-test-requires: "pytest"
+      # tests/stress/rainflow/test_fkm_nonlinear.py opens its reference JSON fixtures by a
+      # path relative to the process cwd (e.g. 'tests/stress/rainflow/reference-fkm-nonlinear/
+      # reference_first_second-4.json'), not relative to __file__. cibuildwheel runs
+      # CIBW_TEST_COMMAND from an isolated test_cwd, not from {project}, so those opens
+      # raise FileNotFoundError regardless of interpreter or arch (gotcha 104/111; see also
+      # gotcha 243 on not assuming a CIBW_TEST_COMMAND failure is riscv64-specific). pylife
+      # uses a src/ layout (package lives at src/pylife, not at the checkout root), so
+      # cd'ing into {project} does not risk shadowing the installed wheel with the local
+      # source tree.
+      cibw-test-command: "cd {project} && pytest tests/stress/rainflow tests/strength/fkm_linear"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYLIFE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pylife ${{ env.PYLIFE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: boschresearch/pylife
-          ref: ${{ env.PYLIFE_VERSION }}
-          fetch-depth: 0  # setuptools_scm derives the version from the git tag
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy/cython are build-time deps and numpy, scipy, pandas and h5py are runtime
-          # ones; only our registry has riscv64 wheels for them, and PIP_ONLY_BINARY keeps a
-          # newer PyPI sdist from winning the resolution and compiling from source.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas,h5py,cython
-          CIBW_TEST_REQUIRES: pytest
-          # tests/stress/rainflow/test_fkm_nonlinear.py opens its reference JSON fixtures by a
-          # path relative to the process cwd (e.g. 'tests/stress/rainflow/reference-fkm-nonlinear/
-          # reference_first_second-4.json'), not relative to __file__. cibuildwheel runs
-          # CIBW_TEST_COMMAND from an isolated test_cwd, not from {project}, so those opens
-          # raise FileNotFoundError regardless of interpreter or arch (gotcha 104/111; see also
-          # gotcha 243 on not assuming a CIBW_TEST_COMMAND failure is riscv64-specific). pylife
-          # uses a src/ layout (package lives at src/pylife, not at the checkout root), so
-          # cd'ing into {project} does not risk shadowing the installed wheel with the local
-          # source tree.
-          CIBW_TEST_COMMAND: cd {project} && pytest tests/stress/rainflow tests/strength/fkm_linear
+          name: pylife-${{ env.PYLIFE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the licence and the compiled extensions
         run: |
@@ -104,16 +108,9 @@ jobs:
               assert any(n.startswith(f"pylife/{ext}.") and n.endswith(".so") for n in names), names
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pylife-${{ env.PYLIFE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pylife ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

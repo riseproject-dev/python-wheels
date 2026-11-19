@@ -52,61 +52,60 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyproj ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyproj"
+      version: "${{ matrix.version }}"
+      repository: "pyproj4/pyproj"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 600
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pyproj/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all: "bash ./ci/proj-compile-wheels.sh"
+      cibw-environment-linux: "PROJ_WHEEL=true PROJ_NETWORK=ON PROJ_VERSION=9.5.1 PROJ_DIR=/project/pyproj/proj_dir"
+      cibw-test-requires: "cython pytest numpy"
+      cibw-before-test: "python -m pip install shapely pandas xarray || echo \"Optional requirements install failed\""
+      # PyPI has no riscv64 wheel for these and ours lag its latest release, so keep pip
+      # off the sdists; test-only (gotcha 12) since Cython has to compile from source.
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,pandas,shapely"
+      cibw-test-command: "python -c \"import importlib.metadata as m; n=sorted(p.name for p in m.files('pyproj') if 'licenses/' in str(p)); assert n == ['LICENSE', 'LICENSE_curl', 'LICENSE_libtiff', 'LICENSE_nghttp2', 'LICENSE_openssl', 'LICENSE_proj'], n\" && pyproj -v && python -c \"import pyproj; pyproj.Proj(init='epsg:4269')\" && cp -r {package}/test . && python -m pytest test -v -s"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYPROJ_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyproj ${{ env.PYPROJ_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pyproj4/pyproj
-          ref: ${{ env.PYPROJ_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # auditwheel vendors the curl/libtiff/nghttp2 (and statically, OpenSSL) that
-      # ci/proj-compile-wheels.sh builds, but the wheel ships only pyproj's own licences.
-      - name: Patch pyproj source
-        run: |
-          git apply python-wheels/patches/pyproj/${{ env.PYPROJ_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL: bash ./ci/proj-compile-wheels.sh
-          CIBW_ENVIRONMENT: >-
-            PROJ_WHEEL=true
-            PROJ_NETWORK=ON
-            PROJ_VERSION=${{ env.PROJ_VERSION }}
-            PROJ_DIR=/project/pyproj/proj_dir
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: cython pytest numpy
-          CIBW_BEFORE_TEST: python -m pip install shapely pandas xarray || echo "Optional requirements install failed"
-          # PyPI has no riscv64 wheel for these and ours lag its latest release, so keep pip
-          # off the sdists; test-only (gotcha 12) since Cython has to compile from source.
-          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=numpy,pandas,shapely'
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; n=sorted(p.name for p in m.files('pyproj') if 'licenses/' in str(p)); assert n == ['LICENSE', 'LICENSE_curl', 'LICENSE_libtiff', 'LICENSE_nghttp2', 'LICENSE_openssl', 'LICENSE_proj'], n" &&
-            pyproj -v &&
-            python -c "import pyproj; pyproj.Proj(init='epsg:4269')" &&
-            cp -r {package}/test . &&
-            python -m pytest test -v -s
+          name: pyproj-${{ env.PYPROJ_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the compiled extensions and PROJ made it into the wheel
         run: |
@@ -120,15 +119,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyproj-${{ env.PYPROJ_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyproj ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

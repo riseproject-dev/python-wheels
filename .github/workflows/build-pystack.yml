@@ -48,95 +48,105 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pystack ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pystack"
+      version: "${{ matrix.version }}"
+      repository: "bloomberg/pystack"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, at the project root, the licence of everything that ends up inside the
+        # wheel: the elfutils built by upstream's before-all and every shared library
+        # auditwheel vendors out of the build image alongside it.
+        # scikit-build-core's default LICEN[CS]E* glob copies them into the wheel.
+        set -euo pipefail
+
+        project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+        # The extension must link the elfutils before-all built, not a packaged one.
+        vers=$(pkg-config --modversion libdw)
+        [ -d "/elfutils-$vers" ] ||
+            { echo "libdw $vers is not the elfutils built by before-all" >&2; exit 1; }
+        libdir=$(pkg-config --variable=libdir libdw)
+
+        for f in "/elfutils-$vers"/COPYING*; do
+            cp "$f" "$project/LICENSE.elfutils.$(basename "$f")"
+        done
+
+        mapfile -t libs < <(
+            LD_LIBRARY_PATH="$libdir" ldd "$libdir/libdw.so" "$libdir/libelf.so" |
+                awk '$2 == "=>" && $3 ~ /^\// { print $3 }' |
+                xargs -r readlink -f | sort -u
+        )
+
+        # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
+        # are never vendored into the wheel.
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$' || true
+        )
+
+        for pkg in "${pkgs[@]}"; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
+
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
+
+        ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+        COLLECT_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-build-linux: "bash {project}/collect-licenses.sh {project}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYSTACK_VERSION: ${{ matrix.version }}
-
     steps:
-      # Upstream builds from its sdist; the checkout is the same tree.
-      - name: Checkout pystack v${{ env.PYSTACK_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: bloomberg/pystack
-          ref: v${{ env.PYSTACK_VERSION }}
-          persist-credentials: false
-
-      - name: Stage the licence-collection script
-        run: |
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, at the project root, the licence of everything that ends up inside the
-          # wheel: the elfutils built by upstream's before-all and every shared library
-          # auditwheel vendors out of the build image alongside it.
-          # scikit-build-core's default LICEN[CS]E* glob copies them into the wheel.
-          set -euo pipefail
-
-          project="${1:?usage: collect-licenses.sh <project-dir>}"
-
-          # The extension must link the elfutils before-all built, not a packaged one.
-          vers=$(pkg-config --modversion libdw)
-          [ -d "/elfutils-$vers" ] ||
-              { echo "libdw $vers is not the elfutils built by before-all" >&2; exit 1; }
-          libdir=$(pkg-config --variable=libdir libdw)
-
-          for f in "/elfutils-$vers"/COPYING*; do
-              cp "$f" "$project/LICENSE.elfutils.$(basename "$f")"
-          done
-
-          mapfile -t libs < <(
-              LD_LIBRARY_PATH="$libdir" ldd "$libdir/libdw.so" "$libdir/libelf.so" |
-                  awk '$2 == "=>" && $3 ~ /^\// { print $3 }' |
-                  xargs -r readlink -f | sort -u
-          )
-
-          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
-          # are never vendored into the wheel.
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$' || true
-          )
-
-          for pkg in "${pkgs[@]}"; do
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
-
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
-
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-
-          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-          COLLECT_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_BUILD_LINUX: bash {project}/collect-licenses.sh {project}
+          name: pystack-${{ env.PYSTACK_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the compiled extension and its licences
         run: |
@@ -153,12 +163,6 @@ jobs:
           assert any(n.startswith("LICENSE.elfutils.") for n in lic), lic
           assert any(n.startswith("LICENSE.libzstd.") for n in lic), lic
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pystack-${{ env.PYSTACK_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   test_wheels:
     needs: [setup, build_wheels]
@@ -216,10 +220,10 @@ jobs:
 
       # gotcha 616: riscv64's native-frame reporting can't find the CPython eval-loop or
       # GC-collecting frame on 3.13+ targets (28 identical failures on 3.13/3.14/3.14t,
-      # all pass on 3.12) — deselect only those tests on the affected interpreters. With
+      # all pass on 3.12) - deselect only those tests on the affected interpreters. With
       # PYTHON_TEST_VERSION=auto, pystack's tests id the target python from
       # sys.version_info[:2], which drops the free-threading suffix, so the 3.14t leg
-      # produces "python=3.14" ids, not "python=3.14t" — strip the trailing "t" before
+      # produces "python=3.14" ids, not "python=3.14t" - strip the trailing "t" before
       # substituting, or the free-threaded leg's deselects silently miss their targets.
       - name: Run pytest
         env:
@@ -316,7 +320,7 @@ jobs:
 
   publish:
     name: Publish pystack ${{ matrix.version }}
-    needs: [setup, build_wheels, test_wheels, gpl_sources]
+    needs: [setup, build_wheels, test_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

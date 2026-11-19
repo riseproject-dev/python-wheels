@@ -49,58 +49,59 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build tokie ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tokie"
+      version: "${{ matrix.version }}"
+      repository: "chonkie-inc/tokie"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        cp LICENSE-APACHE LICENSE-MIT crates/tokie-python/
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "crates/tokie-python"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # tokie ships no [tool.cibuildwheel], so the Rust toolchain its
+      # maturin backend needs is installed in-container here.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      # test-sources resolves against the checkout root, not package-dir.
+      cibw-test-sources: "crates/tokie-python/tests"
+      # Upstream never wires this suite into its own CI (only the Rust
+      # accuracy suite runs there); it downloads tokenizer.json files from
+      # the Hugging Face Hub for every test, same shape as
+      # build-fastokens.yml and build-hf-xet.yml already rely on.
+      cibw-test-command: "python -c \"import tokie; assert tokie.tokie.__file__.endswith('.so'), tokie.tokie.__file__\" && cd crates/tokie-python && python -m pytest tests -v"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       TOKIE_VERSION: ${{ matrix.version }}
-
     steps:
-      # Checked out at the workspace root: crates/tokie-python is a member of
-      # the tokie Cargo workspace and builds against the sibling tokie/pretokie
-      # crates.
-      - name: Checkout tokie v${{ env.TOKIE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: chonkie-inc/tokie
-          ref: v${{ env.TOKIE_VERSION }}
-          persist-credentials: false
-
-      - name: Copy repo-root licences into the pyproject directory
-        # crates/tokie-python/pyproject.toml has a [project] table, so maturin's
-        # licence auto-glob (LICEN[CS]E*) roots at that directory, not the repo
-        # root where LICENSE-APACHE/LICENSE-MIT actually live (CLAUDE.md gotcha 146).
-        run: cp LICENSE-APACHE LICENSE-MIT crates/tokie-python/
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: crates/tokie-python
-          output-dir: wheelhouse/
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # tokie ships no [tool.cibuildwheel], so the Rust toolchain its
-          # maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --profile minimal
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          CIBW_TEST_REQUIRES: pytest
-          # test-sources resolves against the checkout root, not package-dir.
-          CIBW_TEST_SOURCES: crates/tokie-python/tests
-          # Upstream never wires this suite into its own CI (only the Rust
-          # accuracy suite runs there); it downloads tokenizer.json files from
-          # the Hugging Face Hub for every test, same shape as
-          # build-fastokens.yml and build-hf-xet.yml already rely on.
-          CIBW_TEST_COMMAND: >-
-            python -c "import tokie; assert tokie.tokie.__file__.endswith('.so'), tokie.tokie.__file__" &&
-            cd crates/tokie-python && python -m pytest tests -v
+          name: tokie-${{ env.TOKIE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the licences made it into the wheel
         run: |
@@ -113,15 +114,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tokie-${{ env.TOKIE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish tokie ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

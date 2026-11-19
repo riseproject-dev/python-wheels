@@ -50,46 +50,44 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pylibjpeg-rle ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pylibjpeg-rle"
+      version: "${{ matrix.version }}"
+      repository: "pydicom/pylibjpeg-rle"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "true"
+      # musllinux is dropped: numpy, a runtime dependency, has no
+      # musllinux riscv64 wheel on either index.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all: "curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" PIP_ONLY_BINARY=numpy"
+      cibw-test-requires: "pytest pydicom pylibjpeg git+https://github.com/pydicom/pylibjpeg-data"
+      cibw-test-command: "pytest --pyargs rle.tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYLIBJPEG_RLE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pylibjpeg-rle v${{ env.PYLIBJPEG_RLE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pydicom/pylibjpeg-rle
-          ref: v${{ env.PYLIBJPEG_RLE_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # musllinux is dropped: numpy, a runtime dependency, has no
-          # musllinux riscv64 wheel on either index.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL: >-
-            curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y
-          CIBW_ENVIRONMENT: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: >-
-            pytest
-            pydicom
-            pylibjpeg
-            git+https://github.com/pydicom/pylibjpeg-data
-          CIBW_TEST_COMMAND: pytest --pyargs rle.tests
+          name: pylibjpeg-rle-${{ env.PYLIBJPEG_RLE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel contents
         run: |
@@ -102,15 +100,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pylibjpeg-rle-${{ env.PYLIBJPEG_RLE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pylibjpeg-rle ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

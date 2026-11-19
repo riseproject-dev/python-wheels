@@ -55,50 +55,59 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     name: Build pytorch-tokenizers ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pytorch-tokenizers"
+      version: "${{ matrix.version }}"
+      repository: "meta-pytorch/tokenizers"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      checkout-submodules: "recursive"
+      pre-build: |-
+        export PYBIND11_REF=v2.13.6
+        set -euo pipefail
+        cp third-party/abseil-cpp/LICENSE LICENSE.abseil-cpp
+        cp third-party/re2/LICENSE LICENSE.re2
+        cp third-party/sentencepiece/LICENSE LICENSE.sentencepiece
+        cp third-party/sentencepiece/third_party/darts_clone/LICENSE LICENSE.darts-clone
+        cp third-party/sentencepiece/third_party/esaxx/LICENSE LICENSE.esaxx
+        cp third-party/sentencepiece/third_party/protobuf-lite/LICENSE LICENSE.protobuf-lite
+        cp third-party/pcre2/LICENCE.md LICENSE.pcre2
+        cp third-party/json/LICENSE.MIT LICENSE.nlohmann-json
+        sed -n '/^MIT License$/,/^SOFTWARE\.$/p' third-party/llama.cpp-unicode/src/unicode.cpp > LICENSE.llama.cpp-unicode
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${PYBIND11_REF}/LICENSE" -o LICENSE.pybind11
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "CMAKE_BUILD_PARALLEL_LEVEL=8"
+      # Upstream's smoke test (.ci/scripts/wheel/test_wheel.py) copies test/ into a
+      # temp directory and runs pytest there, which is what test-sources reproduces.
+      cibw-test-sources: "test"
+      cibw-test-requires: "pytest transformers"
+      cibw-test-command: "python -m pytest -vv test"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PYTORCH_TOKENIZERS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout tokenizers v${{ env.PYTORCH_TOKENIZERS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: meta-pytorch/tokenizers
-          ref: v${{ env.PYTORCH_TOKENIZERS_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      # Every tree below is compiled into the extension, and setuptools' default licence
-      # glob only reaches the project root.
-      - name: Stage the vendored licences
-        run: |
-          set -euo pipefail
-          cp third-party/abseil-cpp/LICENSE LICENSE.abseil-cpp
-          cp third-party/re2/LICENSE LICENSE.re2
-          cp third-party/sentencepiece/LICENSE LICENSE.sentencepiece
-          cp third-party/sentencepiece/third_party/darts_clone/LICENSE LICENSE.darts-clone
-          cp third-party/sentencepiece/third_party/esaxx/LICENSE LICENSE.esaxx
-          cp third-party/sentencepiece/third_party/protobuf-lite/LICENSE LICENSE.protobuf-lite
-          cp third-party/pcre2/LICENCE.md LICENSE.pcre2
-          cp third-party/json/LICENSE.MIT LICENSE.nlohmann-json
-          sed -n '/^MIT License$/,/^SOFTWARE\.$/p' third-party/llama.cpp-unicode/src/unicode.cpp > LICENSE.llama.cpp-unicode
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${PYBIND11_REF}/LICENSE" -o LICENSE.pybind11
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            CMAKE_BUILD_PARALLEL_LEVEL=8
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's smoke test (.ci/scripts/wheel/test_wheel.py) copies test/ into a
-          # temp directory and runs pytest there, which is what test-sources reproduces.
-          CIBW_TEST_SOURCES: test
-          CIBW_TEST_REQUIRES: pytest transformers
-          CIBW_TEST_COMMAND: python -m pytest -vv test
+          name: pytorch-tokenizers-${{ env.PYTORCH_TOKENIZERS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and the vendored licences made it into the wheel
         run: |
@@ -118,15 +127,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pytorch-tokenizers-${{ env.PYTORCH_TOKENIZERS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pytorch-tokenizers ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -49,50 +49,55 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pywhispercpp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pywhispercpp"
+      version: "${{ matrix.version }}"
+      repository: "absadiki/pywhispercpp"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "true"
+      pre-build: |-
+        cp whisper.cpp/LICENSE LICENSE.whisper.cpp
+        cp pybind11/LICENSE LICENSE.pybind11
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # ggml defaults RVV/Zfh/Zvfh/Zicbop/Zihintpause on for riscv64 with no runtime
+      # dispatch; turning them off keeps the wheel at the rv64gc baseline.
+      cibw-environment-linux: "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYWHISPERCPP=${{ matrix.version }} CMAKE_ARGS=\"-DGGML_NATIVE=OFF -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF\""
+      cibw-test-requires: "pytest"
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy PYTHON_GIL=1"
+      cibw-test-sources: "pyproject.toml tests whisper.cpp/models whisper.cpp/samples"
+      cibw-test-command: "python -m pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYWHISPERCPP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pywhispercpp v${{ env.PYWHISPERCPP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: absadiki/pywhispercpp
-          ref: v${{ env.PYWHISPERCPP_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      # The wheel ships whisper.cpp/ggml and pybind11 code; upstream ships only its own licence.
-      - name: Stage the bundled libraries' licences
-        run: |
-          cp whisper.cpp/LICENSE LICENSE.whisper.cpp
-          cp pybind11/LICENSE LICENSE.pybind11
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # ggml defaults RVV/Zfh/Zvfh/Zicbop/Zihintpause on for riscv64 with no runtime
-          # dispatch; turning them off keeps the wheel at the rv64gc baseline.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYWHISPERCPP=${{ env.PYWHISPERCPP_VERSION }}
-            CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF"
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_ONLY_BINARY=numpy
-            PYTHON_GIL=1
-          CIBW_TEST_SOURCES: pyproject.toml tests whisper.cpp/models whisper.cpp/samples
-          CIBW_TEST_COMMAND: python -m pytest tests
+          name: pywhispercpp-${{ env.PYWHISPERCPP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel's extension, licences and ISA baseline
         run: |
@@ -110,12 +115,6 @@ jobs:
             test -n "$arch"
             if echo "$arch" | grep -qE '_(v|zv[a-z0-9]*|zfh[a-z]*)[0-9]'; then exit 1; fi
           done
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pywhispercpp-${{ env.PYWHISPERCPP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -151,7 +150,7 @@ jobs:
 
   publish:
     name: Publish pywhispercpp ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

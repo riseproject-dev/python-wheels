@@ -53,46 +53,49 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build clvm-tools-rs ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "clvm-tools-rs"
+      version: "${{ matrix.version }}"
+      repository: "Chia-Network/clvm_tools_rs"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp39-abi3-manylinux_riscv64"
+      timeout-minutes: 360
+      # pyo3 is built with the `abi3-py39` feature (Cargo.toml), so maturin
+      # emits a single cp39-abi3 wheel matching the one Linux wheel upstream
+      # publishes per arch. cibuildwheel compiles once for cp312 and reuses
+      # that wheel for cp313/cp314 while still running the test phase on
+      # each. musllinux is excluded because rustup.rs ships no riscv64 musl
+      # toolchain, and cp314t is excluded because upstream ships no
+      # free-threaded wheel (abi3 has no free-threaded ABI).
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # clvm_tools_rs ships no [tool.cibuildwheel], so install the Rust
+      # toolchain its maturin backend needs in-container and put it on PATH.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Two of upstream's own self-contained resources/tests scripts (no
+      # external clvm/clvm_rs/clvm_tools checkouts needed): plain compiler
+      # and step-execution smoke tests exercised against the built wheel.
+      cibw-test-sources: "resources/tests"
+      cibw-test-command: "python resources/tests/test_clvm_step.py && python resources/tests/test_compile_from_string.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       CLVM_TOOLS_RS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout clvm_tools_rs ${{ env.CLVM_TOOLS_RS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Chia-Network/clvm_tools_rs
-          ref: ${{ env.CLVM_TOOLS_RS_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # pyo3 is built with the `abi3-py39` feature (Cargo.toml), so maturin
-          # emits a single cp39-abi3 wheel matching the one Linux wheel upstream
-          # publishes per arch. cibuildwheel compiles once for cp312 and reuses
-          # that wheel for cp313/cp314 while still running the test phase on
-          # each. musllinux is excluded because rustup.rs ships no riscv64 musl
-          # toolchain, and cp314t is excluded because upstream ships no
-          # free-threaded wheel (abi3 has no free-threaded ABI).
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # clvm_tools_rs ships no [tool.cibuildwheel], so install the Rust
-          # toolchain its maturin backend needs in-container and put it on PATH.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          # Two of upstream's own self-contained resources/tests scripts (no
-          # external clvm/clvm_rs/clvm_tools checkouts needed): plain compiler
-          # and step-execution smoke tests exercised against the built wheel.
-          CIBW_TEST_SOURCES: resources/tests
-          CIBW_TEST_COMMAND: >-
-            python resources/tests/test_clvm_step.py &&
-            python resources/tests/test_compile_from_string.py
+          name: clvm-tools-rs-${{ env.CLVM_TOOLS_RS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension made it into the wheel
         run: |
@@ -105,15 +108,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: clvm-tools-rs-${{ env.CLVM_TOOLS_RS_VERSION }}-cp39-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish clvm-tools-rs ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -50,69 +50,73 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build onnxruntime-extensions ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "onnxruntime-extensions"
+      version: "${{ matrix.version }}"
+      repository: "microsoft/onnxruntime-extensions"
+      ref: ''
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        export ONNXRUNTIME_EXTENSIONS_VERSION='${{ matrix.version }}'
+        case "${ONNXRUNTIME_EXTENSIONS_VERSION}" in
+          0.15.2) ref=8599e104c73429bf9e267e215504e296607a2ae9 ;;
+          *) echo "no release commit known for ${ONNXRUNTIME_EXTENSIONS_VERSION}" >&2; exit 1 ;;
+        esac
+        BUILD_SOURCEBRANCHNAME="rel-${ONNXRUNTIME_EXTENSIONS_VERSION%.*}"
+        export BUILD_SOURCEBRANCHNAME
+        printf '%s\n' "BUILD_SOURCEBRANCHNAME=$BUILD_SOURCEBRANCHNAME" >> "$GITHUB_ENV"
+
+        git fetch -q --no-tags origin "$ref"
+        git checkout -q --detach FETCH_HEAD
+
+        cp ThirdPartyNotices.txt LICENSE.ThirdPartyNotices
+        curl -fsSL https://raw.githubusercontent.com/protocolbuffers/protobuf/v21.12/LICENSE -o LICENSE.protobuf
+        curl -fsSL https://raw.githubusercontent.com/pybind/pybind11/v2.12.0/LICENSE -o LICENSE.pybind11
+        curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/libpng/LICENSE -o LICENSE.libpng
+        curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/libjpeg/README -o LICENSE.libjpeg
+        curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/zlib/README -o LICENSE.zlib
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # BUILD_SOURCEBRANCHNAME is what upstream's release pipeline sets; without it setup.py
+      # appends +<sha> to the version of a commit that is not a rel-* branch tip.
+      cibw-environment-linux: |-
+        ONNXRUNTIME_EXTENSIONS_VERSION=${{ matrix.version }}
+        OCOS_ENABLE_AZURE=0 BUILD_SOURCEBRANCHNAME=rel-${ONNXRUNTIME_EXTENSIONS_VERSION%.*}
+      cibw-test-requires: "pytest onnx onnxruntime"
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,onnx,onnxruntime,ml_dtypes"
+      # The test modules that need nothing beyond onnx/onnxruntime; the rest import
+      # torch, transformers or tensorflow, which have no riscv64 wheels.
+      cibw-test-command: "cd {project}/test && python -m pytest test_audio_codec.py test_audio_signal.py test_blingfire_sentencebreaker.py test_masked_fill.py test_pyops.py test_segment_extraction.py test_string_concat.py test_string_ecma_regex.py test_string_length.py test_string_mapping.py test_string_ops.py test_string_to_vector.py test_vector_to_string.py --verbose"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ONNXRUNTIME_EXTENSIONS_VERSION: ${{ matrix.version }}
-
     steps:
-      # Upstream tags no 0.15.x release; each is cut from a rel-X.Y branch commit carrying the version in version.txt.
-      - id: ref
-        run: |
-          case "${ONNXRUNTIME_EXTENSIONS_VERSION}" in
-            0.15.2) sha=8599e104c73429bf9e267e215504e296607a2ae9 ;;
-            *) echo "no release commit known for ${ONNXRUNTIME_EXTENSIONS_VERSION}" >&2; exit 1 ;;
-          esac
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
-          echo "branch=rel-${ONNXRUNTIME_EXTENSIONS_VERSION%.*}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout onnxruntime-extensions ${{ env.ONNXRUNTIME_EXTENSIONS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: microsoft/onnxruntime-extensions
-          ref: ${{ steps.ref.outputs.sha }}
-          persist-credentials: false
-
-      # The extension statically links protobuf, pybind11 and dlib's libpng/libjpeg/zlib, which
-      # ThirdPartyNotices.txt does not cover, and the wheel ships neither.
-      - name: Add third-party licences
-        run: |
-          cp ThirdPartyNotices.txt LICENSE.ThirdPartyNotices
-          curl -fsSL https://raw.githubusercontent.com/protocolbuffers/protobuf/v21.12/LICENSE -o LICENSE.protobuf
-          curl -fsSL https://raw.githubusercontent.com/pybind/pybind11/v2.12.0/LICENSE -o LICENSE.pybind11
-          curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/libpng/LICENSE -o LICENSE.libpng
-          curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/libjpeg/README -o LICENSE.libjpeg
-          curl -fsSL https://raw.githubusercontent.com/davisking/dlib/v19.24.7/dlib/external/zlib/README -o LICENSE.zlib
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # BUILD_SOURCEBRANCHNAME is what upstream's release pipeline sets; without it setup.py
-          # appends +<sha> to the version of a commit that is not a rel-* branch tip.
-          CIBW_ENVIRONMENT: >-
-            OCOS_ENABLE_AZURE=0
-            BUILD_SOURCEBRANCHNAME=${{ steps.ref.outputs.branch }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest onnx onnxruntime
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,onnx,onnxruntime,ml_dtypes
-          # The test modules that need nothing beyond onnx/onnxruntime; the rest import
-          # torch, transformers or tensorflow, which have no riscv64 wheels.
-          CIBW_TEST_COMMAND: >-
-            cd {project}/test && python -m pytest
-            test_audio_codec.py test_audio_signal.py test_blingfire_sentencebreaker.py
-            test_masked_fill.py test_pyops.py test_segment_extraction.py
-            test_string_concat.py test_string_ecma_regex.py test_string_length.py
-            test_string_mapping.py test_string_ops.py test_string_to_vector.py
-            test_vector_to_string.py --verbose
+          name: onnxruntime-extensions-${{ env.ONNXRUNTIME_EXTENSIONS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -130,16 +134,9 @@ jobs:
                               "LICENSE.zlib"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: onnxruntime-extensions-${{ env.ONNXRUNTIME_EXTENSIONS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish onnxruntime-extensions ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -49,48 +49,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build biopython ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "biopython"
+      version: "${{ matrix.version }}"
+      repository: "biopython/biopython"
+      ref: ''
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        echo "BIOPYTHON_TAG=biopython-${BIOPYTHON_VERSION//./}" >> "$GITHUB_ENV"
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        git fetch -q --no-tags origin "${BIOPYTHON_TAG}"
+        git checkout -q --detach FETCH_HEAD
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # run_tests.py enumerates doctest modules by walking `Tests/..` and some
+      # tests open data through `../Bio` and `../Doc`, so reproduce upstream's
+      # checkout layout around Tests/. Nothing here shadows the wheel: every
+      # command runs from Tests/, which is what lands on sys.path[0].
+      cibw-test-sources: "Tests Bio BioSQL Doc"
+      # Upstream's macOS/Windows test jobs install only numpy; setuptools is
+      # imported by run_tests.py itself.
+      cibw-test-requires: "numpy setuptools"
+      cibw-test-command: "cd Tests && python -c \"import importlib; [importlib.import_module(m) for m in ('Bio.Align._aligncore', 'Bio.Align._alignmentcounts', 'Bio.Align._codonaligner', 'Bio.Align._pairwisealigner', 'Bio.Align.substitution_matrices._arraycore', 'Bio.cpairwise2', 'Bio.Nexus.cnexus', 'Bio.motifs._pwm', 'Bio.Cluster._cluster', 'Bio.PDB.ccealign', 'Bio.PDB.kdtrees', 'Bio.PDB._bcif_helper', 'Bio.SeqIO._twoBitIO')]\" && python run_tests.py --offline"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       BIOPYTHON_VERSION: ${{ matrix.version }}
-
     steps:
-      # Upstream tags releases as `biopython-<version without the dot>`.
-      - name: Resolve upstream tag
-        run: echo "BIOPYTHON_TAG=biopython-${BIOPYTHON_VERSION//./}" >> "$GITHUB_ENV"
-
-      - name: Checkout biopython ${{ env.BIOPYTHON_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: biopython/biopython
-          ref: ${{ env.BIOPYTHON_TAG }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # run_tests.py enumerates doctest modules by walking `Tests/..` and some
-          # tests open data through `../Bio` and `../Doc`, so reproduce upstream's
-          # checkout layout around Tests/. Nothing here shadows the wheel: every
-          # command runs from Tests/, which is what lands on sys.path[0].
-          CIBW_TEST_SOURCES: Tests Bio BioSQL Doc
-          # Upstream's macOS/Windows test jobs install only numpy; setuptools is
-          # imported by run_tests.py itself.
-          CIBW_TEST_REQUIRES: numpy setuptools
-          CIBW_TEST_COMMAND: >-
-            cd Tests &&
-            python -c "import importlib; [importlib.import_module(m) for m in ('Bio.Align._aligncore', 'Bio.Align._alignmentcounts', 'Bio.Align._codonaligner', 'Bio.Align._pairwisealigner', 'Bio.Align.substitution_matrices._arraycore', 'Bio.cpairwise2', 'Bio.Nexus.cnexus', 'Bio.motifs._pwm', 'Bio.Cluster._cluster', 'Bio.PDB.ccealign', 'Bio.PDB.kdtrees', 'Bio.PDB._bcif_helper', 'Bio.SeqIO._twoBitIO')]" &&
-            python run_tests.py --offline
+          name: biopython-${{ env.BIOPYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the C extensions made it into the wheel
         run: |
@@ -102,15 +111,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: biopython-${{ env.BIOPYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish biopython ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

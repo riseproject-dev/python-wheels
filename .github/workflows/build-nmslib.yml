@@ -56,44 +56,48 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build nmslib ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "nmslib"
+      version: "${{ matrix.version }}"
+      repository: "nmslib/nmslib"
+      ref: "799c8c0b5fd36fa40542ab0972038f19b2488641"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      cibw-package-dir: "python_bindings"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py appends -march=native unless CFLAGS already names an
+      # arch flag (the same override upstream's own build_linux_wheels/
+      # deploy.sh passes per target arch: -march=armv8-a for aarch64,
+      # -msse2 for x86_64) - rv64gc is this repo's portable riscv64
+      # baseline. numpy and scipy have no riscv64 wheels on public PyPI.
+      cibw-environment-linux: "CFLAGS=-march=rv64gc PIP_ONLY_BINARY=numpy,scipy"
+      cibw-test-requires: "pytest psutil"
+      cibw-test-sources: "python_bindings/tests"
+      cibw-test-command: "python -m pytest -q -ra python_bindings/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       NMSLIB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout nmslib ${{ env.NMSLIB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: nmslib/nmslib
-          ref: ${{ env.NMSLIB_REF }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python_bindings
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py appends -march=native unless CFLAGS already names an
-          # arch flag (the same override upstream's own build_linux_wheels/
-          # deploy.sh passes per target arch: -march=armv8-a for aarch64,
-          # -msse2 for x86_64) - rv64gc is this repo's portable riscv64
-          # baseline. numpy and scipy have no riscv64 wheels on public PyPI.
-          CIBW_ENVIRONMENT: >-
-            CFLAGS=-march=rv64gc
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy
-          CIBW_TEST_REQUIRES: pytest psutil
-          CIBW_TEST_SOURCES: python_bindings/tests
-          CIBW_TEST_COMMAND: python -m pytest -q -ra python_bindings/tests
+          name: nmslib-${{ env.NMSLIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel is a compiled extension module
         run: |
@@ -104,12 +108,6 @@ jobs:
               assert any(n.startswith("nmslib") and n.endswith(".so") for n in names), (whl, names)
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: nmslib-${{ env.NMSLIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -146,7 +144,7 @@ jobs:
 
   publish:
     name: Publish nmslib ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

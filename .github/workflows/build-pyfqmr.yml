@@ -49,37 +49,41 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyfqmr ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyfqmr"
+      version: "${{ matrix.version }}"
+      repository: "Kramer84/pyfqmr-Fast-quadric-Mesh-Reduction"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy and cython (both build and test/runtime deps) ship no riscv64 wheel on
+      # public PyPI; ours is what resolves them.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      cibw-test-requires: "pytest trimesh"
+      cibw-test-command: "python -c \"import pyfqmr; assert pyfqmr.Simplify\" && python -m pytest {project}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PYFQMR_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyfqmr v${{ env.PYFQMR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Kramer84/pyfqmr-Fast-quadric-Mesh-Reduction
-          ref: v${{ env.PYFQMR_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy and cython (both build and test/runtime deps) ship no riscv64 wheel on
-          # public PyPI; ours is what resolves them.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: pytest trimesh
-          CIBW_TEST_COMMAND: >-
-            python -c "import pyfqmr; assert pyfqmr.Simplify" &&
-            python -m pytest {project}/tests
+          name: pyfqmr-${{ env.PYFQMR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -91,16 +95,9 @@ jobs:
           assert licences == {"LICENSE"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyfqmr-${{ env.PYFQMR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyfqmr ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

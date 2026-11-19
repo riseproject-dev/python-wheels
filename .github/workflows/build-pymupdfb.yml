@@ -54,48 +54,50 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pymupdfb ${{ matrix.version }} py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pymupdfb"
+      version: "${{ matrix.version }}"
+      repository: "pymupdf/PyMuPDF"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 360
+      # setup.py's get_requires_for_build_wheel() always adds swig/libclang
+      # regardless of flavour, and the resulting wheel is py3-none-*, so one
+      # CPython selector covers it.
+      cibw-build: "cp312-manylinux_riscv64"
+      # As in build-pymupdf.yml: the `libclang` PyPI wheel has no riscv64
+      # build, so use the image's own libclang.so via the pure-Python
+      # `clang` bindings instead (clang-devel supplies the unversioned
+      # symlink clang.cindex dlopens). Pinned below <21: 21.x's `File`
+      # gained __eq__ with no __hash__, so mupdf's own File-keyed parse
+      # cache dies with `TypeError: unhashable type: 'File'` (gotcha 346).
+      cibw-before-all-linux: "dnf install -y clang-devel"
+      cibw-environment-linux: "PYMUPDF_SETUP_FLAVOUR=bd PYMUPDF_SETUP_LIBCLANG=\"clang==20.1.5\" XCFLAGS=-D__LITTLE_ENDIAN__ XCXXFLAGS=-D__LITTLE_ENDIAN__"
+      # Upstream's own gh_release.py disables repair for this flavour:
+      # auditwheel finds nothing to add and exits non-zero. setup.py's
+      # pipcl already tags the wheel from the image's own AUDITWHEEL_PLAT.
+      cibw-repair-wheel-command-linux: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     # musllinux is skipped: it needs the same libclang-via-dnf workaround below,
     # which build-pymupdf.yml also only exercises on manylinux.
     timeout-minutes: 360
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PYMUPDFB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pymupdf/PyMuPDF ${{ env.PYMUPDFB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pymupdf/PyMuPDF
-          ref: ${{ env.PYMUPDFB_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # setup.py's get_requires_for_build_wheel() always adds swig/libclang
-          # regardless of flavour, and the resulting wheel is py3-none-*, so one
-          # CPython selector covers it.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # As in build-pymupdf.yml: the `libclang` PyPI wheel has no riscv64
-          # build, so use the image's own libclang.so via the pure-Python
-          # `clang` bindings instead (clang-devel supplies the unversioned
-          # symlink clang.cindex dlopens). Pinned below <21: 21.x's `File`
-          # gained __eq__ with no __hash__, so mupdf's own File-keyed parse
-          # cache dies with `TypeError: unhashable type: 'File'` (gotcha 346).
-          CIBW_BEFORE_ALL_LINUX: dnf install -y clang-devel
-          CIBW_ENVIRONMENT: >-
-            PYMUPDF_SETUP_FLAVOUR=bd
-            PYMUPDF_SETUP_LIBCLANG="clang==20.1.5"
-            XCFLAGS=-D__LITTLE_ENDIAN__
-            XCXXFLAGS=-D__LITTLE_ENDIAN__
-          # Upstream's own gh_release.py disables repair for this flavour:
-          # auditwheel finds nothing to add and exits non-zero. setup.py's
-          # pipcl already tags the wheel from the image's own AUDITWHEEL_PLAT.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: ''
+          name: pymupdfb-${{ env.PYMUPDFB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries riscv64 MuPDF libraries
         run: |
@@ -124,15 +126,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pymupdfb-${{ env.PYMUPDFB_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pymupdfb ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

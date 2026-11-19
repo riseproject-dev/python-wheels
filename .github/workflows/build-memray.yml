@@ -49,129 +49,132 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build memray ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "memray"
+      version: "${{ matrix.version }}"
+      repository: "bloomberg/memray"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/memray/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, at the project root, the licence of everything that ends up inside the
+        # wheel: the libunwind built by before-all, memray's vendored libbacktrace, and
+        # every shared library auditwheel vendors out of the build image.
+        # scikit-build-core's default LICEN[CS]E* glob copies them into the wheel.
+        set -euo pipefail
+
+        project="${1:?usage: collect-licenses.sh <project-dir> <libunwind-src-dir>}"
+        unwind_src="${2:?usage: collect-licenses.sh <project-dir> <libunwind-src-dir>}"
+
+        cp "$unwind_src/COPYING" "$project/LICENSE.libunwind"
+        cp "$project/src/vendor/libbacktrace/LICENSE" "$project/LICENSE.libbacktrace"
+
+        roots=(/usr/lib64/libunwind.so /usr/lib64/liblz4.so /usr/lib64/libdebuginfod.so)
+
+        # ldd is transitive, so memray's direct link dependencies cover the whole
+        # closure; ldd does not list the roots themselves, so resolve those too.
+        mapfile -t libs < <(
+            {
+                ldd "${roots[@]}" | tr ' ' '\n' | grep '^/'
+                readlink -f "${roots[@]}"
+            } | sort -u
+        )
+
+        # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+        # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
+        # are never vendored into the wheel.
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+        )
+
+        for pkg in "${pkgs[@]}"; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+            # Some subpackages leave the licence to a sibling of the same source RPM.
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
+
+            # Others mark it %doc rather than %license, and the image installs no docs.
+            if [ -z "${files[0]:-}" ]; then
+                dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+            fi
+
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
+
+        ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+        COLLECT_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Replaces upstream's before-all: Rocky 10 already ships curl 8, zstd 1.5
+      # and elfutils 0.194, which upstream has to build from source on
+      # AlmaLinux 8. libunwind is the one dependency RHEL 10 dropped, and
+      # manylinux enables no EPEL on riscv64, so build it from source.
+      # Rocky's extras repo is unused here and its mirrorlist flakes.
+      cibw-before-all-linux: "dnf -y --disablerepo=extras install lz4-devel elfutils-debuginfod-client-devel && cd /tmp && curl -fsSLO https://github.com/libunwind/libunwind/releases/download/v1.8.3/libunwind-1.8.3.tar.gz && tar xf libunwind-1.8.3.tar.gz && cd libunwind-1.8.3 && ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo && make -j\"$(nproc)\" install && bash {project}/collect-licenses.sh {project} /tmp/libunwind-1.8.3"
+      cibw-test-extras: "test"
+      cibw-test-command: "python -um pytest --log-cli-level=DEBUG -s --showlocals -vvv {package}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MEMRAY_VERSION: ${{ matrix.version }}
-
     steps:
-      # Upstream builds an sdist and unpacks it over a separately-uploaded copy of
-      # `tests/` (the sdist excludes it). A plain checkout is the same tree.
-      - name: Checkout memray v${{ env.MEMRAY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: bloomberg/memray
-          ref: v${{ env.MEMRAY_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch memray source
-        run: git apply python-wheels/patches/memray/${{ env.MEMRAY_VERSION }}/00*.patch
-
-      - name: Stage the licence-collection script
-        run: |
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, at the project root, the licence of everything that ends up inside the
-          # wheel: the libunwind built by before-all, memray's vendored libbacktrace, and
-          # every shared library auditwheel vendors out of the build image.
-          # scikit-build-core's default LICEN[CS]E* glob copies them into the wheel.
-          set -euo pipefail
-          
-          project="${1:?usage: collect-licenses.sh <project-dir> <libunwind-src-dir>}"
-          unwind_src="${2:?usage: collect-licenses.sh <project-dir> <libunwind-src-dir>}"
-          
-          cp "$unwind_src/COPYING" "$project/LICENSE.libunwind"
-          cp "$project/src/vendor/libbacktrace/LICENSE" "$project/LICENSE.libbacktrace"
-          
-          roots=(/usr/lib64/libunwind.so /usr/lib64/liblz4.so /usr/lib64/libdebuginfod.so)
-          
-          # ldd is transitive, so memray's direct link dependencies cover the whole
-          # closure; ldd does not list the roots themselves, so resolve those too.
-          mapfile -t libs < <(
-              {
-                  ldd "${roots[@]}" | tr ' ' '\n' | grep '^/'
-                  readlink -f "${roots[@]}"
-              } | sort -u
-          )
-          
-          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
-          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
-          # are never vendored into the wheel.
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
-          )
-          
-          for pkg in "${pkgs[@]}"; do
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
-          
-              # Some subpackages leave the licence to a sibling of the same source RPM.
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
-          
-              # Others mark it %doc rather than %license, and the image installs no docs.
-              if [ -z "${files[0]:-}" ]; then
-                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
-                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
-              fi
-          
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-          
-          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-          COLLECT_EOF
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces upstream's before-all: Rocky 10 already ships curl 8, zstd 1.5
-          # and elfutils 0.194, which upstream has to build from source on
-          # AlmaLinux 8. libunwind is the one dependency RHEL 10 dropped, and
-          # manylinux enables no EPEL on riscv64, so build it from source.
-          # Rocky's extras repo is unused here and its mirrorlist flakes.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y --disablerepo=extras install lz4-devel elfutils-debuginfod-client-devel &&
-            cd /tmp &&
-            curl -fsSLO https://github.com/libunwind/libunwind/releases/download/v${{ env.LIBUNWIND_VERSION }}/libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
-            tar xf libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
-            cd libunwind-${{ env.LIBUNWIND_VERSION }} &&
-            ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation
-            --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo &&
-            make -j"$(nproc)" install &&
-            bash {project}/collect-licenses.sh
-            {project} /tmp/libunwind-${{ env.LIBUNWIND_VERSION }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_EXTRAS: test
-          CIBW_TEST_COMMAND: python -um pytest --log-cli-level=DEBUG -s --showlocals -vvv {package}/tests
+          name: memray-${{ env.MEMRAY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the compiled extensions
         run: |
@@ -186,12 +189,6 @@ jobs:
           print("\n".join(lic))
           assert {"LICENSE", "LICENSE.libunwind", "LICENSE.libbacktrace"} <= set(lic), lic
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: memray-${{ env.MEMRAY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -230,7 +227,7 @@ jobs:
 
   publish:
     name: Publish memray ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

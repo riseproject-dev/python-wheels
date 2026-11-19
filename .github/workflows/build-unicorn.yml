@@ -57,45 +57,50 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build unicorn ${{ matrix.version }} cp37-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "unicorn"
+      version: "${{ matrix.version }}"
+      repository: "unicorn-engine/unicorn"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp37-abi3-manylinux_riscv64"
+      timeout-minutes: 180
+      checkout-fetch-depth: 0
+      pre-build: |-
+        cp COPYING COPYING.LGPL2 COPYING_GLIB AUTHORS.TXT bindings/python/
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "bindings/python"
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # setup.py shells out to `cmake` directly; it's not a declared build dep.
+      cibw-before-build: "pip install cmake"
+      cibw-build-frontend: "build"
+      # capstone==6.0.0a2 (upstream's test extra) has no riscv64 wheel anywhere;
+      # our registry carries 5.0.9, and the regress tests only use its stable
+      # Cs()/CS_ARCH_* surface.
+      cibw-test-requires: "capstone==5.0.9"
+      cibw-test-command: "python -m unittest discover -v {project}/tests/regress \"*.py\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       UNICORN_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout unicorn ${{ env.UNICORN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: unicorn-engine/unicorn
-          ref: ${{ env.UNICORN_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Upstream's own wheel carries no licence file at all and pyproject.toml
-      # mislabels the project BSD; the root COPYING* is the real GPL-2.0/LGPL-2.0
-      # text (README: "Distributed under free software license GPLv2"). Landing
-      # them under bindings/python lets setuptools' default license_files glob
-      # pick them up with no packaging change.
-      - name: Stage upstream's licence files for the wheel
-        run: cp COPYING COPYING.LGPL2 COPYING_GLIB AUTHORS.TXT bindings/python/
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: bindings/python
-          output-dir: wheelhouse/
-        env:
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py shells out to `cmake` directly; it's not a declared build dep.
-          CIBW_BEFORE_BUILD: pip install cmake
-          CIBW_BUILD_FRONTEND: build
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # capstone==6.0.0a2 (upstream's test extra) has no riscv64 wheel anywhere;
-          # our registry carries 5.0.9, and the regress tests only use its stable
-          # Cs()/CS_ARCH_* surface.
-          CIBW_TEST_REQUIRES: capstone==5.0.9
-          CIBW_TEST_COMMAND: python -m unittest discover -v {project}/tests/regress "*.py"
+          name: unicorn-${{ env.UNICORN_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the licence files made it into the wheel
         run: |
@@ -108,15 +113,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: unicorn-${{ env.UNICORN_VERSION }}-cp37-abi3-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish unicorn ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

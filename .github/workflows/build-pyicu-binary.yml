@@ -51,64 +51,75 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyicu-binary ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyicu-binary"
+      version: "${{ matrix.version }}"
+      repository: "${{ github.repository }}"
+      ref: "${{ github.sha }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        git clone --depth 1 --branch "v${{ matrix.version }}" \
+          https://gitlab.pyicu.org/main/pyicu.git pyicu
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v ../python-wheels/patches/pyicu-binary/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "pyicu"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py links ICU dynamically via icu-config/pkg-config; auditwheel
+      # then vendors libicudata/libicuuc/libicui18n into the wheel (the
+      # "-binary" in the name), which is what makes it self-contained. Its
+      # Unicode License requires the notice to travel with the binary.
+      cibw-before-all-linux: "dnf -y install libicu-devel && cp /usr/share/licenses/libicu/LICENSE {package}/LICENSE.icu"
+      cibw-test-requires: "pytest six"
+      cibw-test-sources: "pyicu/test"
+      # 2.7.4's own tests hardcode CLDR-formatted strings and a tzdata
+      # transition pinned to ICU <=69 (test_DateTimeParserGenerator's
+      # own ICU_VERSION check tops out at "68.0"); manylinux_2_39
+      # links 74.2, whose newer CLDR/tzdata legitimately renders these
+      # four differently (e.g. narrow-no-break-space in "5:30 PM",
+      # Fiji's DST rule having no further transitions). Not a riscv64
+      # or code defect - deselect rather than chase upstream's CLDR pin.
+      cibw-test-command: "python -c \"import icu; print('linked ICU', icu.ICU_VERSION)\" && python -m pytest pyicu/test --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testAddPattern --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testGetBestPattern --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testReplaceFieldType --deselect pyicu/test/test_TimeZone.py::TestTimeZone::testTransition"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYICU_BINARY_VERSION: ${{ matrix.version }}
-
     steps:
-      # gitlab.pyicu.org isn't github.com, so actions/checkout can't reach it.
-      - name: Checkout pyicu v${{ env.PYICU_BINARY_VERSION }}
-        run: |
-          git clone --depth 1 --branch "v${{ env.PYICU_BINARY_VERSION }}" \
-            https://gitlab.pyicu.org/main/pyicu.git pyicu
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply riscv64 patches
-        working-directory: pyicu
-        run: git apply -v ../python-wheels/patches/pyicu-binary/${{ env.PYICU_BINARY_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: pyicu
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py links ICU dynamically via icu-config/pkg-config; auditwheel
-          # then vendors libicudata/libicuuc/libicui18n into the wheel (the
-          # "-binary" in the name), which is what makes it self-contained. Its
-          # Unicode License requires the notice to travel with the binary.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install libicu-devel &&
-            cp /usr/share/licenses/libicu/LICENSE {package}/LICENSE.icu
-          CIBW_TEST_REQUIRES: pytest six
-          CIBW_TEST_SOURCES: pyicu/test
-          # 2.7.4's own tests hardcode CLDR-formatted strings and a tzdata
-          # transition pinned to ICU <=69 (test_DateTimeParserGenerator's
-          # own ICU_VERSION check tops out at "68.0"); manylinux_2_39
-          # links 74.2, whose newer CLDR/tzdata legitimately renders these
-          # four differently (e.g. narrow-no-break-space in "5:30 PM",
-          # Fiji's DST rule having no further transitions). Not a riscv64
-          # or code defect - deselect rather than chase upstream's CLDR pin.
-          CIBW_TEST_COMMAND: >-
-            python -c "import icu; print('linked ICU', icu.ICU_VERSION)" &&
-            python -m pytest pyicu/test
-            --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testAddPattern
-            --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testGetBestPattern
-            --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testReplaceFieldType
-            --deselect pyicu/test/test_TimeZone.py::TestTimeZone::testTransition
+          name: pyicu-binary-${{ env.PYICU_BINARY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel bundles ICU and its licence
         run: |
@@ -122,15 +133,9 @@ jobs:
               print(whl, "OK")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyicu-binary-${{ env.PYICU_BINARY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyicu-binary ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

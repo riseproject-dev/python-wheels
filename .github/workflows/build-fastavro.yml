@@ -49,6 +49,54 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fastavro ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3), matching upstream's own wheel matrix.
+        # `test_requires` varies because 3.14 has zstd in the stdlib and the
+        # registry ships no free-threaded pandas wheel.
+        include:
+          - python: "cp312"
+            test_requires: "backports.zstd pandas<3.0.4"
+            pytest_k: ""
+          - python: "cp313"
+            test_requires: "backports.zstd pandas<3.0.4"
+            pytest_k: ""
+          - python: "cp314"
+            test_requires: "pandas<3.0.4"
+            pytest_k: ""
+          - python: "cp314t"
+            test_requires: ""
+            pytest_k: "and not test_pandas_datetime"
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "fastavro"
+      version: "${{ matrix.version }}"
+      repository: "fastavro/fastavro"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      timeout-minutes: 180
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # cramjam (the snappy codec the suite needs) has no riscv64 wheel and
+      # builds from its maturin sdist, so Rust has to be in the container.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Upstream tests the checkout, not the wheel; stage only the suite so the
+      # repo-root `fastavro/` can't shadow the installed extension modules.
+      cibw-test-sources: "tests pytest.ini"
+      cibw-test-requires: "pytest numpy lz4 zlib_ng cramjam ${{ matrix.test_requires }}"
+      # is_testing_cython_modules() is upstream's own check that the compiled
+      # modules, not the pure-Python fallback, are in use.
+      # test_regular_vs_ordered_dict_record_typeerror asserts on a traceback
+      # source line, so it only passes next to the .pyx sources of an in-place
+      # build; it fails against any installed wheel, on every architecture.
+      cibw-test-command: "python -c \"from tests.conftest import is_testing_cython_modules as c; assert c()\" && python -m pytest tests -k \"not test_regular_vs_ordered_dict_record_typeerror ${{ matrix.pytest_k }}\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
@@ -71,45 +119,14 @@ jobs:
           - python: "cp314t"
             test_requires: ""
             pytest_k: "and not test_pandas_datetime"
-
     env:
       FASTAVRO_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout fastavro ${{ env.FASTAVRO_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: fastavro/fastavro
-          ref: ${{ env.FASTAVRO_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cramjam (the snappy codec the suite needs) has no riscv64 wheel and
-          # builds from its maturin sdist, so Rust has to be in the container.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream tests the checkout, not the wheel; stage only the suite so the
-          # repo-root `fastavro/` can't shadow the installed extension modules.
-          CIBW_TEST_SOURCES: tests pytest.ini
-          CIBW_TEST_REQUIRES: pytest numpy lz4 zlib_ng cramjam ${{ matrix.test_requires }}
-          # is_testing_cython_modules() is upstream's own check that the compiled
-          # modules, not the pure-Python fallback, are in use.
-          # test_regular_vs_ordered_dict_record_typeerror asserts on a traceback
-          # source line, so it only passes next to the .pyx sources of an in-place
-          # build; it fails against any installed wheel, on every architecture.
-          CIBW_TEST_COMMAND: >-
-            python -c "from tests.conftest import is_testing_cython_modules as c; assert c()"
-            && python -m pytest tests
-            -k "not test_regular_vs_ordered_dict_record_typeerror ${{ matrix.pytest_k }}"
+          name: fastavro-${{ env.FASTAVRO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the Cython extensions made it into the wheel
         run: |
@@ -126,15 +143,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fastavro-${{ env.FASTAVRO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish fastavro ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

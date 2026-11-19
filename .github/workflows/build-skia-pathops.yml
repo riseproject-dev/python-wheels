@@ -59,56 +59,63 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build skia-pathops ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "skia-pathops"
+      version: "${{ matrix.version }}"
+      repository: "fonttools/skia-pathops"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp310-abi3-manylinux_riscv64"
+      timeout-minutes: 360
+      checkout-submodules: "recursive"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/skia-pathops/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      cibw-environment-linux: "BUILD_SKIA_FROM_SOURCE=0 SKIA_LIBRARY_DIR=build/download SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SKIA_PATHOPS=${{ matrix.version }}"
+      # skia-builder publishes no riscv64 libskia and Skia's bin/fetch-gn has no
+      # riscv64 CIPD gn, so build gn from source at fetch-gn's pinned revision
+      # and run skia-builder's build_skia.py in-container to fill build/download.
+      cibw-before-all-linux: |-
+        set -e
+        dnf -y install libstdc++-static
+        python3 -m pip install ninja
+        git clone https://gn.googlesource.com/gn /tmp/gn
+        git -C /tmp/gn checkout b2afae122eeb6ce09c52d63f67dc53fc517dbdc8
+        (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
+        install -m 0755 /tmp/gn/out/gn src/cpp/skia-builder/skia/bin/gn
+        python3 src/cpp/skia-builder/build_skia.py --no-sync-deps --no-fetch-gn build/download
+      cibw-test-extras: "testing"
+      cibw-test-command: "pytest {project}/tests"
+      cibw-repair-wheel-command-linux: "auditwheel repair -w {dest_dir} {wheel}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       SKIA_PATHOPS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout skia-pathops v${{ env.SKIA_PATHOPS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: fonttools/skia-pathops
-          ref: v${{ env.SKIA_PATHOPS_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch skia-pathops source
-        run: git apply python-wheels/patches/skia-pathops/${{ env.SKIA_PATHOPS_VERSION }}/*.patch
-
-      - name: Build and Test Wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            BUILD_SKIA_FROM_SOURCE=0 SKIA_LIBRARY_DIR=build/download
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SKIA_PATHOPS=${{ env.SKIA_PATHOPS_VERSION }}
-          # skia-builder publishes no riscv64 libskia and Skia's bin/fetch-gn has no
-          # riscv64 CIPD gn, so build gn from source at fetch-gn's pinned revision
-          # and run skia-builder's build_skia.py in-container to fill build/download.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -e
-            dnf -y install libstdc++-static
-            python3 -m pip install ninja
-            git clone https://gn.googlesource.com/gn /tmp/gn
-            git -C /tmp/gn checkout ${{ env.GN_REVISION }}
-            (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
-            install -m 0755 /tmp/gn/out/gn src/cpp/skia-builder/skia/bin/gn
-            python3 src/cpp/skia-builder/build_skia.py --no-sync-deps --no-fetch-gn build/download
-          CIBW_TEST_EXTRAS: testing
-          CIBW_TEST_COMMAND: pytest {project}/tests
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+          name: skia-pathops-${{ env.SKIA_PATHOPS_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships both licences
         run: |
@@ -123,15 +130,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: skia-pathops-${{ env.SKIA_PATHOPS_VERSION }}-cp310-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish skia-pathops ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

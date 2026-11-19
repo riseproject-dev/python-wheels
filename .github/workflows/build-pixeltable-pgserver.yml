@@ -49,72 +49,75 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pixeltable-pgserver ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pixeltable-pgserver"
+      version: "${{ matrix.version }}"
+      repository: "pixeltable/pixeltable-pgserver"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 300
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pixeltable-pgserver/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream's [tool.cibuildwheel.linux] before-all plus `perl`: the PG18 tarball no
+      # longer ships the generated catalog headers, so genbki.pl runs and needs FindBin,
+      # which the image's minimal perl-interpreter lacks (gotcha 46).
+      cibw-before-all-linux: "yum install -y flex bison readline-devel perl && make"
+      # initdb/postgres are non-PIE; keep their base above vm.mmap_min_addr once auditwheel's patchelf prepends a segment (gotcha 595).
+      cibw-environment-linux: "LDFLAGS=\"-Wl,-Ttext-segment=0x200000\""
+      # Upstream's pyproject.toml pins setuptools==73.0.1, which predates PEP 639 --
+      # it has no dist-info/licenses/ concept at all, so the default LICENSE*/COPYING*
+      # glob that LICENSE.postgresql/LICENSE.pgvector/LICENSE.readline/LICENSE.ncurses
+      # rely on (gotcha 44) is a no-op and the wheel ships no licence files whatsoever.
+      # setuptools 77.0.3 is the earliest release with that default glob; preinstall it
+      # and build with pip's `--no-build-isolation` (gotcha 76) so the preinstalled
+      # version is actually used instead of the isolated env re-resolving the pin.
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # auditwheel grafts the image's libreadline/libtinfo (psql links them); ship their licence texts.
+      # setup.py's only real purpose is a dummy cffi_modules extension
+      # (src/pixeltable_pgserver/_build.py, an FFI().set_source() with empty C source) that
+      # exists purely to make setuptools tag the wheel as platform-specific -- the actual
+      # postgres/pgvector binaries are built by `make` in before-all. `cffi` isn't in
+      # pyproject.toml's [build-system] requires (upstream relies on a legacy
+      # `setup_requires=["cffi"]` that PEP 517/--no-build-isolation doesn't honour), so
+      # without preinstalling it setuptools silently skips cffi_modules and ships a pure
+      # py3-none-any wheel, which cibuildwheel then refuses outright.
+      cibw-before-build: "pip install \"setuptools>=77.0.3\" \"wheel==0.44.0\" cffi; for p in readline ncurses-libs; do srpm=$(rpm -q --qf '%{SOURCERPM}' $p); f=$(rpm -qa --qf '%{SOURCERPM} %{NAME}\\n' | awk -v s=$srpm '$1==s{print $2}' | xargs rpm -q --licensefiles | grep -m1 -E '/(COPYING|LICENSE)[^/]*$'); cp -v \"$f\" {project}/LICENSE.${p%-libs}; done"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PIXELTABLE_PGSERVER_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pixeltable-pgserver v${{ env.PIXELTABLE_PGSERVER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pixeltable/pixeltable-pgserver
-          ref: v${{ env.PIXELTABLE_PGSERVER_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pixeltable-pgserver source
-        run: git apply python-wheels/patches/pixeltable-pgserver/${{ env.PIXELTABLE_PGSERVER_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's [tool.cibuildwheel.linux] before-all plus `perl`: the PG18 tarball no
-          # longer ships the generated catalog headers, so genbki.pl runs and needs FindBin,
-          # which the image's minimal perl-interpreter lacks (gotcha 46).
-          CIBW_BEFORE_ALL_LINUX: yum install -y flex bison readline-devel perl && make
-          # initdb/postgres are non-PIE; keep their base above vm.mmap_min_addr once auditwheel's patchelf prepends a segment (gotcha 595).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            LDFLAGS="-Wl,-Ttext-segment=0x200000"
-          # Upstream's pyproject.toml pins setuptools==73.0.1, which predates PEP 639 --
-          # it has no dist-info/licenses/ concept at all, so the default LICENSE*/COPYING*
-          # glob that LICENSE.postgresql/LICENSE.pgvector/LICENSE.readline/LICENSE.ncurses
-          # rely on (gotcha 44) is a no-op and the wheel ships no licence files whatsoever.
-          # setuptools 77.0.3 is the earliest release with that default glob; preinstall it
-          # and build with pip's `--no-build-isolation` (gotcha 76) so the preinstalled
-          # version is actually used instead of the isolated env re-resolving the pin.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # auditwheel grafts the image's libreadline/libtinfo (psql links them); ship their licence texts.
-          # setup.py's only real purpose is a dummy cffi_modules extension
-          # (src/pixeltable_pgserver/_build.py, an FFI().set_source() with empty C source) that
-          # exists purely to make setuptools tag the wheel as platform-specific -- the actual
-          # postgres/pgvector binaries are built by `make` in before-all. `cffi` isn't in
-          # pyproject.toml's [build-system] requires (upstream relies on a legacy
-          # `setup_requires=["cffi"]` that PEP 517/--no-build-isolation doesn't honour), so
-          # without preinstalling it setuptools silently skips cffi_modules and ships a pure
-          # py3-none-any wheel, which cibuildwheel then refuses outright.
-          CIBW_BEFORE_BUILD: >-
-            pip install "setuptools>=77.0.3" "wheel==0.44.0" cffi;
-            for p in readline ncurses-libs; do
-            srpm=$(rpm -q --qf '%{SOURCERPM}' $p);
-            f=$(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' | awk -v s=$srpm '$1==s{print $2}' | xargs rpm -q --licensefiles | grep -m1 -E '/(COPYING|LICENSE)[^/]*$');
-            cp -v "$f" {project}/LICENSE.${p%-libs};
-            done
+          name: pixeltable-pgserver-${{ env.PIXELTABLE_PGSERVER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships both postgres servers, pgvector and their licences
         run: |
@@ -140,12 +143,6 @@ jobs:
               "wheel-check/pixeltable_pgserver/$inst/bin/$exe" --version
             done
           done
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pixeltable-pgserver-${{ env.PIXELTABLE_PGSERVER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -180,7 +177,7 @@ jobs:
 
   publish:
     name: Publish pixeltable-pgserver ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

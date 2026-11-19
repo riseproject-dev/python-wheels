@@ -49,53 +49,59 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pydivsufsort ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pydivsufsort"
+      version: "${{ matrix.version }}"
+      repository: "louisabraham/pydivsufsort"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "recursive"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream builds libdivsufsort on the host runner, before cibuildwheel
+      # starts, then skips the rebuild inside the container
+      # (SKIP_LIBDIVSUFSORT_BUILD). Our riscv64 runner has no PyPI cmake wheel
+      # to fall back on (gotcha 1 shape), so this builds libdivsufsort inside
+      # the manylinux container instead, with the same CMake invocation as
+      # upstream's build.sh.
+      cibw-before-all: |-
+        set -e
+        dnf install -y -q cmake
+        cmake -S {project}/libdivsufsort -B /tmp/libdivsufsort-build \
+        -DBUILD_DIVSUFSORT64=ON -DBUILD_EXAMPLES=OFF -DUSE_OPENMP=ON \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        cmake --build /tmp/libdivsufsort-build -j"$(nproc)"
+        cp /tmp/libdivsufsort-build/lib/libdivsufsort.so* \
+        /tmp/libdivsufsort-build/lib/libdivsufsort64.so* \
+        {project}/pydivsufsort/
+        # Upstream's own wheel omits this; the wheel ships libdivsufsort's
+        # compiled .so as package_data, so its licence travels with it too.
+        cp {project}/libdivsufsort/LICENSE {project}/LICENSE.libdivsufsort
+      cibw-environment-linux: "SKIP_LIBDIVSUFSORT_BUILD=1"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest {project}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PYDIVSUFSORT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pydivsufsort ${{ env.PYDIVSUFSORT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: louisabraham/pydivsufsort
-          ref: v${{ env.PYDIVSUFSORT_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream builds libdivsufsort on the host runner, before cibuildwheel
-          # starts, then skips the rebuild inside the container
-          # (SKIP_LIBDIVSUFSORT_BUILD). Our riscv64 runner has no PyPI cmake wheel
-          # to fall back on (gotcha 1 shape), so this builds libdivsufsort inside
-          # the manylinux container instead, with the same CMake invocation as
-          # upstream's build.sh.
-          CIBW_BEFORE_ALL: |
-            set -e
-            dnf install -y -q cmake
-            cmake -S {project}/libdivsufsort -B /tmp/libdivsufsort-build \
-              -DBUILD_DIVSUFSORT64=ON -DBUILD_EXAMPLES=OFF -DUSE_OPENMP=ON \
-              -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-            cmake --build /tmp/libdivsufsort-build -j"$(nproc)"
-            cp /tmp/libdivsufsort-build/lib/libdivsufsort.so* \
-               /tmp/libdivsufsort-build/lib/libdivsufsort64.so* \
-               {project}/pydivsufsort/
-            # Upstream's own wheel omits this; the wheel ships libdivsufsort's
-            # compiled .so as package_data, so its licence travels with it too.
-            cp {project}/libdivsufsort/LICENSE {project}/LICENSE.libdivsufsort
-          CIBW_ENVIRONMENT: SKIP_LIBDIVSUFSORT_BUILD=1
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {project}/tests
+          name: pydivsufsort-${{ env.PYDIVSUFSORT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the bundled licences made it into the wheel
         run: |
@@ -108,12 +114,6 @@ jobs:
               assert expected <= found, f"{whl}: missing {expected - found}"
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pydivsufsort-${{ env.PYDIVSUFSORT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -150,7 +150,7 @@ jobs:
 
   publish:
     name: Publish pydivsufsort ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

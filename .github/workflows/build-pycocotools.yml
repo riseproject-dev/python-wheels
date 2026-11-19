@@ -58,40 +58,77 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pycocotools ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pycocotools"
+      version: "${{ matrix.version }}"
+      repository: "ppwwyyxx/cocoapi"
+      ref: "ac87f5077ad6b8864c2dc5e93d14cae62d1db05a"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        cp license.txt PythonAPI/LICENSE
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "./PythonAPI"
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # numpy is both a build and a runtime requirement, and only our
+      # registry has it for riscv64.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      cibw-test-command: "python {project}/tests/test_cases.py"
+
+  build_freethreaded:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pycocotools ${{ matrix.version }} cp314t-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pycocotools"
+      version: "${{ matrix.version }}"
+      repository: "ppwwyyxx/cocoapi"
+      ref: "ac87f5077ad6b8864c2dc5e93d14cae62d1db05a"
+      artifact-tag: "cp314t-manylinux_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        cp license.txt PythonAPI/LICENSE
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "./PythonAPI"
+      cibw-build: "cp314t-manylinux_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      cibw-test-command: "python {project}/tests/test_cases.py"
+
+  verify_wheels:
+    needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        wheel: [abi3, freethreaded]
     env:
       PYCOCOTOOLS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cocoapi ${{ env.PYCOCOTOOLS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ppwwyyxx/cocoapi
-          ref: ${{ env.PYCOCOTOOLS_REF }}
-          persist-credentials: false
+          name: pycocotools-${{ env.PYCOCOTOOLS_VERSION }}-${{ matrix.wheel == 'abi3' && 'cp312-abi3' || 'cp314t' }}-manylinux_riscv64
+          path: wheelhouse
 
-      # setup.py's Extension lives in PythonAPI/, but license.txt sits at the
-      # repo root, so setuptools' default LICEN[CS]E* glob never finds it and
-      # upstream's own wheels ship no licence (gotcha 86).
-      - name: Stage cocoapi's licence for the wheel
-        run: cp license.txt PythonAPI/LICENSE
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ./PythonAPI
-        env:
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is both a build and a runtime requirement, and only our
-          # registry has it for riscv64.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_COMMAND: python {project}/tests/test_cases.py
-
-      - name: Check wheel contents
+      - name: Check ABI3 wheel contents
+        if: matrix.wheel == 'abi3'
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
@@ -102,53 +139,8 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pycocotools-${{ env.PYCOCOTOOLS_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
-  # Free-threaded wheel: Py_GIL_DISABLED disables the limited API in setup.py,
-  # so this is a per-interpreter build. Only cp314t - cibuildwheel 4.2.0 has no
-  # cp313t identifier on any platform (gotcha 204), matching upstream's own
-  # later decision to drop 3.13t support (PR #35, not in this release).
-  build_freethreaded:
-    needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build pycocotools ${{ matrix.version }} cp314t-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
-    env:
-      PYCOCOTOOLS_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout cocoapi ${{ env.PYCOCOTOOLS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ppwwyyxx/cocoapi
-          ref: ${{ env.PYCOCOTOOLS_REF }}
-          persist-credentials: false
-
-      - name: Stage cocoapi's licence for the wheel
-        run: cp license.txt PythonAPI/LICENSE
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ./PythonAPI
-        env:
-          CIBW_BUILD: cp314t-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_COMMAND: python {project}/tests/test_cases.py
-
-      - name: Check wheel contents
+      - name: Check free-threaded wheel contents
+        if: matrix.wheel == 'freethreaded'
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
@@ -159,15 +151,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pycocotools-${{ env.PYCOCOTOOLS_VERSION }}-cp314t-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pycocotools ${{ matrix.version }}
-    needs: [setup, build_abi3, build_freethreaded]
+    needs: [setup, build_abi3, build_freethreaded, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -51,94 +51,101 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build kiss-icp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "kiss-icp"
+      version: "${{ matrix.version }}"
+      repository: "PRBonn/kiss-icp"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        set -euo pipefail
+        curl -fsSL -o LICENSE.oneTBB https://raw.githubusercontent.com/uxlfoundation/oneTBB/v2022.1.0/LICENSE.txt
+        curl -fsSL -o LICENSE.eigen https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2
+        curl -fsSL -o LICENSE.sophus https://raw.githubusercontent.com/strasdat/Sophus/1.24.6/LICENSE.txt
+        curl -fsSL -o LICENSE.robin-map https://raw.githubusercontent.com/Tessil/robin-map/v1.4.0/LICENSE
+        curl -fsSL -o LICENSE.pybind11 https://raw.githubusercontent.com/pybind/pybind11/v3.1.0/LICENSE
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        mkdir -p riscv64-tests
+        cat > riscv64-tests/test_riscv64_smoke.py <<'EOF'
+        import numpy as np
+
+        from kiss_icp.config import load_config
+        from kiss_icp.kiss_icp import KissICP
+        from kiss_icp.pybind import kiss_icp_pybind
+
+
+        def _room(rng, n=4000):
+            faces = []
+            for axis in range(3):
+                for wall in (-8.0, 8.0) if axis < 2 else (-1.5, 3.0):
+                    pts = rng.uniform(-8.0, 8.0, size=(n, 3))
+                    pts[:, 2] = rng.uniform(-1.5, 3.0, size=n) if axis < 2 else pts[:, 2]
+                    pts[:, axis] = wall
+                    faces.append(pts)
+            return np.concatenate(faces)
+
+
+        def test_extension_is_compiled():
+            assert kiss_icp_pybind.__file__.endswith(".so"), kiss_icp_pybind.__file__
+
+
+        def test_registration_recovers_motion():
+            rng = np.random.default_rng(0)
+            scene = _room(rng)
+            odometry = KissICP(load_config(None))
+            motion = np.array([0.4, -0.2, 0.05])
+            for step in range(4):
+                odometry.register_frame(scene - step * motion, np.array([]))
+            np.testing.assert_allclose(odometry.last_pose[:3, 3], 3 * motion, atol=0.05)
+            np.testing.assert_allclose(odometry.last_pose[:3, :3], np.eye(3), atol=0.01)
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "python/"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # scikit-build-core 1.0 rejects the release's `cmake.minimum-version`
+      # key; build-system.requires leaves it unpinned.
+      cibw-before-all: "echo 'scikit-build-core<1' > /skbuild-constraint.txt"
+      cibw-environment-linux: "PIP_CONSTRAINT=/skbuild-constraint.txt PIP_BUILD_CONSTRAINT=/skbuild-constraint.txt"
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy"
+      cibw-test-sources: "python/tests riscv64-tests"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "kiss_icp_pipeline --version && python -m pytest -rA python/tests riscv64-tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       KISS_ICP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout kiss-icp v${{ env.KISS_ICP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: PRBonn/kiss-icp
-          ref: v${{ env.KISS_ICP_VERSION }}
-          persist-credentials: false
-
-      # oneTBB, Eigen, Sophus, robin-map and pybind11 are fetched at configure
-      # time and compiled into the extension; upstream's wheel ships none of
-      # their licences, and its in-tree 3rdparty/*/LICENSE copies are not the
-      # pinned releases' own texts.
-      - name: Stage the vendored dependencies' licences
-        working-directory: python
-        run: |
-          set -euo pipefail
-          curl -fsSL -o LICENSE.oneTBB https://raw.githubusercontent.com/uxlfoundation/oneTBB/v2022.1.0/LICENSE.txt
-          curl -fsSL -o LICENSE.eigen https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2
-          curl -fsSL -o LICENSE.sophus https://raw.githubusercontent.com/strasdat/Sophus/1.24.6/LICENSE.txt
-          curl -fsSL -o LICENSE.robin-map https://raw.githubusercontent.com/Tessil/robin-map/v1.4.0/LICENSE
-          curl -fsSL -o LICENSE.pybind11 https://raw.githubusercontent.com/pybind/pybind11/v3.1.0/LICENSE
-
-      - name: Stage the riscv64 smoke test
-        run: |
-          mkdir -p riscv64-tests
-          cat > riscv64-tests/test_riscv64_smoke.py <<'EOF'
-          import numpy as np
-
-          from kiss_icp.config import load_config
-          from kiss_icp.kiss_icp import KissICP
-          from kiss_icp.pybind import kiss_icp_pybind
-
-
-          def _room(rng, n=4000):
-              faces = []
-              for axis in range(3):
-                  for wall in (-8.0, 8.0) if axis < 2 else (-1.5, 3.0):
-                      pts = rng.uniform(-8.0, 8.0, size=(n, 3))
-                      pts[:, 2] = rng.uniform(-1.5, 3.0, size=n) if axis < 2 else pts[:, 2]
-                      pts[:, axis] = wall
-                      faces.append(pts)
-              return np.concatenate(faces)
-
-
-          def test_extension_is_compiled():
-              assert kiss_icp_pybind.__file__.endswith(".so"), kiss_icp_pybind.__file__
-
-
-          def test_registration_recovers_motion():
-              rng = np.random.default_rng(0)
-              scene = _room(rng)
-              odometry = KissICP(load_config(None))
-              motion = np.array([0.4, -0.2, 0.05])
-              for step in range(4):
-                  odometry.register_frame(scene - step * motion, np.array([]))
-              np.testing.assert_allclose(odometry.last_pose[:3, 3], 3 * motion, atol=0.05)
-              np.testing.assert_allclose(odometry.last_pose[:3, :3], np.eye(3), atol=0.01)
-          EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python/
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # scikit-build-core 1.0 rejects the release's `cmake.minimum-version`
-          # key; build-system.requires leaves it unpinned.
-          CIBW_BEFORE_ALL: echo 'scikit-build-core<1' > /skbuild-constraint.txt
-          CIBW_ENVIRONMENT: >-
-            PIP_CONSTRAINT=/skbuild-constraint.txt
-            PIP_BUILD_CONSTRAINT=/skbuild-constraint.txt
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
-          CIBW_TEST_SOURCES: python/tests riscv64-tests
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: kiss_icp_pipeline --version && python -m pytest -rA python/tests riscv64-tests
+          name: kiss-icp-${{ env.KISS_ICP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -155,15 +162,9 @@ jobs:
               print(path, "->", sos)
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: kiss-icp-${{ env.KISS_ICP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish kiss-icp ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

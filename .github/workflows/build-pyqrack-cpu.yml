@@ -59,44 +59,56 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pyqrack-cpu ${{ matrix.version }} py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyqrack-cpu"
+      version: "${{ matrix.version }}"
+      repository: "vm6502q/pyqrack"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        export PYQRACK_VERSION='${{ matrix.version }}'
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply "python-wheels/patches/pyqrack-cpu/${PYQRACK_VERSION}"/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "cp312-manylinux_riscv64"
+      cibw-before-all-linux: "dnf install -y cmake boost-devel git"
+      # setup.py's build_py has no ext_modules to key a platform tag off
+      # of, so bdist_wheel defaults to "py3-none-any"; this placeholder
+      # forces a real platform and auditwheel repair (default, unmodified)
+      # turns it into the real manylinux_riscv64 tag.
+      cibw-build-frontend: "build; args: -C--build-option=--plat-name=linux_riscv64"
+      cibw-test-requires: "pytest numpy"
+      cibw-test-sources: "pyqrack/tests"
+      cibw-test-command: "python -m pytest {project}/pyqrack/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PYQRACK_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyqrack ${{ env.PYQRACK_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: vm6502q/pyqrack
-          ref: v${{ env.PYQRACK_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pyqrack source
-        run: git apply "python-wheels/patches/pyqrack-cpu/${PYQRACK_VERSION}"/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: dnf install -y cmake boost-devel git
-          # setup.py's build_py has no ext_modules to key a platform tag off
-          # of, so bdist_wheel defaults to "py3-none-any"; this placeholder
-          # forces a real platform and auditwheel repair (default, unmodified)
-          # turns it into the real manylinux_riscv64 tag.
-          CIBW_BUILD_FRONTEND: "build; args: -C--build-option=--plat-name=linux_riscv64"
-          CIBW_TEST_REQUIRES: pytest numpy
-          CIBW_TEST_SOURCES: pyqrack/tests
-          CIBW_TEST_COMMAND: python -m pytest {project}/pyqrack/tests
+          name: pyqrack-cpu-${{ env.PYQRACK_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries libqrack_pinvoke and both licences
         run: |
@@ -111,15 +123,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyqrack-cpu-${{ env.PYQRACK_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyqrack-cpu ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

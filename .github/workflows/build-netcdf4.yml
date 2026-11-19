@@ -59,141 +59,143 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build netCDF4 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "netcdf4"
+      version: "${{ matrix.version }}"
+      repository: "Unidata/netcdf4-python"
+      ref: "v${{ matrix.version }}rel"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 600
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/netcdf4/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Mirrors Unidata/netcdf4-python-manylinux's install_libs.sh. curl is
+      # built from source there and here so the wheel bundles curl's small
+      # closure rather than Rocky's krb5/openldap/libssh one. OpenSSL, zstd,
+      # bzip2 and zlib come from the distro: they are only built from source
+      # upstream because AlmaLinux 8 ships them too old, and Rocky 10 already
+      # carries a newer OpenSSL than the version upstream pins.
+      # NETCDF_PLUGIN_INSTALL is the current spelling of the option upstream
+      # still passes as ENABLE_PLUGIN_INSTALL, which netcdf-c 4.10 ignores.
+      cibw-before-all-linux: |-
+        set -ex
+        dnf -y install zlib-devel bzip2-devel libzstd-devel openssl-devel
+        mkdir -p /tmp/curl /tmp/libaec /tmp/blosc /tmp/hdf5 /tmp/netcdf
+
+        curl -fsSL "https://curl.se/download/curl-$CURL_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/curl
+        cd /tmp/curl
+        ./configure --prefix=/usr/local --disable-ldap --with-openssl --without-zstd --without-libpsl
+        make -j "$(nproc)"
+        make install
+        ldconfig
+
+        curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libaec
+        cmake -S /tmp/libaec -B /tmp/libaec/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D BUILD_STATIC_LIBS=OFF \
+        -D BUILD_TESTING=OFF
+        cmake --build /tmp/libaec/build -j "$(nproc)"
+        cmake --install /tmp/libaec/build
+        ldconfig
+
+        curl -fsSL "https://github.com/Blosc/c-blosc/archive/refs/tags/v$BLOSC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/blosc
+        cmake -S /tmp/blosc -B /tmp/blosc/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -D PREFER_EXTERNAL_ZSTD=ON \
+        -D BUILD_TESTS=OFF \
+        -D BUILD_BENCHMARKS=OFF \
+        -D BUILD_FUZZERS=OFF
+        cmake --build /tmp/blosc/build -j "$(nproc)"
+        cmake --install /tmp/blosc/build
+        ldconfig
+
+        curl -fsSL "https://github.com/HDFGroup/hdf5/archive/refs/tags/$HDF5_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/hdf5
+        cmake -S /tmp/hdf5 -B /tmp/hdf5/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D BUILD_TESTING=OFF \
+        -D BUILD_STATIC_LIBS=OFF \
+        -D HDF5_BUILD_EXAMPLES=OFF \
+        -D HDF5_BUILD_TOOLS=OFF \
+        -D HDF5_BUILD_UTILS=OFF \
+        -D HDF5_ALLOW_EXTERNAL_SUPPORT:STRING=NO \
+        -D HDF5_ENABLE_ZLIB_SUPPORT=ON \
+        -D HDF5_ENABLE_SZIP_SUPPORT=ON
+        cmake --build /tmp/hdf5/build -j "$(nproc)"
+        cmake --install /tmp/hdf5/build
+        ldconfig
+
+        curl -fsSL "https://github.com/Unidata/netcdf-c/archive/refs/tags/v$NETCDF_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/netcdf
+        cmake -S /tmp/netcdf -B /tmp/netcdf/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D NETCDF_ENABLE_NETCDF_4=on \
+        -D NETCDF_ENABLE_HDF5=on \
+        -D NETCDF_ENABLE_DAP=on \
+        -D NETCDF_ENABLE_TESTS=off \
+        -D NETCDF_PLUGIN_INSTALL=ON \
+        -D BUILD_SHARED_LIBS=on
+        cmake --build /tmp/netcdf/build -j "$(nproc)" --target install
+        ldconfig
+
+        cp /usr/share/licenses/openssl-libs/LICENSE.txt "{project}/LICENSE.openssl"
+        cp /tmp/curl/COPYING "{project}/LICENSE.curl"
+        cp /tmp/libaec/LICENSE.txt "{project}/LICENSE.libaec"
+        cp /tmp/blosc/LICENSE.txt "{project}/LICENSE.c-blosc"
+        cp /tmp/hdf5/LICENSE "{project}/LICENSE.hdf5"
+        cp /tmp/netcdf/COPYRIGHT "{project}/LICENSE.netcdf-c"
+        cp /usr/share/licenses/libzstd/LICENSE "{project}/LICENSE.zstd"
+        cp /usr/share/licenses/bzip2-libs/LICENSE "{project}/LICENSE.bzip2"
+      # NETCDF_PLUGIN_DIR is upstream's [[tool.cibuildwheel.overrides]] value
+      # for Linux, which this variable replaces wholesale. The tag is fetched
+      # shallow, so setuptools_scm cannot describe the version.
+      cibw-environment-linux: "NETCDF_PLUGIN_DIR=/usr/local/hdf5/lib/plugin/ SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NETCDF4=${{ matrix.version }} CURL_VERSION=8.14.1 LIBAEC_VERSION=1.1.4 BLOSC_VERSION=1.21.6 HDF5_VERSION=2.2.0 NETCDF_VERSION=4.10.1 PIP_ONLY_BINARY=numpy,cftime"
+      # test_dap reads live OPeNDAP servers, which answer with a malformed
+      # DDS often enough to be useless as a wheel test (it fails on aarch64
+      # too). NO_NET is upstream's own switch for it.
+      cibw-test-environment: "NO_NET=1"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       NETCDF4_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout netcdf4-python ${{ env.NETCDF4_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Unidata/netcdf4-python
-          ref: v${{ env.NETCDF4_VERSION }}rel
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch netcdf4-python source
-        run: git apply python-wheels/patches/netcdf4/${{ env.NETCDF4_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors Unidata/netcdf4-python-manylinux's install_libs.sh. curl is
-          # built from source there and here so the wheel bundles curl's small
-          # closure rather than Rocky's krb5/openldap/libssh one. OpenSSL, zstd,
-          # bzip2 and zlib come from the distro: they are only built from source
-          # upstream because AlmaLinux 8 ships them too old, and Rocky 10 already
-          # carries a newer OpenSSL than the version upstream pins.
-          # NETCDF_PLUGIN_INSTALL is the current spelling of the option upstream
-          # still passes as ENABLE_PLUGIN_INSTALL, which netcdf-c 4.10 ignores.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            dnf -y install zlib-devel bzip2-devel libzstd-devel openssl-devel
-            mkdir -p /tmp/curl /tmp/libaec /tmp/blosc /tmp/hdf5 /tmp/netcdf
-
-            curl -fsSL "https://curl.se/download/curl-$CURL_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/curl
-            cd /tmp/curl
-            ./configure --prefix=/usr/local --disable-ldap --with-openssl --without-zstd --without-libpsl
-            make -j "$(nproc)"
-            make install
-            ldconfig
-
-            curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libaec
-            cmake -S /tmp/libaec -B /tmp/libaec/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D BUILD_STATIC_LIBS=OFF \
-              -D BUILD_TESTING=OFF
-            cmake --build /tmp/libaec/build -j "$(nproc)"
-            cmake --install /tmp/libaec/build
-            ldconfig
-
-            curl -fsSL "https://github.com/Blosc/c-blosc/archive/refs/tags/v$BLOSC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/blosc
-            cmake -S /tmp/blosc -B /tmp/blosc/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-              -D PREFER_EXTERNAL_ZSTD=ON \
-              -D BUILD_TESTS=OFF \
-              -D BUILD_BENCHMARKS=OFF \
-              -D BUILD_FUZZERS=OFF
-            cmake --build /tmp/blosc/build -j "$(nproc)"
-            cmake --install /tmp/blosc/build
-            ldconfig
-
-            curl -fsSL "https://github.com/HDFGroup/hdf5/archive/refs/tags/$HDF5_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/hdf5
-            cmake -S /tmp/hdf5 -B /tmp/hdf5/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D BUILD_TESTING=OFF \
-              -D BUILD_STATIC_LIBS=OFF \
-              -D HDF5_BUILD_EXAMPLES=OFF \
-              -D HDF5_BUILD_TOOLS=OFF \
-              -D HDF5_BUILD_UTILS=OFF \
-              -D HDF5_ALLOW_EXTERNAL_SUPPORT:STRING=NO \
-              -D HDF5_ENABLE_ZLIB_SUPPORT=ON \
-              -D HDF5_ENABLE_SZIP_SUPPORT=ON
-            cmake --build /tmp/hdf5/build -j "$(nproc)"
-            cmake --install /tmp/hdf5/build
-            ldconfig
-
-            curl -fsSL "https://github.com/Unidata/netcdf-c/archive/refs/tags/v$NETCDF_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/netcdf
-            cmake -S /tmp/netcdf -B /tmp/netcdf/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D NETCDF_ENABLE_NETCDF_4=on \
-              -D NETCDF_ENABLE_HDF5=on \
-              -D NETCDF_ENABLE_DAP=on \
-              -D NETCDF_ENABLE_TESTS=off \
-              -D NETCDF_PLUGIN_INSTALL=ON \
-              -D BUILD_SHARED_LIBS=on
-            cmake --build /tmp/netcdf/build -j "$(nproc)" --target install
-            ldconfig
-
-            cp /usr/share/licenses/openssl-libs/LICENSE.txt "{project}/LICENSE.openssl"
-            cp /tmp/curl/COPYING "{project}/LICENSE.curl"
-            cp /tmp/libaec/LICENSE.txt "{project}/LICENSE.libaec"
-            cp /tmp/blosc/LICENSE.txt "{project}/LICENSE.c-blosc"
-            cp /tmp/hdf5/LICENSE "{project}/LICENSE.hdf5"
-            cp /tmp/netcdf/COPYRIGHT "{project}/LICENSE.netcdf-c"
-            cp /usr/share/licenses/libzstd/LICENSE "{project}/LICENSE.zstd"
-            cp /usr/share/licenses/bzip2-libs/LICENSE "{project}/LICENSE.bzip2"
-          # NETCDF_PLUGIN_DIR is upstream's [[tool.cibuildwheel.overrides]] value
-          # for Linux, which this variable replaces wholesale. The tag is fetched
-          # shallow, so setuptools_scm cannot describe the version.
-          CIBW_ENVIRONMENT: >-
-            NETCDF_PLUGIN_DIR=/usr/local/hdf5/lib/plugin/
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NETCDF4=${{ env.NETCDF4_VERSION }}
-            CURL_VERSION=${{ env.CURL_VERSION }}
-            LIBAEC_VERSION=${{ env.LIBAEC_VERSION }}
-            BLOSC_VERSION=${{ env.BLOSC_VERSION }}
-            HDF5_VERSION=${{ env.HDF5_VERSION }}
-            NETCDF_VERSION=${{ env.NETCDF_VERSION }}
-            PIP_ONLY_BINARY=numpy,cftime
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # test_dap reads live OPeNDAP servers, which answer with a malformed
-          # DDS often enough to be useless as a wheel test (it fails on aarch64
-          # too). NO_NET is upstream's own switch for it.
-          CIBW_TEST_ENVIRONMENT: NO_NET=1
+          name: netcdf4-${{ env.NETCDF4_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension, the plugins and the licences
         run: |
@@ -224,15 +226,9 @@ jobs:
           }, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: netcdf4-${{ env.NETCDF4_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish netCDF4 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

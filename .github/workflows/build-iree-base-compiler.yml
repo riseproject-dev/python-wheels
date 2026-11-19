@@ -48,6 +48,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build iree-base-compiler ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "iree-base-compiler"
+      version: "${{ matrix.version }}"
+      repository: "iree-org/iree"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      timeout-minutes: 2880
+      checkout-submodules: "recursive"
+      pre-build: |-
+        export IREE_BASE_COMPILER_VERSION='${{ matrix.version }}'
+        cat > compiler/version_local.json <<EOF
+        {
+          "package-version": "${IREE_BASE_COMPILER_VERSION}"
+        }
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp LICENSE compiler/LICENSE
+        cp third_party/llvm-project/LICENSE.TXT compiler/LICENSE.llvm
+        cp third_party/stablehlo/LICENSE compiler/LICENSE.stablehlo
+        cp third_party/torch-mlir/LICENSE compiler/LICENSE.torch-mlir
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "compiler"
+      cibw-build: "cp312-manylinux_riscv64"
+      cibw-build-frontend: "build"
+      # Default ninja -j and ld.bfd exhaust the runner's memory on a build this size
+      # (same failure mode as build-circt.yml); IREE_ENABLE_LLD switches its own build to lld.
+      cibw-before-all: "dnf -y install lld"
+      # -mno-relax: lld's --gc-sections (on by default for LLVM's own Release
+      # builds) mis-handles GCC's .eh_frame relocation ordering together with
+      # riscv64 linker relaxation, erroring "relocation refers to a symbol in
+      # a discarded section" on exception-table-heavy C++ objects. This is a
+      # known riscv64 gc-sections/relaxation interaction (binutils PR 28709;
+      # same -mno-relax workaround suggested on the matching lld-side thread),
+      # not specific to IREE - disabling relaxation avoids it without having
+      # to switch off lld or disable gc-sections wholesale.
+      cibw-environment-linux: "IREE_ENABLE_LLD=ON IREE_TARGET_BACKEND_ROCM=OFF IREE_TARGET_BACKEND_CUDA=OFF CMAKE_BUILD_PARALLEL_LEVEL=3 CFLAGS=-mno-relax CXXFLAGS=-mno-relax"
+      cibw-test-command: "python -m iree.compiler._package_test"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 2880  # 48h: 1440 (24h) was cancelled twice in a row at [4075/8692] and
                             # [5960/8692] (runs 38678387321, 39714560434); ~188 steps/h over the
@@ -56,64 +114,14 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       IREE_BASE_COMPILER_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout iree-org/iree v${{ env.IREE_BASE_COMPILER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: iree-org/iree
-          ref: v${{ env.IREE_BASE_COMPILER_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Write compiler version
-        run: |
-          cat > compiler/version_local.json <<EOF
-          {
-            "package-version": "${IREE_BASE_COMPILER_VERSION}"
-          }
-          EOF
-
-      # The wheel links LLVM/MLIR/clang/lld, StableHLO and Torch-MLIR; upstream's wheel ships no licence text for them.
-      - name: Stage licences
-        run: |
-          cp LICENSE compiler/LICENSE
-          cp third_party/llvm-project/LICENSE.TXT compiler/LICENSE.llvm
-          cp third_party/stablehlo/LICENSE compiler/LICENSE.stablehlo
-          cp third_party/torch-mlir/LICENSE compiler/LICENSE.torch-mlir
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: compiler
-          output-dir: wheelhouse
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: build
-          # Default ninja -j and ld.bfd exhaust the runner's memory on a build this size
-          # (same failure mode as build-circt.yml); IREE_ENABLE_LLD switches its own build to lld.
-          CIBW_BEFORE_ALL: dnf -y install lld
-          # -mno-relax: lld's --gc-sections (on by default for LLVM's own Release
-          # builds) mis-handles GCC's .eh_frame relocation ordering together with
-          # riscv64 linker relaxation, erroring "relocation refers to a symbol in
-          # a discarded section" on exception-table-heavy C++ objects. This is a
-          # known riscv64 gc-sections/relaxation interaction (binutils PR 28709;
-          # same -mno-relax workaround suggested on the matching lld-side thread),
-          # not specific to IREE - disabling relaxation avoids it without having
-          # to switch off lld or disable gc-sections wholesale.
-          CIBW_ENVIRONMENT: >-
-            IREE_ENABLE_LLD=ON
-            IREE_TARGET_BACKEND_ROCM=OFF
-            IREE_TARGET_BACKEND_CUDA=OFF
-            CMAKE_BUILD_PARALLEL_LEVEL=3
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            CFLAGS=-mno-relax
-            CXXFLAGS=-mno-relax
-          CIBW_TEST_COMMAND: python -m iree.compiler._package_test
+          name: iree-base-compiler-${{ env.IREE_BASE_COMPILER_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel licences
         run: |
@@ -126,15 +134,9 @@ jobs:
           assert licences == {"LICENSE", "LICENSE.llvm", "LICENSE.stablehlo", "LICENSE.torch-mlir"}, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: iree-base-compiler-${{ env.IREE_BASE_COMPILER_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish iree-base-compiler ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

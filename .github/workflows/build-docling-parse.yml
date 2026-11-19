@@ -49,17 +49,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build docling-parse ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 720
-
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "docling-parse"
+      version: "${{ matrix.version }}"
+      repository: "docling-project/docling-parse"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 720
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # pyproject pins cmake<4.0.0, which has no riscv64 wheel; the image's own
+      # cmake is used instead, so the build requirements are preinstalled here.
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # The C++ dependencies are fetched and statically linked by the build, and
+      # upstream ships none of their licences.
+      cibw-before-build: |-
+        pip install "setuptools>=77.0.3" "pybind11>=2.13.6" "wheel>=0.43.0"
+        curl -fsSL -o {project}/LICENSE.qpdf https://raw.githubusercontent.com/qpdf/qpdf/v12.2.0/LICENSE.txt
+        curl -fsSL -o {project}/LICENSE.libjpeg-turbo https://raw.githubusercontent.com/libjpeg-turbo/libjpeg-turbo/3.1.1/LICENSE.md
+        curl -fsSL -o {project}/LICENSE.openjpeg https://raw.githubusercontent.com/uclouvain/openjpeg/v2.5.3/LICENSE
+        curl -fsSL -o {project}/LICENSE.lcms2 https://raw.githubusercontent.com/mm2/Little-CMS/lcms2.17/LICENSE
+        curl -fsSL -o {project}/LICENSE.freetype https://raw.githubusercontent.com/freetype/freetype/VER-2-13-3/docs/FTL.TXT
+        curl -fsSL -o {project}/LICENSE.blend2d https://raw.githubusercontent.com/blend2d/blend2d/6dbc2cefbc996379e07104e34519a440b49b15d7/LICENSE.md
+        curl -fsSL -o {project}/LICENSE.utfcpp https://raw.githubusercontent.com/nemtrif/utfcpp/v4.0.6/LICENSE
+        curl -fsSL -o {project}/LICENSE.json https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT
+        curl -fsSL -o {project}/LICENSE.loguru https://raw.githubusercontent.com/emilk/loguru/4adaa185883e3c04da25913579c451d3c32cfac1/LICENSE
+        curl -fsSL -o {project}/LICENSE.cxxopts https://raw.githubusercontent.com/jarro2783/cxxopts/v3.3.1/LICENSE
+        curl -fsSL -o {project}/LICENSE.pdfium https://raw.githubusercontent.com/chromium/pdfium/main/LICENSE
+      cibw-environment-linux: "BUILD_THREADS=4 CMAKE_BUILD_TYPE=Release"
+      cibw-test-sources: "tests"
+      cibw-test-requires: "pytest numpy huggingface_hub fonttools"
+      # Upstream's test runner installs the same static (CFF) Noto CJK face for the
+      # non-embedded-font tests; the manylinux image ships no fonts at all.
+      cibw-before-test-linux: "dnf -y install google-noto-sans-cjk-fonts"
+      # pandas and pillow (dependencies of the wheel) are sdist-only on PyPI at their
+      # newest releases and fail to build from source here; take the registry's
+      # riscv64 wheels.
+      cibw-test-environment: "DOCLING_PARSE_CJK_FALLBACK_FONT=/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc PIP_ONLY_BINARY=pandas,pillow"
+      # Blend2D generates its compositing pipelines with asmjit, which has no riscv64
+      # backend, and its reference pipeline drops the Multiply blend mode - the same tests
+      # fail on aarch64 built with BLEND2D_NO_JIT=ON.
+      cibw-test-command: "python -m pytest -v tests/test_unit_*.py -k \"not multiply\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       DOCLING_PARSE_VERSION: ${{ matrix.version }}
-
     steps:
       - name: Checkout docling-parse v${{ env.DOCLING_PARSE_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -68,49 +115,11 @@ jobs:
           ref: v${{ env.DOCLING_PARSE_VERSION }}
           persist-credentials: false
 
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # pyproject pins cmake<4.0.0, which has no riscv64 wheel; the image's own
-          # cmake is used instead, so the build requirements are preinstalled here.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # The C++ dependencies are fetched and statically linked by the build, and
-          # upstream ships none of their licences.
-          CIBW_BEFORE_BUILD: |
-            pip install "setuptools>=77.0.3" "pybind11>=2.13.6" "wheel>=0.43.0"
-            curl -fsSL -o {project}/LICENSE.qpdf https://raw.githubusercontent.com/qpdf/qpdf/v12.2.0/LICENSE.txt
-            curl -fsSL -o {project}/LICENSE.libjpeg-turbo https://raw.githubusercontent.com/libjpeg-turbo/libjpeg-turbo/3.1.1/LICENSE.md
-            curl -fsSL -o {project}/LICENSE.openjpeg https://raw.githubusercontent.com/uclouvain/openjpeg/v2.5.3/LICENSE
-            curl -fsSL -o {project}/LICENSE.lcms2 https://raw.githubusercontent.com/mm2/Little-CMS/lcms2.17/LICENSE
-            curl -fsSL -o {project}/LICENSE.freetype https://raw.githubusercontent.com/freetype/freetype/VER-2-13-3/docs/FTL.TXT
-            curl -fsSL -o {project}/LICENSE.blend2d https://raw.githubusercontent.com/blend2d/blend2d/6dbc2cefbc996379e07104e34519a440b49b15d7/LICENSE.md
-            curl -fsSL -o {project}/LICENSE.utfcpp https://raw.githubusercontent.com/nemtrif/utfcpp/v4.0.6/LICENSE
-            curl -fsSL -o {project}/LICENSE.json https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT
-            curl -fsSL -o {project}/LICENSE.loguru https://raw.githubusercontent.com/emilk/loguru/4adaa185883e3c04da25913579c451d3c32cfac1/LICENSE
-            curl -fsSL -o {project}/LICENSE.cxxopts https://raw.githubusercontent.com/jarro2783/cxxopts/v3.3.1/LICENSE
-            curl -fsSL -o {project}/LICENSE.pdfium https://raw.githubusercontent.com/chromium/pdfium/main/LICENSE
-          CIBW_ENVIRONMENT: >-
-            BUILD_THREADS=4
-            CMAKE_BUILD_TYPE=Release
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_REQUIRES: pytest numpy huggingface_hub fonttools
-          # Upstream's test runner installs the same static (CFF) Noto CJK face for the
-          # non-embedded-font tests; the manylinux image ships no fonts at all.
-          CIBW_BEFORE_TEST_LINUX: dnf -y install google-noto-sans-cjk-fonts
-          # pandas and pillow (dependencies of the wheel) are sdist-only on PyPI at their
-          # newest releases and fail to build from source here; take the registry's
-          # riscv64 wheels.
-          CIBW_TEST_ENVIRONMENT: >-
-            DOCLING_PARSE_CJK_FALLBACK_FONT=/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=pandas,pillow
-          # Blend2D generates its compositing pipelines with asmjit, which has no riscv64
-          # backend, and its reference pipeline drops the Multiply blend mode — the same tests
-          # fail on aarch64 built with BLEND2D_NO_JIT=ON.
-          CIBW_TEST_COMMAND: python -m pytest -v tests/test_unit_*.py -k "not multiply"
+          name: docling-parse-${{ env.DOCLING_PARSE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -145,15 +154,9 @@ jobs:
       - name: Check Blend2D debug assertions are absent
         run: python3 scripts/check_no_blend2d_assertions.py ./wheelhouse/*.whl
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: docling-parse-${{ env.DOCLING_PARSE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish docling-parse ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

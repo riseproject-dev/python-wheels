@@ -50,44 +50,46 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build dclab ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dclab"
+      version: "${{ matrix.version }}"
+      repository: "DC-Analysis/dclab"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DCLAB=${{ matrix.version }}"
+      # dclab pins hdf5plugin<5, but our registry only carries hdf5plugin 7.x (its
+      # Zstd filter API, the only one dclab uses, is unchanged); install the wheel
+      # bare and stage the runtime deps from the registry instead (gotcha 122).
+      cibw-test-environment: "PIP_NO_DEPS=1"
+      cibw-before-test: "PIP_NO_DEPS=0 PIP_ONLY_BINARY=numpy,scipy,h5py,hdf5plugin pip install numpy \"scipy>=1.10.0,!=1.18.0\" \"h5py>=3.0.0,<4\" hdf5plugin pytest"
+      cibw-test-sources: "tests"
+      cibw-test-command: "pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       DCLAB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout dclab ${{ env.DCLAB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: DC-Analysis/dclab
-          ref: ${{ env.DCLAB_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DCLAB=${{ env.DCLAB_VERSION }}
-          # dclab pins hdf5plugin<5, but our registry only carries hdf5plugin 7.x (its
-          # Zstd filter API, the only one dclab uses, is unchanged); install the wheel
-          # bare and stage the runtime deps from the registry instead (gotcha 122).
-          CIBW_TEST_ENVIRONMENT: PIP_NO_DEPS=1
-          CIBW_BEFORE_TEST: >-
-            PIP_NO_DEPS=0 PIP_ONLY_BINARY=numpy,scipy,h5py,hdf5plugin
-            pip install numpy "scipy>=1.10.0,!=1.18.0" "h5py>=3.0.0,<4" hdf5plugin pytest
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: pytest tests
+          name: dclab-${{ env.DCLAB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -113,16 +115,9 @@ jobs:
           }, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dclab-${{ env.DCLAB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish dclab ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

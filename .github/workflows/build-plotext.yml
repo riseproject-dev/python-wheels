@@ -52,35 +52,37 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build plotext ${{ matrix.version }} py3-none-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "plotext"
+      version: "${{ matrix.version }}"
+      repository: "piccolomo/plotext"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      # setup.py's wheel_of_this_system.get_tag() tags the wheel py3-none-<platform>: the
+      # C++ kernel it compiles is loaded by ctypes, not tied to any interpreter, so one
+      # build serves every Python.
+      cibw-build: "cp312-manylinux_riscv64"
+      # Mirrors upstream's own windows.yml unit-test invocation (the Linux wheels.yml
+      # job only runs pyproject.toml's one-line import smoke test).
+      cibw-test-command: "python -m unittest plotext._tests.primitives plotext._tests.plots plotext._tests.dates plotext._tests.fixed_bugs plotext._tests.hashes plotext.prettydoc._tests.docs plotext.prettydoc._tests.hashes -v"
 
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PLOTEXT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout plotext ${{ env.PLOTEXT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: piccolomo/plotext
-          ref: ${{ env.PLOTEXT_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # setup.py's wheel_of_this_system.get_tag() tags the wheel py3-none-<platform>: the
-          # C++ kernel it compiles is loaded by ctypes, not tied to any interpreter, so one
-          # build serves every Python.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors upstream's own windows.yml unit-test invocation (the Linux wheels.yml
-          # job only runs pyproject.toml's one-line import smoke test).
-          CIBW_TEST_COMMAND: >-
-            python -m unittest plotext._tests.primitives plotext._tests.plots
-            plotext._tests.dates plotext._tests.fixed_bugs plotext._tests.hashes
-            plotext.prettydoc._tests.docs plotext.prettydoc._tests.hashes -v
+          name: plotext-${{ env.PLOTEXT_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries a riscv64 kernel.so
         run: |
@@ -96,15 +98,9 @@ jobs:
           EOF
           file kernel_check/plotext/_kernel/cpp/kernel.so | tee /dev/stderr | grep -q 'RISC-V'
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: plotext-${{ env.PLOTEXT_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish plotext ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

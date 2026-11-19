@@ -49,164 +49,166 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pygame-ce ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pygame-ce"
+      version: "${{ matrix.version }}"
+      repository: "pygame-community/pygame-ce"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pygame-ce/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream builds its own SDL2 stack from source in a ghcr.io docker_base
+      # image (buildconfig/manylinux-build/docker_base) it doesn't publish for
+      # riscv64. This rebuilds only the pieces that image's dnf repos can't
+      # provide, at the same versions/CMake flags as its sdl_libs/portmidi
+      # build scripts (no riscv64 SDL2-devel package exists at all: Rocky 10
+      # dropped it for sdl2-compat, a headless SDL3-backed shim -- see
+      # build-pygame.yml / gotcha 288). libpng, libjpeg-turbo, freetype,
+      # libwebp, libtiff, mpg123, flac, libvorbis+libogg and opus come from
+      # Rocky 10's own repos, same as build-pygame.yml.
+      cibw-before-all: |-
+        dnf install -y -q \
+        libpng-devel libjpeg-turbo-devel freetype-devel libwebp-devel libtiff-devel \
+        mpg123-devel flac-devel libvorbis-devel libogg-devel opus-devel \
+        libX11-devel libXext-devel libXcursor-devel libXi-devel libXrandr-devel \
+        libXinerama-devel libXxf86vm-devel libxkbcommon-devel \
+        wayland-devel wayland-protocols-devel dbus-devel dbus-tools \
+        alsa-lib-devel pulseaudio-libs-devel dejavu-sans-fonts
+
+        export MAKEFLAGS="-j$(nproc)"
+        mkdir -p /tmp/pg-deps && cd /tmp/pg-deps
+        mkdir -p /usr/local/share/pg-licenses
+
+        curl -fsSL --retry 5 -o portmidi.tar.gz https://github.com/PortMidi/portmidi/archive/refs/tags/v2.0.7.tar.gz
+        tar xzf portmidi.tar.gz
+        (cd portmidi-2.0.7 && cmake . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
+        cp portmidi-2.0.7/license.txt /usr/local/share/pg-licenses/LICENSE.portmidi.txt
+
+        curl -fsSL --retry 5 -o SDL2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz
+        tar xzf SDL2.tar.gz
+        (cd SDL2-2.32.10 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DSDL_VULKAN=0 && make && make install)
+        cp SDL2-2.32.10/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2.txt
+
+        curl -fsSL --retry 5 -o SDL2_image.tar.gz https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.12/SDL2_image-2.8.12.tar.gz
+        tar xzf SDL2_image.tar.gz
+        (cd SDL2_image-2.8.12 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+        -DSDL2IMAGE_DEPS_SHARED=0 -DSDL2IMAGE_VENDORED=0 -DSDL2IMAGE_BACKEND_STB=0 -DSDL2IMAGE_AVIF=0 -DSDL2IMAGE_JXL=0 -DSDL2IMAGE_TIF=1 -DSDL2IMAGE_WEBP=1 \
+        && make && make install)
+        cp SDL2_image-2.8.12/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_image.txt
+
+        # SDL2TTF_HARFBUZZ left at its default (off): Rocky 10 does ship a riscv64
+        # harfbuzz-devel, but its libharfbuzz pulls in libglib-2.0 and libgraphite2,
+        # which auditwheel would then vendor and whose copyleft sources the
+        # gpl_sources job would have to carry -- same trim build-pygame.yml made.
+        # pygame-ce's own _freetype module still links Rocky 10's system freetype.
+        curl -fsSL --retry 5 -o SDL2_ttf.tar.gz https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz
+        tar xzf SDL2_ttf.tar.gz
+        (cd SDL2_ttf-2.24.0 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
+        cp SDL2_ttf-2.24.0/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_ttf.txt
+
+        # MOD/MIDI_FLUIDSYNTH need libxmp(-lite)/modplug and fluidsynth, all
+        # EPEL-only (gotcha 51, EPEL is empty on riscv64), and OPUS needs the
+        # separate libopusfile project that no Rocky 10 package provides;
+        # dropped like build-pygame.yml drops the same backends. WAVPACK is
+        # dropped with them to keep one coherent "no optional backends" set
+        # (PG_DEPS_FROM_SYSTEM, which upstream's own system-deps CI sets, then
+        # skips every test that needs one). MOD needs an explicit -0:
+        # CMakeLists.txt fatal-errors if enabled with no backend.
+        curl -fsSL --retry 5 -o SDL2_mixer.tar.gz https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.2/SDL2_mixer-2.8.2.tar.gz
+        tar xzf SDL2_mixer.tar.gz
+        (cd SDL2_mixer-2.8.2 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+        -DSDL2MIXER_DEPS_SHARED=0 -DSDL2MIXER_VENDORED=0 \
+        -DSDL2MIXER_FLAC_LIBFLAC=1 -DSDL2MIXER_FLAC_DRFLAC=0 \
+        -DSDL2MIXER_MP3_MPG123=1 -DSDL2MIXER_MP3_MINIMP3=0 \
+        -DSDL2MIXER_VORBIS=VORBISFILE \
+        -DSDL2MIXER_MOD=0 -DSDL2MIXER_MIDI_FLUIDSYNTH=0 -DSDL2MIXER_WAVPACK=0 \
+        -DSDL2MIXER_OPUS=0 \
+        && make && make install)
+        cp SDL2_mixer-2.8.2/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_mixer.txt
+
+        ldconfig
+      # cibuildwheel's own `uv pip install numpy` (from pygame-ce's own
+      # [tool.cibuildwheel] test-requires, which this workflow doesn't
+      # override) needs the UV_* variables as well as PIP_EXTRA_INDEX_URL to
+      # resolve the registry's riscv64 numpy.
+      # PG_DEPS_FROM_SYSTEM is upstream's own marker for a build linked against
+      # system SDL dependencies instead of its curated set, which is what this
+      # is; its test suite uses it to skip what such a build cannot satisfy.
+      cibw-environment-linux: "SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=disk PG_DEPS_FROM_SYSTEM=1 PATH=/usr/local/bin:$PATH PIP_ONLY_BINARY=numpy UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ UV_INDEX_STRATEGY=unsafe-best-match UV_ONLY_BINARY=numpy"
+      cibw-before-build: |-
+        # docs/reST/conf.py's extensions list also needs sphinx-autoapi
+        # (the "autoapi.extension" entry); upstream's own build-wheels.sh
+        # only installs Sphinx itself, relying on something else in their
+        # manylinux image (not found in their own Dockerfiles) to supply
+        # it -- installing it explicitly here instead.
+        python3 -m pip install Sphinx sphinx-autoapi
+        python3 buildconfig/make_docs.py
+        cp /usr/local/share/pg-licenses/LICENSE.*.txt docs/licenses/LICENSE.sdl_gfx.txt docs/generated/
+        cp /usr/share/licenses/libpng/LICENSE docs/generated/LICENSE.png.txt
+        cp /usr/share/licenses/freetype/FTL.TXT docs/generated/LICENSE.freetype.txt
+        cp /usr/share/licenses/libjpeg-turbo/LICENSE.md docs/generated/LICENSE.jpeg.txt
+        cp /usr/share/licenses/libwebp/COPYING docs/generated/LICENSE.webp.txt
+        cp /usr/share/licenses/libtiff/LICENSE.md docs/generated/LICENSE.tiff.txt
+        cp /usr/share/licenses/mpg123-libs/COPYING docs/generated/LICENSE.mpg123.txt
+        cp /usr/share/licenses/flac-libs/COPYING.Xiph docs/generated/LICENSE.FLAC.txt
+        cp /usr/share/licenses/libvorbis/COPYING docs/generated/LICENSE.ogg-vorbis.txt
+        cp /usr/share/licenses/opus/COPYING docs/generated/LICENSE.opus.txt
+        cp /usr/share/licenses/alsa-lib/COPYING docs/generated/LICENSE.alsa.txt
+        cp /usr/share/licenses/bzip2-libs/LICENSE docs/generated/LICENSE.bzip2.txt
+        cp /usr/share/licenses/libzstd/LICENSE docs/generated/LICENSE.zstd.txt
+        cp /usr/share/licenses/jbigkit-libs/COPYING docs/generated/LICENSE.jbig.txt
+        cp /usr/share/licenses/libbrotli/LICENSE docs/generated/LICENSE.brotli.txt
+        cp /usr/share/licenses/liblerc/LICENSE docs/generated/LICENSE.lerc.txt
+      # Same dbus fix as build-pygame.yml:
+      #   >>> process 338: D-Bus library appears to be incorrectly set up; failed to read
+      #   machine uuid: Failed to open "/var/lib/dbus/machine-id": No such file or directory
+      cibw-before-test: |-
+        mkdir -p /var/lib/dbus
+        if [ ! -f /var/lib/dbus/machine-id ]; then
+        dbus-uuidgen > /var/lib/dbus/machine-id
+        fi
+      # pyproject.toml's own test-command, plus python -u: the runner prints
+      # a module's results only once that module finishes, so with buffered
+      # stdout a module that stalls leaves no trace of which one it was.
+      cibw-test-command: "python -u -m pygame.tests -v --exclude opengl,music,timing --time_out 300"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYGAME_CE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pygame-ce ${{ env.PYGAME_CE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pygame-community/pygame-ce
-          ref: ${{ env.PYGAME_CE_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pygame-ce source
-        run: |
-          git apply python-wheels/patches/pygame-ce/${{ env.PYGAME_CE_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream builds its own SDL2 stack from source in a ghcr.io docker_base
-          # image (buildconfig/manylinux-build/docker_base) it doesn't publish for
-          # riscv64. This rebuilds only the pieces that image's dnf repos can't
-          # provide, at the same versions/CMake flags as its sdl_libs/portmidi
-          # build scripts (no riscv64 SDL2-devel package exists at all: Rocky 10
-          # dropped it for sdl2-compat, a headless SDL3-backed shim -- see
-          # build-pygame.yml / gotcha 288). libpng, libjpeg-turbo, freetype,
-          # libwebp, libtiff, mpg123, flac, libvorbis+libogg and opus come from
-          # Rocky 10's own repos, same as build-pygame.yml.
-          CIBW_BEFORE_ALL: |
-            dnf install -y -q \
-              libpng-devel libjpeg-turbo-devel freetype-devel libwebp-devel libtiff-devel \
-              mpg123-devel flac-devel libvorbis-devel libogg-devel opus-devel \
-              libX11-devel libXext-devel libXcursor-devel libXi-devel libXrandr-devel \
-              libXinerama-devel libXxf86vm-devel libxkbcommon-devel \
-              wayland-devel wayland-protocols-devel dbus-devel dbus-tools \
-              alsa-lib-devel pulseaudio-libs-devel dejavu-sans-fonts
-
-            export MAKEFLAGS="-j$(nproc)"
-            mkdir -p /tmp/pg-deps && cd /tmp/pg-deps
-            mkdir -p /usr/local/share/pg-licenses
-
-            curl -fsSL --retry 5 -o portmidi.tar.gz https://github.com/PortMidi/portmidi/archive/refs/tags/v2.0.7.tar.gz
-            tar xzf portmidi.tar.gz
-            (cd portmidi-2.0.7 && cmake . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
-            cp portmidi-2.0.7/license.txt /usr/local/share/pg-licenses/LICENSE.portmidi.txt
-
-            curl -fsSL --retry 5 -o SDL2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz
-            tar xzf SDL2.tar.gz
-            (cd SDL2-2.32.10 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DSDL_VULKAN=0 && make && make install)
-            cp SDL2-2.32.10/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2.txt
-
-            curl -fsSL --retry 5 -o SDL2_image.tar.gz https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.12/SDL2_image-2.8.12.tar.gz
-            tar xzf SDL2_image.tar.gz
-            (cd SDL2_image-2.8.12 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-                -DSDL2IMAGE_DEPS_SHARED=0 -DSDL2IMAGE_VENDORED=0 -DSDL2IMAGE_BACKEND_STB=0 -DSDL2IMAGE_AVIF=0 -DSDL2IMAGE_JXL=0 -DSDL2IMAGE_TIF=1 -DSDL2IMAGE_WEBP=1 \
-              && make && make install)
-            cp SDL2_image-2.8.12/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_image.txt
-
-            # SDL2TTF_HARFBUZZ left at its default (off): Rocky 10 does ship a riscv64
-            # harfbuzz-devel, but its libharfbuzz pulls in libglib-2.0 and libgraphite2,
-            # which auditwheel would then vendor and whose copyleft sources the
-            # gpl_sources job would have to carry -- same trim build-pygame.yml made.
-            # pygame-ce's own _freetype module still links Rocky 10's system freetype.
-            curl -fsSL --retry 5 -o SDL2_ttf.tar.gz https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz
-            tar xzf SDL2_ttf.tar.gz
-            (cd SDL2_ttf-2.24.0 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
-            cp SDL2_ttf-2.24.0/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_ttf.txt
-
-            # MOD/MIDI_FLUIDSYNTH need libxmp(-lite)/modplug and fluidsynth, all
-            # EPEL-only (gotcha 51, EPEL is empty on riscv64), and OPUS needs the
-            # separate libopusfile project that no Rocky 10 package provides;
-            # dropped like build-pygame.yml drops the same backends. WAVPACK is
-            # dropped with them to keep one coherent "no optional backends" set
-            # (PG_DEPS_FROM_SYSTEM, which upstream's own system-deps CI sets, then
-            # skips every test that needs one). MOD needs an explicit -0:
-            # CMakeLists.txt fatal-errors if enabled with no backend.
-            curl -fsSL --retry 5 -o SDL2_mixer.tar.gz https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.2/SDL2_mixer-2.8.2.tar.gz
-            tar xzf SDL2_mixer.tar.gz
-            (cd SDL2_mixer-2.8.2 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-                -DSDL2MIXER_DEPS_SHARED=0 -DSDL2MIXER_VENDORED=0 \
-                -DSDL2MIXER_FLAC_LIBFLAC=1 -DSDL2MIXER_FLAC_DRFLAC=0 \
-                -DSDL2MIXER_MP3_MPG123=1 -DSDL2MIXER_MP3_MINIMP3=0 \
-                -DSDL2MIXER_VORBIS=VORBISFILE \
-                -DSDL2MIXER_MOD=0 -DSDL2MIXER_MIDI_FLUIDSYNTH=0 -DSDL2MIXER_WAVPACK=0 \
-                -DSDL2MIXER_OPUS=0 \
-              && make && make install)
-            cp SDL2_mixer-2.8.2/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_mixer.txt
-
-            ldconfig
-          # cibuildwheel's own `uv pip install numpy` (from pygame-ce's own
-          # [tool.cibuildwheel] test-requires, which this workflow doesn't
-          # override) needs the UV_* variables as well as PIP_EXTRA_INDEX_URL to
-          # resolve the registry's riscv64 numpy.
-          # PG_DEPS_FROM_SYSTEM is upstream's own marker for a build linked against
-          # system SDL dependencies instead of its curated set, which is what this
-          # is; its test suite uses it to skip what such a build cannot satisfy.
-          CIBW_ENVIRONMENT: >-
-            SDL_VIDEODRIVER=dummy
-            SDL_AUDIODRIVER=disk
-            PG_DEPS_FROM_SYSTEM=1
-            PATH=/usr/local/bin:$PATH
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_INDEX_STRATEGY=unsafe-best-match
-            UV_ONLY_BINARY=numpy
-          CIBW_BEFORE_BUILD: |
-            # docs/reST/conf.py's extensions list also needs sphinx-autoapi
-            # (the "autoapi.extension" entry); upstream's own build-wheels.sh
-            # only installs Sphinx itself, relying on something else in their
-            # manylinux image (not found in their own Dockerfiles) to supply
-            # it -- installing it explicitly here instead.
-            python3 -m pip install Sphinx sphinx-autoapi
-            python3 buildconfig/make_docs.py
-            cp /usr/local/share/pg-licenses/LICENSE.*.txt docs/licenses/LICENSE.sdl_gfx.txt docs/generated/
-            cp /usr/share/licenses/libpng/LICENSE docs/generated/LICENSE.png.txt
-            cp /usr/share/licenses/freetype/FTL.TXT docs/generated/LICENSE.freetype.txt
-            cp /usr/share/licenses/libjpeg-turbo/LICENSE.md docs/generated/LICENSE.jpeg.txt
-            cp /usr/share/licenses/libwebp/COPYING docs/generated/LICENSE.webp.txt
-            cp /usr/share/licenses/libtiff/LICENSE.md docs/generated/LICENSE.tiff.txt
-            cp /usr/share/licenses/mpg123-libs/COPYING docs/generated/LICENSE.mpg123.txt
-            cp /usr/share/licenses/flac-libs/COPYING.Xiph docs/generated/LICENSE.FLAC.txt
-            cp /usr/share/licenses/libvorbis/COPYING docs/generated/LICENSE.ogg-vorbis.txt
-            cp /usr/share/licenses/opus/COPYING docs/generated/LICENSE.opus.txt
-            cp /usr/share/licenses/alsa-lib/COPYING docs/generated/LICENSE.alsa.txt
-            cp /usr/share/licenses/bzip2-libs/LICENSE docs/generated/LICENSE.bzip2.txt
-            cp /usr/share/licenses/libzstd/LICENSE docs/generated/LICENSE.zstd.txt
-            cp /usr/share/licenses/jbigkit-libs/COPYING docs/generated/LICENSE.jbig.txt
-            cp /usr/share/licenses/libbrotli/LICENSE docs/generated/LICENSE.brotli.txt
-            cp /usr/share/licenses/liblerc/LICENSE docs/generated/LICENSE.lerc.txt
-          # Same dbus fix as build-pygame.yml:
-          #   >>> process 338: D-Bus library appears to be incorrectly set up; failed to read
-          #   machine uuid: Failed to open "/var/lib/dbus/machine-id": No such file or directory
-          CIBW_BEFORE_TEST: |
-            mkdir -p /var/lib/dbus
-            if [ ! -f /var/lib/dbus/machine-id ]; then
-                dbus-uuidgen > /var/lib/dbus/machine-id
-            fi
-          # pyproject.toml's own test-command, plus python -u: the runner prints
-          # a module's results only once that module finishes, so with buffered
-          # stdout a module that stalls leaves no trace of which one it was.
-          CIBW_TEST_COMMAND: python -u -m pygame.tests -v --exclude opengl,music,timing --time_out 300
+          name: pygame-ce-${{ env.PYGAME_CE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the vendored licences made it into the wheel
         run: |
@@ -227,12 +229,6 @@ jobs:
               assert any(n == "pygame/docs/generated/LGPL.txt" for n in names), whl
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pygame-ce-${{ env.PYGAME_CE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -271,7 +267,7 @@ jobs:
 
   publish:
     name: Publish pygame-ce ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -53,36 +53,36 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pyvista-validation ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyvista-validation"
+      version: "${{ matrix.version }}"
+      repository: "pyvista/pyvista-validation"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp310-abi3-manylinux_riscv64"
+      timeout-minutes: 120
+      # One cp310-abi3 wheel built on its floor, then re-tested on the newer
+      # interpreters via find_compatible_wheel (upstream re-runs the suite on 3.14).
+      cibw-build: "cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # numpy is a build and runtime requirement that only our registry ships for riscv64.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYVISTA_VALIDATION=${{ matrix.version }}"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PYVISTA_VALIDATION_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyvista-validation v${{ env.PYVISTA_VALIDATION_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pyvista/pyvista-validation
-          ref: v${{ env.PYVISTA_VALIDATION_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # One cp310-abi3 wheel built on its floor, then re-tested on the newer
-          # interpreters via find_compatible_wheel (upstream re-runs the suite on 3.14).
-          CIBW_BUILD: >-
-            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
-            cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          # numpy is a build and runtime requirement that only our registry ships for riscv64.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYVISTA_VALIDATION=${{ env.PYVISTA_VALIDATION_VERSION }}
+          name: pyvista-validation-${{ env.PYVISTA_VALIDATION_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -95,16 +95,9 @@ jobs:
           assert "pyvista_validation/_fast.abi3.so" in names, names
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyvista-validation-${{ env.PYVISTA_VALIDATION_VERSION }}-cp310-abi3-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyvista-validation ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

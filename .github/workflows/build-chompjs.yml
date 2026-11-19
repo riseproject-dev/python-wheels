@@ -54,40 +54,44 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build chompjs ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "chompjs"
+      version: "${{ matrix.version }}"
+      repository: "Nykakin/chompjs"
+      ref: "5e6ecf05644efce78524d1dd05b077da5cab25aa"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-test-requires: "${{ case(matrix.python == 'cp312' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp313' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp314' && matrix.platform == 'manylinux', 'orjson', '') }}"
+      # pypi.riseproject.dev only carries orjson for cp312/cp313/cp314
+      # manylinux today; the doctest below imports orjson as a custom
+      # `loader`, so it only runs where a riscv64 wheel exists rather
+      # than forcing a from-source PyO3 build on the rest of the matrix.
+      cibw-test-command: "python -m unittest discover {package} && ${{ case(matrix.python == 'cp312' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp313' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp314' && matrix.platform == 'manylinux', 'orjson', '') == 'orjson' && 'python -m doctest {package}/chompjs/chompjs.py --verbose' || 'true' }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CHOMPJS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout chompjs ${{ env.CHOMPJS_REF }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Nykakin/chompjs
-          ref: ${{ env.CHOMPJS_REF }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: ${{ case(matrix.python == 'cp312' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp313' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp314' && matrix.platform == 'manylinux', 'orjson', '') }}
-          # pypi.riseproject.dev only carries orjson for cp312/cp313/cp314
-          # manylinux today; the doctest below imports orjson as a custom
-          # `loader`, so it only runs where a riscv64 wheel exists rather
-          # than forcing a from-source PyO3 build on the rest of the matrix.
-          CIBW_TEST_COMMAND: >-
-            python -m unittest discover {package} &&
-            ${{ case(matrix.python == 'cp312' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp313' && matrix.platform == 'manylinux', 'orjson', matrix.python == 'cp314' && matrix.platform == 'manylinux', 'orjson', '') == 'orjson' && 'python -m doctest {package}/chompjs/chompjs.py --verbose' || 'true' }}
+          name: chompjs-${{ env.CHOMPJS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the C extension made it into the wheel
         run: |
@@ -99,15 +103,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: chompjs-${{ env.CHOMPJS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish chompjs ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

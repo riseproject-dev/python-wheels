@@ -55,148 +55,145 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build tesserocr ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tesserocr"
+      version: "${{ matrix.version }}"
+      repository: "sirfz/tesserocr"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/tesserocr/${{ matrix.version }}/0001-*.patch
+        git apply python-wheels/patches/tesserocr/${{ matrix.version }}/0003-*.patch
+        for p in python-wheels/patches/tesserocr/${{ matrix.version }}/0004-*.patch; do
+          [ -e "$p" ] || continue
+          git apply "$p"
+        done
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # Neither manylinux_riscv64 nor musllinux_riscv64 ships tesseract/leptonica
+      # devel packages (no riscv64 EPEL, and Rocky 10 carries neither at all); built
+      # from source at upstream's own pinned versions instead of yum-installing them,
+      # same shape as upstream's linux-install-tesseract.sh but via dnf/apk.
+      cibw-before-all-linux: |-
+        set -ex
+        if command -v apk > /dev/null; then
+        apk add --no-cache cmake pkgconf libpng-dev jpeg-dev tiff-dev libwebp-dev zlib-dev
+        else
+        dnf install -y cmake pkgconfig libpng-devel libjpeg-turbo-devel libtiff-devel libwebp-devel zlib-devel
+        fi
+        mkdir -p /tmp/leptonica /tmp/tesseract
+        curl -fsSL "https://github.com/DanBloomberg/leptonica/releases/download/$LEPTONICA_VERSION/leptonica-$LEPTONICA_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/leptonica
+        curl -fsSL "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/$TESSERACT_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/tesseract
+        # Vendored from a tarball, not a git checkout, so `patch -p1`
+        # rather than `git apply` (gotcha precedent: build-rerun-sdk.yml's
+        # lance-core/lance-linalg crates).
+        patch -p1 -d /tmp/tesseract < python-wheels/patches/tesserocr/${{ matrix.version }}/0002-tesseract-osdetect-guard-against-unset-script-id.patch
+        cmake -S /tmp/leptonica -B /tmp/leptonica/build \
+        -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D BUILD_SHARED_LIBS=ON \
+        -D ENABLE_GIF=OFF \
+        -D ENABLE_OPENJPEG=OFF
+        cmake --build /tmp/leptonica/build -j"$(nproc)"
+        cmake --install /tmp/leptonica/build
+        # Upstream's own workaround: leptonica's .pc file bakes the version into
+        # its name (lept_X.Y.Z.pc) instead of the lept.pc setup.py looks for.
+        mv /usr/local/lib/pkgconfig/lept_*.pc /usr/local/lib/pkgconfig/lept.pc
+        cmake -S /tmp/tesseract -B /tmp/tesseract/build \
+        -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=/usr/local/lib \
+        -D BUILD_SHARED_LIBS=ON \
+        -D OPENMP_BUILD=OFF \
+        -D BUILD_TRAINING_TOOLS=OFF
+        cmake --build /tmp/tesseract/build -j"$(nproc)"
+        cmake --install /tmp/tesseract/build
+        ldconfig || true
+        mkdir -p /usr/local/share/tessdata
+        curl -fsSL -o /usr/local/share/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata
+        curl -fsSL -o /usr/local/share/tessdata/osd.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/osd.traineddata
+      # LEPTONICA_VERSION/TESSERACT_VERSION must be restated here: CIBW_BEFORE_ALL_LINUX
+      # runs inside the manylinux container via `sh -c`, which does not inherit the
+      # job's plain `env:` (only what CIBW_ENVIRONMENT passes through).
+      cibw-environment-linux: "LEPTONICA_VERSION=1.85.0 TESSERACT_VERSION=5.5.1 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig TESSDATA_PREFIX=/usr/local/share/tessdata PIP_ONLY_BINARY=cysignals"
+      # setup.py cythonizes inside build_ext (no [build-system] table to declare
+      # Cython as a build requirement), so build isolation is disabled and Cython
+      # + cysignals are preinstalled into the same environment pip builds in.
+      cibw-before-build: "pip install \"Cython>=3.0.0,<3.2.0\" cysignals setuptools wheel"
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # Pillow, not just cysignals: pypi.riseproject.dev has never published a
+      # musllinux_riscv64 Pillow wheel (manylinux_riscv64 only, plus a legacy
+      # untagged linux_riscv64 wheel for cp39-cp312 that pip happens to accept
+      # on musl too), so forcing binary-only here made cp313/cp314/cp314t-musllinux
+      # fail outright with "Could not find a version that satisfies the
+      # requirement Pillow (from versions: none)" -- confirmed via
+      # `curl -s https://pypi.riseproject.dev/simple/pillow/`. Left off
+      # PIP_ONLY_BINARY so pip falls back to Pillow's sdist there; the
+      # jpeg/png/tiff/webp/zlib -dev packages this step's apk/dnf install
+      # already puts in the same container (for leptonica/tesseract) are
+      # exactly what Pillow's setup.py auto-detects and needs for that build.
+      cibw-test-requires: "pytest Pillow"
+      cibw-test-sources: "tests"
+      # From 2.12.0 upstream's [tool.cibuildwheel] sets test-environment
+      # TESSDATA_PREFIX=.test-tessdata (a dir of its own test models, not
+      # staged here via CIBW_TEST_SOURCES), which would override the
+      # CIBW_ENVIRONMENT value above and leave tesseract with no tessdata
+      # ("Failed to init API ... invalid tessdata path: ./"). Point it at
+      # the tessdata CIBW_BEFORE_ALL_LINUX installed, and keep the
+      # OMP_THREAD_LIMIT=1 upstream sets alongside it.
+      cibw-test-environment: "TESSDATA_PREFIX=/usr/local/share/tessdata OMP_THREAD_LIMIT=1"
+      # A relative path, not {project}/tests: tesserocr has no src/ layout, so
+      # {project}/tests would put {project} (the full checkout) on pytest's
+      # rootdir-inserted sys.path and shadow the installed wheel with the
+      # uncompiled tesserocr/ source tree (no .so) instead.
+      # Upstream's own CI (build.yml) doesn't run this suite at all -- its
+      # "Test wheel" step is a bare `import tesserocr` smoke test -- so
+      # test_init's Init(oem=OEM.TESSERACT_ONLY) call is a gap upstream
+      # itself never had to close: it needs the legacy-engine model data
+      # that tessdata_fast's traineddata (LSTM-only) doesn't ship.
+      # test_detect_os's own brittle final assertion is patched out
+      # instead of deselecting the whole test (patches/tesserocr/2.11.0/
+      # 0003-*), since it's the exact test that was crashing before
+      # 0002's fix and is worth keeping as regression coverage.
+      cibw-test-command: "python -m pytest tests -v --deselect \"tests/test_api.py::TestTessBaseApi::test_init\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       TESSEROCR_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout tesserocr v${{ env.TESSEROCR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: sirfz/tesserocr
-          ref: v${{ env.TESSEROCR_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch tesserocr source
-        # 0001-*/0003-*/0004-*: git apply against this checkout. 0002-* targets the
-        # vendored tesseract tarball (no .git dir) fetched later in
-        # CIBW_BEFORE_ALL_LINUX, applied there with `patch -p1` instead --
-        # excluded from this glob. 0004-* only exists from 2.12.0 (tests/test_threads.py
-        # is new there), hence the existence check.
-        run: |
-          git apply python-wheels/patches/tesserocr/${{ env.TESSEROCR_VERSION }}/0001-*.patch
-          git apply python-wheels/patches/tesserocr/${{ env.TESSEROCR_VERSION }}/0003-*.patch
-          for p in python-wheels/patches/tesserocr/${{ env.TESSEROCR_VERSION }}/0004-*.patch; do
-            [ -e "$p" ] || continue
-            git apply "$p"
-          done
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # Neither manylinux_riscv64 nor musllinux_riscv64 ships tesseract/leptonica
-          # devel packages (no riscv64 EPEL, and Rocky 10 carries neither at all); built
-          # from source at upstream's own pinned versions instead of yum-installing them,
-          # same shape as upstream's linux-install-tesseract.sh but via dnf/apk.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            if command -v apk > /dev/null; then
-              apk add --no-cache cmake pkgconf libpng-dev jpeg-dev tiff-dev libwebp-dev zlib-dev
-            else
-              dnf install -y cmake pkgconfig libpng-devel libjpeg-turbo-devel libtiff-devel libwebp-devel zlib-devel
-            fi
-            mkdir -p /tmp/leptonica /tmp/tesseract
-            curl -fsSL "https://github.com/DanBloomberg/leptonica/releases/download/$LEPTONICA_VERSION/leptonica-$LEPTONICA_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/leptonica
-            curl -fsSL "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/$TESSERACT_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/tesseract
-            # Vendored from a tarball, not a git checkout, so `patch -p1`
-            # rather than `git apply` (gotcha precedent: build-rerun-sdk.yml's
-            # lance-core/lance-linalg crates).
-            patch -p1 -d /tmp/tesseract < python-wheels/patches/tesserocr/${{ env.TESSEROCR_VERSION }}/0002-tesseract-osdetect-guard-against-unset-script-id.patch
-            cmake -S /tmp/leptonica -B /tmp/leptonica/build \
-              -D CMAKE_BUILD_TYPE=RelWithDebInfo \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D BUILD_SHARED_LIBS=ON \
-              -D ENABLE_GIF=OFF \
-              -D ENABLE_OPENJPEG=OFF
-            cmake --build /tmp/leptonica/build -j"$(nproc)"
-            cmake --install /tmp/leptonica/build
-            # Upstream's own workaround: leptonica's .pc file bakes the version into
-            # its name (lept_X.Y.Z.pc) instead of the lept.pc setup.py looks for.
-            mv /usr/local/lib/pkgconfig/lept_*.pc /usr/local/lib/pkgconfig/lept.pc
-            cmake -S /tmp/tesseract -B /tmp/tesseract/build \
-              -D CMAKE_BUILD_TYPE=RelWithDebInfo \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=/usr/local/lib \
-              -D BUILD_SHARED_LIBS=ON \
-              -D OPENMP_BUILD=OFF \
-              -D BUILD_TRAINING_TOOLS=OFF
-            cmake --build /tmp/tesseract/build -j"$(nproc)"
-            cmake --install /tmp/tesseract/build
-            ldconfig || true
-            mkdir -p /usr/local/share/tessdata
-            curl -fsSL -o /usr/local/share/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata
-            curl -fsSL -o /usr/local/share/tessdata/osd.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/osd.traineddata
-          # LEPTONICA_VERSION/TESSERACT_VERSION must be restated here: CIBW_BEFORE_ALL_LINUX
-          # runs inside the manylinux container via `sh -c`, which does not inherit the
-          # job's plain `env:` (only what CIBW_ENVIRONMENT passes through).
-          CIBW_ENVIRONMENT: >-
-            LEPTONICA_VERSION=${{ env.LEPTONICA_VERSION }}
-            TESSERACT_VERSION=${{ env.TESSERACT_VERSION }}
-            PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-            TESSDATA_PREFIX=/usr/local/share/tessdata
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=cysignals
-          # setup.py cythonizes inside build_ext (no [build-system] table to declare
-          # Cython as a build requirement), so build isolation is disabled and Cython
-          # + cysignals are preinstalled into the same environment pip builds in.
-          CIBW_BEFORE_BUILD: pip install "Cython>=3.0.0,<3.2.0" cysignals setuptools wheel
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # Pillow, not just cysignals: pypi.riseproject.dev has never published a
-          # musllinux_riscv64 Pillow wheel (manylinux_riscv64 only, plus a legacy
-          # untagged linux_riscv64 wheel for cp39-cp312 that pip happens to accept
-          # on musl too), so forcing binary-only here made cp313/cp314/cp314t-musllinux
-          # fail outright with "Could not find a version that satisfies the
-          # requirement Pillow (from versions: none)" -- confirmed via
-          # `curl -s https://pypi.riseproject.dev/simple/pillow/`. Left off
-          # PIP_ONLY_BINARY so pip falls back to Pillow's sdist there; the
-          # jpeg/png/tiff/webp/zlib -dev packages this step's apk/dnf install
-          # already puts in the same container (for leptonica/tesseract) are
-          # exactly what Pillow's setup.py auto-detects and needs for that build.
-          CIBW_TEST_REQUIRES: pytest Pillow
-          CIBW_TEST_SOURCES: tests
-          # From 2.12.0 upstream's [tool.cibuildwheel] sets test-environment
-          # TESSDATA_PREFIX=.test-tessdata (a dir of its own test models, not
-          # staged here via CIBW_TEST_SOURCES), which would override the
-          # CIBW_ENVIRONMENT value above and leave tesseract with no tessdata
-          # ("Failed to init API ... invalid tessdata path: ./"). Point it at
-          # the tessdata CIBW_BEFORE_ALL_LINUX installed, and keep the
-          # OMP_THREAD_LIMIT=1 upstream sets alongside it.
-          CIBW_TEST_ENVIRONMENT: >-
-            TESSDATA_PREFIX=/usr/local/share/tessdata
-            OMP_THREAD_LIMIT=1
-          # A relative path, not {project}/tests: tesserocr has no src/ layout, so
-          # {project}/tests would put {project} (the full checkout) on pytest's
-          # rootdir-inserted sys.path and shadow the installed wheel with the
-          # uncompiled tesserocr/ source tree (no .so) instead.
-          # Upstream's own CI (build.yml) doesn't run this suite at all -- its
-          # "Test wheel" step is a bare `import tesserocr` smoke test -- so
-          # test_init's Init(oem=OEM.TESSERACT_ONLY) call is a gap upstream
-          # itself never had to close: it needs the legacy-engine model data
-          # that tessdata_fast's traineddata (LSTM-only) doesn't ship.
-          # test_detect_os's own brittle final assertion is patched out
-          # instead of deselecting the whole test (patches/tesserocr/2.11.0/
-          # 0003-*), since it's the exact test that was crashing before
-          # 0002's fix and is worth keeping as regression coverage.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest tests -v
-            --deselect "tests/test_api.py::TestTessBaseApi::test_init"
+          name: tesserocr-${{ env.TESSEROCR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel is compiled and carries the vendored licences
         run: |
@@ -210,15 +207,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tesserocr-${{ env.TESSEROCR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish tesserocr ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -50,6 +50,59 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pot ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        # test_BaseEstimator hits a real bug in ot.utils.BaseEstimator.get_params():
+        # it saves/restores warnings.filters via a bare `.pop(0)` in a finally
+        # block, mutating process-global state with no protection. Under cp314t
+        # something about the surrounding tests' warnings-filter state leaves
+        # that list already empty by the time this runs, so the pop() raises
+        # IndexError instead of the test's own expected ValueError -- a fragile
+        # global-state pattern in POT's own code, not a riscv64 issue (same
+        # class of free-threading-exposed fragility as this session's asv port).
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pot"
+      version: "${{ matrix.version }}"
+      repository: "PythonOT/POT"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "true"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pot/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy/scipy are build- and run-time requirements; only our registry
+      # has them for riscv64, and only-binary keeps a newer PyPI release
+      # from winning the resolution and then compiling from sdist.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy"
+      # ot/helpers/openmp_helpers.py (imported by test_helpers.py) itself
+      # imports setuptools.errors, which the test venv doesn't ship by
+      # default.
+      cibw-test-requires: "pytest setuptools"
+      # test/test_helpers.py does sys.path.append(os.path.join("ot", "helpers"))
+      # and imports openmp_helpers from there directly (not through the
+      # installed `ot` package) -- needs staging alongside test/ too.
+      cibw-test-sources: "test ot/helpers"
+      cibw-test-command: "python -m pytest --durations=20 -v test ${{ case(endsWith(matrix.python, 't'), '--deselect \"test/test_utils.py::test_BaseEstimator\"', '') }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     # 60m was too tight: cp314t's free-threaded build was still running tests
     # (no failures) when cancelled at exactly 60m, while cp312/313/314 finish
@@ -68,49 +121,14 @@ jobs:
         # global-state pattern in POT's own code, not a riscv64 issue (same
         # class of free-threading-exposed fragility as this session's asv port).
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       POT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout POT ${{ env.POT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: PythonOT/POT
-          ref: ${{ env.POT_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/pot/${{ env.POT_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy/scipy are build- and run-time requirements; only our registry
-          # has them for riscv64, and only-binary keeps a newer PyPI release
-          # from winning the resolution and then compiling from sdist.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy
-          # ot/helpers/openmp_helpers.py (imported by test_helpers.py) itself
-          # imports setuptools.errors, which the test venv doesn't ship by
-          # default.
-          CIBW_TEST_REQUIRES: pytest setuptools
-          # test/test_helpers.py does sys.path.append(os.path.join("ot", "helpers"))
-          # and imports openmp_helpers from there directly (not through the
-          # installed `ot` package) -- needs staging alongside test/ too.
-          CIBW_TEST_SOURCES: test ot/helpers
-          CIBW_TEST_COMMAND: python -m pytest --durations=20 -v test ${{ case(endsWith(matrix.python, 't'), '--deselect "test/test_utils.py::test_BaseEstimator"', '') }}
+          name: pot-${{ env.POT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -122,13 +140,6 @@ jobs:
           licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
           assert licences == {"LICENSE", "LICENSE.eigen-mpl2", "LICENSE.eigen-bsd"}, licences
           EOF
-
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pot-${{ env.POT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -165,7 +176,7 @@ jobs:
 
   publish:
     name: Publish pot ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

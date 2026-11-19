@@ -50,51 +50,56 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pymcubes ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pymcubes"
+      version: "${{ matrix.version }}"
+      repository: "pmneila/PyMCubes"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # pyproject.toml pins build-system.requires to "numpy~=2.0", which has
+      # no cp313/cp314 wheels at all (numpy 2.0 predates Python 3.13). Pin the
+      # same requires with the ceiling lifted and disable isolation so it holds.
+      cibw-before-build: "pip install setuptools wheel Cython \"numpy>=2.0,<3.0\""
+      cibw-build-frontend: "build; args: --no-isolation"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy"
+      cibw-test-requires: "pytest pycollada"
+      # test_mcubes.py/test_smoothing.py sit at the repo root beside the mcubes/
+      # source package; testing from {project} would import that source tree
+      # instead of the built wheel (gotcha 25).
+      cibw-test-sources: "test_mcubes.py test_smoothing.py"
+      # Upstream's own CI creates this dir before pytest; test_export() writes into it.
+      cibw-test-command: "mkdir -p output && python -m pytest -v test_mcubes.py test_smoothing.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYMCUBES_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout PyMCubes v${{ env.PYMCUBES_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pmneila/PyMCubes
-          ref: v${{ env.PYMCUBES_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # pyproject.toml pins build-system.requires to "numpy~=2.0", which has
-          # no cp313/cp314 wheels at all (numpy 2.0 predates Python 3.13). Pin the
-          # same requires with the ceiling lifted and disable isolation so it holds.
-          CIBW_BEFORE_BUILD: pip install setuptools wheel Cython "numpy>=2.0,<3.0"
-          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy
-          CIBW_TEST_REQUIRES: pytest pycollada
-          # test_mcubes.py/test_smoothing.py sit at the repo root beside the mcubes/
-          # source package; testing from {project} would import that source tree
-          # instead of the built wheel (gotcha 25).
-          CIBW_TEST_SOURCES: test_mcubes.py test_smoothing.py
-          # Upstream's own CI creates this dir before pytest; test_export() writes into it.
-          CIBW_TEST_COMMAND: mkdir -p output && python -m pytest -v test_mcubes.py test_smoothing.py
+          name: pymcubes-${{ env.PYMCUBES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -107,16 +112,9 @@ jobs:
           assert licences == {"LICENSE"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pymcubes-${{ env.PYMCUBES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pymcubes ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

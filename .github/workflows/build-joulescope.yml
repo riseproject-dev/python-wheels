@@ -49,41 +49,45 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build joulescope ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "joulescope"
+      version: "${{ matrix.version }}"
+      repository: "jetperch/pyjoulescope"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy is a build-time requirement (declared in [build-system]); pyjls,
+      # pyjoulescope_driver and pymonocypher are runtime deps with their own
+      # compiled riscv64 wheels on our registry. Only our registry has any of
+      # these four for riscv64; only-binary keeps pip from falling back to an
+      # sdist build for them.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,pyjls,pyjoulescope_driver,pymonocypher"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest --pyargs joulescope"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       JOULESCOPE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyjoulescope v${{ env.JOULESCOPE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: jetperch/pyjoulescope
-          ref: v${{ env.JOULESCOPE_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a build-time requirement (declared in [build-system]); pyjls,
-          # pyjoulescope_driver and pymonocypher are runtime deps with their own
-          # compiled riscv64 wheels on our registry. Only our registry has any of
-          # these four for riscv64; only-binary keeps pip from falling back to an
-          # sdist build for them.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,pyjls,pyjoulescope_driver,pymonocypher
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest --pyargs joulescope
+          name: joulescope-${{ env.JOULESCOPE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -96,16 +100,9 @@ jobs:
           assert licences == {"LICENSE.txt"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: joulescope-${{ env.JOULESCOPE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish joulescope ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

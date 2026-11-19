@@ -51,78 +51,83 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build clickhouse-connect-core ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "clickhouse-connect-core"
+      version: "${{ matrix.version }}"
+      repository: "ClickHouse/clickhouse-connect"
+      ref: ''
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        case "${{ matrix.version }}" in
+          0.2.3) echo "CLICKHOUSE_CONNECT_TAG=v1.11.0" >> "$GITHUB_ENV" ;;
+          *) echo "::error::no clickhouse-connect tag known for clickhouse-connect-core ${{ matrix.version }}"; exit 1 ;;
+        esac
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        git fetch -q --no-tags origin "${CLICKHOUSE_CONNECT_TAG}"
+        git checkout -q --detach FETCH_HEAD
+      cibw-package-dir: "rust/ch-core-py"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # rust/ch-core-py ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container here.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # binding_ci.yml's own "Build binding and run unit tests" job installs
+      # the clickhouse_connect driver (`pip install -e . --no-deps`) before
+      # this exact pytest invocation: several tests (JSON/Variant/Geometry
+      # fallback paths) import it lazily and fail with ModuleNotFoundError
+      # otherwise. clickhouse-connect is deliberately NOT in PIP_ONLY_BINARY
+      # below (gotcha 354's inverse): our own registry only carries a
+      # riscv64 wheel for every interpreter at the old 1.7.2 release, which
+      # predates the Geometry/Variant types these tests exercise, and
+      # carries no musllinux riscv64 wheel at all (build-clickhouse-connect.yml
+      # only builds manylinux). Leaving it unpinned lets pip fall back to
+      # PyPI's sdist for the current release on every leg that needs it
+      # (clickhouse-connect's C extensions are optional - setup.py marks
+      # them `optional=True` - so the sdist build never fails even without
+      # a working compiler). Its own runtime deps lz4 and backports.zstd
+      # (both `python_version < "3.14"` only) stay only-binary where a
+      # riscv64 wheel exists: backports.zstd has one on both libcs, but
+      # lz4 has manylinux riscv64 wheels only (neither our registry nor
+      # PyPI carries a musllinux riscv64 one). Forcing lz4 to binary on
+      # musllinux cp312/cp313 left pip no candidate and sent it
+      # backtracking through every clickhouse-connect sdist until the
+      # 60-minute job timeout, so musllinux lets lz4 build from its sdist
+      # (it vendors liblz4, needing only the image's C compiler).
+      cibw-test-requires: "pytest pytest-xdist clickhouse-connect"
+      cibw-test-environment: "${{ matrix.platform == 'manylinux' && 'PIP_ONLY_BINARY=lz4,backports.zstd' || 'PIP_ONLY_BINARY=backports.zstd' }}"
+      cibw-test-sources: "rust/ch-core-py/tests"
+      cibw-test-command: "python -m pytest rust/ch-core-py/tests -n 4"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CLICKHOUSE_CONNECT_CORE_VERSION: ${{ matrix.version }}
-
     steps:
-      # clickhouse-connect-core is published from ClickHouse/clickhouse-connect's
-      # rust/ch-core-py/ subdirectory and versioned independently of that repo's
-      # own tags (CHANGELOG.md: "Its versions are independent of both
-      # clickhouse-connect and the bundled ch-core-rs crate"), so the mapping to
-      # a checkout ref is a small explicit table, not a derivation.
-      - name: Resolve the clickhouse-connect tag for core ${{ env.CLICKHOUSE_CONNECT_CORE_VERSION }}
-        run: |
-          case "${{ env.CLICKHOUSE_CONNECT_CORE_VERSION }}" in
-            0.2.3) echo "CLICKHOUSE_CONNECT_TAG=v1.11.0" >> "$GITHUB_ENV" ;;
-            *) echo "::error::no clickhouse-connect tag known for clickhouse-connect-core ${{ env.CLICKHOUSE_CONNECT_CORE_VERSION }}"; exit 1 ;;
-          esac
-
-      - name: Checkout clickhouse-connect ${{ env.CLICKHOUSE_CONNECT_TAG }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ClickHouse/clickhouse-connect
-          ref: ${{ env.CLICKHOUSE_CONNECT_TAG }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: rust/ch-core-py
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # rust/ch-core-py ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # binding_ci.yml's own "Build binding and run unit tests" job installs
-          # the clickhouse_connect driver (`pip install -e . --no-deps`) before
-          # this exact pytest invocation: several tests (JSON/Variant/Geometry
-          # fallback paths) import it lazily and fail with ModuleNotFoundError
-          # otherwise. clickhouse-connect is deliberately NOT in PIP_ONLY_BINARY
-          # below (gotcha 354's inverse): our own registry only carries a
-          # riscv64 wheel for every interpreter at the old 1.7.2 release, which
-          # predates the Geometry/Variant types these tests exercise, and
-          # carries no musllinux riscv64 wheel at all (build-clickhouse-connect.yml
-          # only builds manylinux). Leaving it unpinned lets pip fall back to
-          # PyPI's sdist for the current release on every leg that needs it
-          # (clickhouse-connect's C extensions are optional - setup.py marks
-          # them `optional=True` - so the sdist build never fails even without
-          # a working compiler). Its own runtime deps lz4 and backports.zstd
-          # (both `python_version < "3.14"` only) stay only-binary where a
-          # riscv64 wheel exists: backports.zstd has one on both libcs, but
-          # lz4 has manylinux riscv64 wheels only (neither our registry nor
-          # PyPI carries a musllinux riscv64 one). Forcing lz4 to binary on
-          # musllinux cp312/cp313 left pip no candidate and sent it
-          # backtracking through every clickhouse-connect sdist until the
-          # 60-minute job timeout, so musllinux lets lz4 build from its sdist
-          # (it vendors liblz4, needing only the image's C compiler).
-          CIBW_TEST_REQUIRES: pytest pytest-xdist clickhouse-connect
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'manylinux' && 'PIP_ONLY_BINARY=lz4,backports.zstd' || 'PIP_ONLY_BINARY=backports.zstd' }}
-          CIBW_TEST_SOURCES: rust/ch-core-py/tests
-          CIBW_TEST_COMMAND: python -m pytest rust/ch-core-py/tests -n 4
+          name: clickhouse-connect-core-${{ env.CLICKHOUSE_CONNECT_CORE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the compiled codec made it into the wheel
         run: |
@@ -138,15 +143,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: clickhouse-connect-core-${{ env.CLICKHOUSE_CONNECT_CORE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish clickhouse-connect-core ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

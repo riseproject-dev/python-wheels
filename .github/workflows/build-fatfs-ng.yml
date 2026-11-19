@@ -49,46 +49,49 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fatfs-ng ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "fatfs-ng"
+      version: "${{ matrix.version }}"
+      repository: "Jason2866/pyfatfs"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # No pyproject.toml, so setup.py's setup_requires=['cython'] is a
+      # no-op under build isolation; install it the same way upstream's
+      # own CIBW_BEFORE_BUILD does.
+      cibw-before-build: "pip install \"cython>=3.0.0\""
+      cibw-environment-linux: "CYTHONIZE=1"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      # 4 of test_esp32_wl.py's tests fail identically on every platform
+      # (confirmed on x86_64 too, not riscv64-specific): ESP32WearLeveling
+      # never sets self.wl_state_size/wl_temp_size in __init__, a
+      # pre-existing upstream bug unrelated to this port.
+      cibw-test-command: "python -m pytest {project}/tests -k \"not test_wl_state_creation and not test_overhead_calculation and not test_wl_state_invalid_crc and not test_fat_data_too_large\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       FATFS_NG_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyfatfs v${{ env.FATFS_NG_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Jason2866/pyfatfs
-          ref: v${{ env.FATFS_NG_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # No pyproject.toml, so setup.py's setup_requires=['cython'] is a
-          # no-op under build isolation; install it the same way upstream's
-          # own CIBW_BEFORE_BUILD does.
-          CIBW_BEFORE_BUILD: pip install "cython>=3.0.0"
-          CIBW_ENVIRONMENT: CYTHONIZE=1
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          # 4 of test_esp32_wl.py's tests fail identically on every platform
-          # (confirmed on x86_64 too, not riscv64-specific): ESP32WearLeveling
-          # never sets self.wl_state_size/wl_temp_size in __init__, a
-          # pre-existing upstream bug unrelated to this port.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest {project}/tests -k
-            "not test_wl_state_creation and not test_overhead_calculation
-            and not test_wl_state_invalid_crc and not test_fat_data_too_large"
+          name: fatfs-ng-${{ env.FATFS_NG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wrapper extension made it into the wheel
         run: |
@@ -100,15 +103,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fatfs-ng-${{ env.FATFS_NG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish fatfs-ng ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

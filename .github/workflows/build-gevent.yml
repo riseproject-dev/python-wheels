@@ -50,72 +50,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build gevent ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "gevent"
+      version: "${{ matrix.version }}"
+      repository: "gevent/gevent"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/gevent/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all-linux: "yum -y install libffi-devel"
+      # As in make-manylinux: NO_CYTHON_COMPILE keeps Cython, which has no riscv64
+      # binary wheel, from compiling its own accelerators here; TRAVIS is how it tells
+      # setup.py it is on CI, which makes the c-ares extension required, not optional.
+      cibw-environment-linux: "NO_CYTHON_COMPILE=true CI=1 TRAVIS=true"
+      cibw-test-extras: "test"
+      # The monkey-patched stdlib tests live in src/greentest and are found by climbing
+      # to setup.py, so both have to be staged or the runner just warns and skips them
+      # (17 of 86 test commands). src/gevent stays out so the wheel is what is imported.
+      cibw-test-sources: "setup.py src/greentest examples"
+      # GEVENT_MANYLINUX is test-only: during the build it makes setup.py assume
+      # c-ares was already configured by a separate step, which we don't have.
+      cibw-test-environment: "GEVENT_MANYLINUX=1 GEVENT_MANYLINUX_NAME=manylinux_2_39_riscv64 GEVENT_LOOP=libev-cext GEVENTTEST_USE_RESOURCES=-network PYTHONHASHSEED=8675309"
+      cibw-test-command: "python -c \"import gevent; print(gevent, gevent.__version__)\" && python -c \"import gevent.core; print('default loop', gevent.core.loop)\" && GEVENT_LOOP=libuv python -c \"import gevent.core; print('libuv loop', gevent.core.loop)\" && GEVENT_LOOP=libev-cffi python -c \"import gevent.core; print('libev-cffi loop', gevent.core.loop)\" && python -c \"import gevent.ares; print('ares', gevent.ares)\" && python -c \"import importlib.metadata as m; f=[str(p) for p in m.files('gevent')]; missing=[n for n in ('licenses/LICENSE','licenses/NOTICE','licenses/deps/c-ares/LICENSE.md','licenses/deps/libev/LICENSE','licenses/deps/libuv/LICENSE','licenses/deps/libuv/LICENSE-extra') if not any(s.endswith(n) for s in f)]; assert not missing, missing\" && python -m gevent.tests --second-chance"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       GEVENT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout gevent ${{ env.GEVENT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: gevent/gevent
-          ref: ${{ env.GEVENT_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # The wheel statically compiles libev, libuv and c-ares but ships only gevent's
-      # own LICENSE.
-      - name: Patch gevent source
-        run: |
-          git apply python-wheels/patches/gevent/${{ env.GEVENT_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: yum -y install libffi-devel
-          # As in make-manylinux: NO_CYTHON_COMPILE keeps Cython, which has no riscv64
-          # binary wheel, from compiling its own accelerators here; TRAVIS is how it tells
-          # setup.py it is on CI, which makes the c-ares extension required, not optional.
-          CIBW_ENVIRONMENT: >-
-            NO_CYTHON_COMPILE=true
-            CI=1
-            TRAVIS=true
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_EXTRAS: test
-          # The monkey-patched stdlib tests live in src/greentest and are found by climbing
-          # to setup.py, so both have to be staged or the runner just warns and skips them
-          # (17 of 86 test commands). src/gevent stays out so the wheel is what is imported.
-          CIBW_TEST_SOURCES: setup.py src/greentest examples
-          # GEVENT_MANYLINUX is test-only: during the build it makes setup.py assume
-          # c-ares was already configured by a separate step, which we don't have.
-          CIBW_TEST_ENVIRONMENT: >-
-            GEVENT_MANYLINUX=1
-            GEVENT_MANYLINUX_NAME=manylinux_2_39_riscv64
-            GEVENT_LOOP=libev-cext
-            GEVENTTEST_USE_RESOURCES=-network
-            PYTHONHASHSEED=8675309
-          CIBW_TEST_COMMAND: >-
-            python -c "import gevent; print(gevent, gevent.__version__)" &&
-            python -c "import gevent.core; print('default loop', gevent.core.loop)" &&
-            GEVENT_LOOP=libuv python -c "import gevent.core; print('libuv loop', gevent.core.loop)" &&
-            GEVENT_LOOP=libev-cffi python -c "import gevent.core; print('libev-cffi loop', gevent.core.loop)" &&
-            python -c "import gevent.ares; print('ares', gevent.ares)" &&
-            python -c "import importlib.metadata as m; f=[str(p) for p in m.files('gevent')]; missing=[n for n in ('licenses/LICENSE','licenses/NOTICE','licenses/deps/c-ares/LICENSE.md','licenses/deps/libev/LICENSE','licenses/deps/libuv/LICENSE','licenses/deps/libuv/LICENSE-extra') if not any(s.endswith(n) for s in f)]; assert not missing, missing" &&
-            python -m gevent.tests --second-chance
+          name: gevent-${{ env.GEVENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the compiled extensions made it into the wheel
         run: |
@@ -135,15 +127,9 @@ jobs:
               print(whl, len(sos), 'extension modules ok')
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: gevent-${{ env.GEVENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish gevent ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

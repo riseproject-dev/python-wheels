@@ -49,6 +49,37 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pye57 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pye57"
+      version: "${{ matrix.version }}"
+      repository: "davidcaron/pye57"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "recursive"
+      pre-build: |-
+        cp libE57Format/LICENSE.md LICENSE.libE57Format.md
+        cp libE57Format/extern/CRCpp/LICENSE LICENSE.CRCpp
+        xerces_version=$(sed -n 's/^XERCES_\(MAJOR\|MINOR\|PATCH\)=//p' scripts/install_xerces_c.sh | paste -sd.)
+        curl -fsSL --retry 5 -o LICENSE.xerces-c "https://raw.githubusercontent.com/apache/xerces-c/v${xerces_version}/LICENSE"
+        curl -fsSL --retry 5 -o NOTICE.xerces-c "https://raw.githubusercontent.com/apache/xerces-c/v${xerces_version}/NOTICE"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      cibw-before-all-linux: "bash scripts/install_xerces_c.sh"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
@@ -57,36 +88,12 @@ jobs:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PYE57_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pye57 ${{ env.PYE57_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: davidcaron/pye57
-          ref: v${{ env.PYE57_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      # Upstream's wheel bundles libE57Format, CRCpp and Xerces-C but ships none of their licences.
-      - name: Stage the bundled dependencies' licences
-        run: |
-          cp libE57Format/LICENSE.md LICENSE.libE57Format.md
-          cp libE57Format/extern/CRCpp/LICENSE LICENSE.CRCpp
-          xerces_version=$(sed -n 's/^XERCES_\(MAJOR\|MINOR\|PATCH\)=//p' scripts/install_xerces_c.sh | paste -sd.)
-          curl -fsSL --retry 5 -o LICENSE.xerces-c "https://raw.githubusercontent.com/apache/xerces-c/v${xerces_version}/LICENSE"
-          curl -fsSL --retry 5 -o NOTICE.xerces-c "https://raw.githubusercontent.com/apache/xerces-c/v${xerces_version}/NOTICE"
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: "bash scripts/install_xerces_c.sh"
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
+          name: pye57-${{ env.PYE57_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the bundled licences made it into the wheel
         run: |
@@ -102,15 +109,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pye57-${{ env.PYE57_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pye57 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

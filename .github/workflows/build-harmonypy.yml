@@ -49,48 +49,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build harmonypy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "harmonypy"
+      version: "${{ matrix.version }}"
+      repository: "slowkow/harmonypy"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        set -euo pipefail
+        armadillo_url="$(grep -o 'https://sourceforge.net/projects/arma/files/armadillo-[0-9.]*\.tar\.xz' CMakeLists.txt)"
+        mkdir "${RUNNER_TEMP}/armadillo"
+        curl -fsSL --retry 5 "${armadillo_url}" | tar xJ -C "${RUNNER_TEMP}/armadillo" --strip-components=1
+        cp "${RUNNER_TEMP}/armadillo/LICENSE.txt" LICENSE.armadillo
+        cp "${RUNNER_TEMP}/armadillo/NOTICE.txt" NOTICE.armadillo
+        nanobind_version="$(curl -fsSL --retry 5 https://pypi.org/pypi/nanobind/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
+        git clone --depth 1 --branch "v${nanobind_version}" --recurse-submodules --shallow-submodules \
+          https://github.com/wjakob/nanobind.git "${RUNNER_TEMP}/nanobind"
+        cp "${RUNNER_TEMP}/nanobind/LICENSE" LICENSE.nanobind
+        cp "${RUNNER_TEMP}/nanobind/ext/robin_map/LICENSE" LICENSE.robin-map
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       HARMONYPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout harmonypy v${{ env.HARMONYPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: slowkow/harmonypy
-          ref: v${{ env.HARMONYPY_VERSION }}
-          persist-credentials: false
-
-      # The extension compiles in Armadillo (Apache-2.0, FetchContent'd by
-      # CMakeLists.txt), nanobind (BSD-3-Clause) and its robin-map (MIT); upstream
-      # ships only its own LICENSE.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          set -euo pipefail
-          armadillo_url="$(grep -o 'https://sourceforge.net/projects/arma/files/armadillo-[0-9.]*\.tar\.xz' CMakeLists.txt)"
-          mkdir "${RUNNER_TEMP}/armadillo"
-          curl -fsSL --retry 5 "${armadillo_url}" | tar xJ -C "${RUNNER_TEMP}/armadillo" --strip-components=1
-          cp "${RUNNER_TEMP}/armadillo/LICENSE.txt" LICENSE.armadillo
-          cp "${RUNNER_TEMP}/armadillo/NOTICE.txt" NOTICE.armadillo
-          nanobind_version="$(curl -fsSL --retry 5 https://pypi.org/pypi/nanobind/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
-          git clone --depth 1 --branch "v${nanobind_version}" --recurse-submodules --shallow-submodules \
-            https://github.com/wjakob/nanobind.git "${RUNNER_TEMP}/nanobind"
-          cp "${RUNNER_TEMP}/nanobind/LICENSE" LICENSE.nanobind
-          cp "${RUNNER_TEMP}/nanobind/ext/robin_map/LICENSE" LICENSE.robin-map
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          name: harmonypy-${{ env.HARMONYPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -104,15 +109,9 @@ jobs:
                               "LICENSE.nanobind", "LICENSE.robin-map"}, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: harmonypy-${{ env.HARMONYPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish harmonypy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -48,45 +48,47 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build GPy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "gpy"
+      version: "${{ matrix.version }}"
+      repository: "SheffieldML/GPy"
+      ref: "refs/tags/v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build-frontend: "build"
+      # numpy, scipy and Cython (build) and matplotlib's compiled deps (test) need a
+      # riscv64 wheel; PIP_ONLY_BINARY keeps a newer PyPI sdist from winning the
+      # resolution and compiling from source instead.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,Cython,matplotlib,pillow,contourpy,kiwisolver"
+      cibw-test-requires: "pytest matplotlib"
+      # The suite lives inside the package: --pyargs runs the wheel's copy, while
+      # {project}/GPy/testing would import GPy from the uncompiled checkout.
+      cibw-test-command: "python -c \"from GPy.kern.src import stationary_cython, coregionalize_cython; from GPy.util import choleskies_cython, linalg_cython; from GPy.models import state_space_cython\" && pytest --pyargs GPy.testing"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       GPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout GPy v${{ env.GPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: SheffieldML/GPy
-          # Upstream also has a v1.14.2 *branch* (still at 1.14.1), which a bare ref resolves to first.
-          ref: refs/tags/v${{ env.GPY_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: build
-          # numpy, scipy and Cython (build) and matplotlib's compiled deps (test) need a
-          # riscv64 wheel; PIP_ONLY_BINARY keeps a newer PyPI sdist from winning the
-          # resolution and compiling from source instead.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,Cython,matplotlib,pillow,contourpy,kiwisolver
-          CIBW_TEST_REQUIRES: pytest matplotlib
-          # The suite lives inside the package: --pyargs runs the wheel's copy, while
-          # {project}/GPy/testing would import GPy from the uncompiled checkout.
-          CIBW_TEST_COMMAND: >-
-            python -c "from GPy.kern.src import stationary_cython, coregionalize_cython; from GPy.util import choleskies_cython, linalg_cython; from GPy.models import state_space_cython"
-            && pytest --pyargs GPy.testing
+          name: gpy-${{ env.GPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -99,16 +101,9 @@ jobs:
           assert licences == {"AUTHORS.txt", "LICENSE.txt"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: gpy-${{ env.GPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish GPy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -49,6 +49,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build blosc2 ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # scikit-build-core builds a single cp311-abi3 wheel (pyproject.toml's
+          # wheel.py-api) covering CPython 3.11+; built on cp311, the oldest
+          # interpreter the tag claims, and re-tested on the newer ones. Only
+          # cp314t is built free-threaded: numpy has no riscv64 wheel yet for
+          # cp315/cp315t anywhere (our registry or public PyPI), which upstream's
+          # own cp315t leg would otherwise need building from source.
+          - tag: cp311-abi3
+            build: >-
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            timeout: 360
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            timeout: 120
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "blosc2"
+      version: "${{ matrix.version }}"
+      repository: "Blosc/python-blosc2"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: "${{ matrix.timeout }}"
+      cibw-build: "${{ matrix.build }}"
+      # numpy/ndindex/numexpr have riscv64 wheels only on our registry;
+      # msgpack, pydantic, httpx, rich and threadpoolctl already have them
+      # (or a pure py3-none-any wheel) on public PyPI.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      # Mirrors the subset upstream's own CI runs against both the sdist
+      # build and the built abi3 wheel (cibuildwheels.yml's sdist-test and
+      # test_abi3_matrix steps).
+      cibw-test-command: "python -m pytest {project}/tests/test_open.py {project}/tests/test_vlmeta.py {project}/tests/ndarray/test_evaluate.py"
+      # The extensions declare no Py_mod_gil slot, so cp314t re-enables the
+      # GIL on import and pytest.ini's `filterwarnings = error` (picked up
+      # from {project}) turns that into a collection error (gotcha 127).
+      cibw-test-environment: "PYTHON_GIL=1"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -70,41 +117,14 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
             timeout: 120
-
     env:
       BLOSC2_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout python-blosc2 v${{ env.BLOSC2_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Blosc/python-blosc2
-          ref: v${{ env.BLOSC2_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy/ndindex/numexpr have riscv64 wheels only on our registry;
-          # msgpack, pydantic, httpx, rich and threadpoolctl already have them
-          # (or a pure py3-none-any wheel) on public PyPI.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          # Mirrors the subset upstream's own CI runs against both the sdist
-          # build and the built abi3 wheel (cibuildwheels.yml's sdist-test and
-          # test_abi3_matrix steps).
-          CIBW_TEST_COMMAND: >-
-            python -m pytest {project}/tests/test_open.py {project}/tests/test_vlmeta.py
-            {project}/tests/ndarray/test_evaluate.py
-          # The extensions declare no Py_mod_gil slot, so cp314t re-enables the
-          # GIL on import and pytest.ini's `filterwarnings = error` (picked up
-          # from {project}) turns that into a collection error (gotcha 127).
-          CIBW_TEST_ENVIRONMENT: PYTHON_GIL=1
+          name: blosc2-${{ env.BLOSC2_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         if: ${{ matrix.tag == 'cp311-abi3' }}
@@ -124,15 +144,9 @@ jobs:
                                "miniexpr/THIRD_PARTY_NOTICES.md"}, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: blosc2-${{ env.BLOSC2_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish blosc2 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

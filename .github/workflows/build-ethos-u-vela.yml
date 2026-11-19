@@ -49,47 +49,68 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build ethos-u-vela ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "ethos-u-vela"
+      version: "${{ matrix.version }}"
+      repository: "${{ github.repository }}"
+      ref: "${{ github.sha }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      pre-build: |-
+        export ETHOS_U_VELA_VERSION='${{ matrix.version }}'
+        set -euo pipefail
+        shopt -s dotglob
+        rm -rf ./*
+        git clone -q --depth 1 --branch "${ETHOS_U_VELA_VERSION}" https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela.git .
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" sparse-checkout init --cone
+        git -C "python-wheels" sparse-checkout set "patches/ethos-u-vela"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v python-wheels/patches/ethos-u-vela/${{ matrix.version }}/*.patch
+        rm -rf python-wheels
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py only passes -j to CMake for `build_ext --parallel`, which pip never sets.
+      cibw-environment-linux: "SETUPTOOLS_SCM_PRETEND_VERSION=${{ matrix.version }} CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ETHOS_U_VELA_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout ethos-u-vela ${{ env.ETHOS_U_VELA_VERSION }}
-        run: |
-          set -euo pipefail
-          shopt -s dotglob
-          rm -rf ./*
-          git clone -q --depth 1 --branch "${ETHOS_U_VELA_VERSION}" https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela.git .
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: python-wheels
-          sparse-checkout: patches/ethos-u-vela
-          persist-credentials: false
-
-      - name: Patch ethos-u-vela source
-        run: |
-          git apply -v python-wheels/patches/ethos-u-vela/${{ env.ETHOS_U_VELA_VERSION }}/*.patch
-          rm -rf python-wheels
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py only passes -j to CMake for `build_ext --parallel`, which pip never sets.
-          CIBW_ENVIRONMENT: >-
-            SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.ETHOS_U_VELA_VERSION }}
-            CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          name: ethos-u-vela-${{ env.ETHOS_U_VELA_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -103,15 +124,9 @@ jobs:
           assert licences == {"LICENSE.txt"} | {f"ethosu/regor/dependencies/thirdparty/{d}/LICENSE" for d in ("flatbuffers", "fmt", "gemmlowp", "pybind11")}, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ethos-u-vela-${{ env.ETHOS_U_VELA_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish ethos-u-vela ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

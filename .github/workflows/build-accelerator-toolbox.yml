@@ -50,46 +50,50 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build accelerator-toolbox ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "accelerator-toolbox"
+      version: "${{ matrix.version }}"
+      repository: "atcollab/at"
+      ref: "pyat-${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy is a build-time requirement (pyproject.toml build-system.requires);
+      # scipy/h5py are runtime deps pulled in when cibuildwheel installs the
+      # wheel for the test step. Only our registry has any of these for
+      # riscv64; only-binary keeps a newer PyPI release from winning the
+      # resolution and then compiling from sdist (h5py would need libhdf5-dev).
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,h5py"
+      cibw-test-sources: "pyat/test"
+      cibw-test-requires: "pytest"
+      # test_long_arrays_in_m_file reads machine_data/kickmap_w150_20mm.txt, which
+      # pyproject.toml's package-data glob (*.m, *.mat only) never ships in any
+      # installed wheel -- reproduced against a local x86_64 build, unrelated to riscv64.
+      cibw-test-command: "python -m pytest pyat/test -k \"not test_long_arrays_in_m_file\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ACCELERATOR_TOOLBOX_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout accelerator-toolbox pyat-${{ env.ACCELERATOR_TOOLBOX_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: atcollab/at
-          ref: pyat-${{ env.ACCELERATOR_TOOLBOX_VERSION }}
-          fetch-depth: 0  # setuptools_scm derives the version from `git describe --tags`
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a build-time requirement (pyproject.toml build-system.requires);
-          # scipy/h5py are runtime deps pulled in when cibuildwheel installs the
-          # wheel for the test step. Only our registry has any of these for
-          # riscv64; only-binary keeps a newer PyPI release from winning the
-          # resolution and then compiling from sdist (h5py would need libhdf5-dev).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,h5py
-          CIBW_TEST_SOURCES: pyat/test
-          CIBW_TEST_REQUIRES: pytest
-          # test_long_arrays_in_m_file reads machine_data/kickmap_w150_20mm.txt, which
-          # pyproject.toml's package-data glob (*.m, *.mat only) never ships in any
-          # installed wheel -- reproduced against a local x86_64 build, unrelated to riscv64.
-          CIBW_TEST_COMMAND: python -m pytest pyat/test -k "not test_long_arrays_in_m_file"
+          name: accelerator-toolbox-${{ env.ACCELERATOR_TOOLBOX_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -104,16 +108,9 @@ jobs:
           assert licences == {"LICENSE"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: accelerator-toolbox-${{ env.ACCELERATOR_TOOLBOX_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish accelerator-toolbox ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

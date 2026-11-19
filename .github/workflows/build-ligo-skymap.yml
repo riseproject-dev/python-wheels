@@ -59,91 +59,72 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build ligo-skymap ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "ligo-skymap"
+      version: "${{ matrix.version }}"
+      repository: "lpsinger/ligo.skymap"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp311-abi3-manylinux_riscv64"
+      timeout-minutes: 720
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v python-wheels/patches/ligo-skymap/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # One abi3 wheel, built on cp311 like upstream's, and re-tested on the
+      # newer interpreters via find_compatible_wheel.
+      cibw-build: "cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # astropy-healpix (a runtime dependency) has no cp311 riscv64 wheel on any index.
+      cibw-test-skip: "cp311-*"
+      # GSL 2.8's bundled config.guess predates riscv64. Upstream's wheels ship
+      # no licence text; the project's own live in licenses/, which the default
+      # licence glob does not reach.
+      cibw-before-all-linux: "curl -fsSL -o /tmp/gsl.tar.gz https://ftp.gnu.org/gnu/gsl/gsl-2.8.tar.gz && echo \"4427f6ce59dc14eabd6d31ef1fcac1849b4d7357faf48873aef642464ddf21cc9b500d516f08b410f02a2daa9a6ff30220f3995584b0a6ae2f73c522d1abb66b /tmp/gsl.tar.gz\" | sha512sum -c - && mkdir /tmp/gsl && tar xzf /tmp/gsl.tar.gz -C /tmp/gsl --strip-components 1 && cd /tmp/gsl && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . && ./configure --prefix=/usr --libdir=/usr/lib64 CFLAGS=-O2 && make -j\"$(nproc)\" && make install && cp COPYING {project}/LICENSE.gsl && cp {project}/licenses/LICENSE.rst {project}/LICENSE.rst && cp {project}/licenses/CHEALPIX_LICENSE.rst {project}/LICENSE.chealpix.rst && cp {project}/licenses/NUMPY_LICENSE.rst {project}/LICENSE.numpy.rst && cp {project}/licenses/PTEMCEE_LICENSE.rst {project}/LICENSE.ptemcee.rst && cp {project}/licenses/TEMPLATE_LICENCE.rst {project}/LICENSE.template.rst"
+      # CFLAGS are upstream's aarch64 ones. The bundled chealpix is used because
+      # Rocky 10 has none for riscv64 (upstream sets LIGO_SKYMAP_USE_SYSTEM_CHEALPIX).
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIGO_SKYMAP=${{ matrix.version }} CFLAGS=\"-Ofast -fno-finite-math-only -flto\""
+      # The test extra minus figaro, which needs numba (no riscv64 build);
+      # dpgmm.py raises on import without it, so its doctests are skipped too.
+      cibw-test-requires: "astroquery pytest-astropy pytest-benchmark pytest-mpl pytest-rerunfailures"
+      # No --mpl: 24 baselines' legend/tick text mismatches on x86_64 too with the
+      # current matplotlib, so figures are drawn but not compared. The crossmatch
+      # doctest downloads the whole GLADE catalogue from VizieR. test_bayestar
+      # shells out to lalapps_inspinj (from the already-published lalsuite, not
+      # this package's own extension) to generate a synthetic injection, and that
+      # binary SIGSEGVs on this riscv64 image with these exact args; lalsuite's
+      # own test suite never exercises lalapps_inspinj, so this is a newly-found,
+      # pre-existing lalsuite/riscv64 issue outside this port's scope, not
+      # anything ligo.skymap.core itself does -- every other test (1491 passed)
+      # exercises the real compiled extension cleanly.
+      cibw-test-command: "pytest --pyargs ligo.skymap --doctest-plus --doctest-ufunc --omp-get-num-threads --durations=10 --ignore-glob='*/ligo/skymap/dpgmm.py' --deselect tool/tests/test_bayestar.py::test_bayestar -k 'not skymap.postprocess.crossmatch.crossmatch'"
+      cibw-test-environment: "OMP_NUM_THREADS=4 PIP_PREFER_BINARY=1"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       LIGO_SKYMAP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout ligo.skymap v${{ env.LIGO_SKYMAP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: lpsinger/ligo.skymap
-          ref: v${{ env.LIGO_SKYMAP_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply -v python-wheels/patches/ligo-skymap/${{ env.LIGO_SKYMAP_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # One abi3 wheel, built on cp311 like upstream's, and re-tested on the
-          # newer interpreters via find_compatible_wheel.
-          CIBW_BUILD: >-
-            cp311-manylinux_riscv64 cp312-manylinux_riscv64
-            cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          # astropy-healpix (a runtime dependency) has no cp311 riscv64 wheel on any index.
-          CIBW_TEST_SKIP: cp311-*
-          # GSL 2.8's bundled config.guess predates riscv64. Upstream's wheels ship
-          # no licence text; the project's own live in licenses/, which the default
-          # licence glob does not reach.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl -fsSL -o /tmp/gsl.tar.gz ${{ env.GSL_URL }} &&
-            echo "${{ env.GSL_SHA512 }}  /tmp/gsl.tar.gz" | sha512sum -c - &&
-            mkdir /tmp/gsl &&
-            tar xzf /tmp/gsl.tar.gz -C /tmp/gsl --strip-components 1 &&
-            cd /tmp/gsl &&
-            cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . &&
-            ./configure --prefix=/usr --libdir=/usr/lib64 CFLAGS=-O2 &&
-            make -j"$(nproc)" &&
-            make install &&
-            cp COPYING {project}/LICENSE.gsl &&
-            cp {project}/licenses/LICENSE.rst {project}/LICENSE.rst &&
-            cp {project}/licenses/CHEALPIX_LICENSE.rst {project}/LICENSE.chealpix.rst &&
-            cp {project}/licenses/NUMPY_LICENSE.rst {project}/LICENSE.numpy.rst &&
-            cp {project}/licenses/PTEMCEE_LICENSE.rst {project}/LICENSE.ptemcee.rst &&
-            cp {project}/licenses/TEMPLATE_LICENCE.rst {project}/LICENSE.template.rst
-          # CFLAGS are upstream's aarch64 ones. The bundled chealpix is used because
-          # Rocky 10 has none for riscv64 (upstream sets LIGO_SKYMAP_USE_SYSTEM_CHEALPIX).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIGO_SKYMAP=${{ env.LIGO_SKYMAP_VERSION }}
-            CFLAGS="-Ofast -fno-finite-math-only -flto"
-          # The test extra minus figaro, which needs numba (no riscv64 build);
-          # dpgmm.py raises on import without it, so its doctests are skipped too.
-          CIBW_TEST_REQUIRES: >-
-            astroquery pytest-astropy pytest-benchmark pytest-mpl pytest-rerunfailures
-          # No --mpl: 24 baselines' legend/tick text mismatches on x86_64 too with the
-          # current matplotlib, so figures are drawn but not compared. The crossmatch
-          # doctest downloads the whole GLADE catalogue from VizieR. test_bayestar
-          # shells out to lalapps_inspinj (from the already-published lalsuite, not
-          # this package's own extension) to generate a synthetic injection, and that
-          # binary SIGSEGVs on this riscv64 image with these exact args; lalsuite's
-          # own test suite never exercises lalapps_inspinj, so this is a newly-found,
-          # pre-existing lalsuite/riscv64 issue outside this port's scope, not
-          # anything ligo.skymap.core itself does -- every other test (1491 passed)
-          # exercises the real compiled extension cleanly.
-          CIBW_TEST_COMMAND: >-
-            pytest --pyargs ligo.skymap --doctest-plus --doctest-ufunc
-            --omp-get-num-threads --durations=10
-            --ignore-glob='*/ligo/skymap/dpgmm.py'
-            --deselect tool/tests/test_bayestar.py::test_bayestar
-            -k 'not skymap.postprocess.crossmatch.crossmatch'
-          CIBW_TEST_ENVIRONMENT: >-
-            OMP_NUM_THREADS=4
-            PIP_PREFER_BINARY=1
+          name: ligo-skymap-${{ env.LIGO_SKYMAP_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -163,13 +144,6 @@ jobs:
                               "LICENSE.numpy.rst", "LICENSE.ptemcee.rst",
                               "LICENSE.template.rst"}, licences
           EOF
-
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ligo-skymap-${{ env.LIGO_SKYMAP_VERSION }}-cp311-abi3-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -214,7 +188,7 @@ jobs:
 
   publish:
     name: Publish ligo-skymap ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

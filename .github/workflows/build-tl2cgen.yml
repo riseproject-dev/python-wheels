@@ -60,73 +60,80 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build tl2cgen ${{ matrix.version }} py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tl2cgen"
+      version: "${{ matrix.version }}"
+      repository: "dmlc/tl2cgen"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/tl2cgen/${{ matrix.version }}/0001-*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp LICENSE python/LICENSE
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "python"
+      # The custom hatchling build hook tags the wheel py3-none-<platform>
+      # itself (sysconfig.get_platform()), so one build serves every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # CMAKE_POLICY_VERSION_MINIMUM covers the vendored fmtlib's old cmake_minimum_required.
+      # `-include cstdint`: the FetchContent'd Treelite 4.1.2 (src/gtil/postprocessor.h)
+      # relies on <cstdint> arriving transitively, which GCC 13+'s libstdc++ no longer does.
+      cibw-environment-linux: "CMAKE_POLICY_VERSION_MINIMUM=3.5 CXXFLAGS=\"-include cstdint\""
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,scipy"
+      cibw-test-sources: "tests/example_data"
+      # test_basic.py itself is not run: check_predictor() builds its DMatrix
+      # from a SciPy CSR matrix via np.array(..., copy=False, dtype=cast),
+      # which numpy 2 (the only line with a riscv64 wheel) rejects outright
+      # on any platform -- a tl2cgen/numpy2 gap, not a riscv64 one.
+      # DMatrix-from-dense-ndarray with no dtype override asks for no such cast.
+      cibw-test-command: |-
+        python3 - <<'PYEOF'
+        import numpy as np
+        import treelite, tl2cgen
+
+        model = treelite.frontend.load_xgboost_model_legacy_binary(
+        'tests/example_data/mushroom/mushroom.model')
+        tl2cgen.export_lib(model, toolchain='gcc', libpath='/tmp/mushroom.so', verbose=True)
+        predictor = tl2cgen.Predictor(libpath='/tmp/mushroom.so', verbose=True)
+        data = np.random.rand(5, predictor.num_feature).astype('float32')
+        out = predictor.predict(tl2cgen.DMatrix(data))
+        assert out.size == 5 and np.isfinite(out).all(), out
+        print(out.flatten())
+        PYEOF
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       TL2CGEN_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout tl2cgen ${{ env.TL2CGEN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: dmlc/tl2cgen
-          ref: ${{ env.TL2CGEN_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # cmake/ExternalLibs.cmake FetchContents RapidJSON at the same v1.1.0
-      # pin Treelite (also FetchContent'd here) uses; v1.1.0 fails to compile
-      # under GCC 14. See the patch for the override mechanism.
-      - name: Patch tl2cgen source
-        run: git apply python-wheels/patches/tl2cgen/${{ env.TL2CGEN_VERSION }}/0001-*.patch
-
-      # hatchling's default license-files glob is rooted at pyproject.toml's
-      # own directory (python/), which has no LICENSE of its own -- only the
-      # repository root does.
-      - name: Stage licence text for packaging
-        run: cp LICENSE python/LICENSE
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python
-          output-dir: wheelhouse/
-          # The custom hatchling build hook tags the wheel py3-none-<platform>
-          # itself (sysconfig.get_platform()), so one build serves every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # CMAKE_POLICY_VERSION_MINIMUM covers the vendored fmtlib's old cmake_minimum_required.
-          # `-include cstdint`: the FetchContent'd Treelite 4.1.2 (src/gtil/postprocessor.h)
-          # relies on <cstdint> arriving transitively, which GCC 13+'s libstdc++ no longer does.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ CMAKE_POLICY_VERSION_MINIMUM=3.5 CXXFLAGS="-include cstdint"
-          CIBW_TEST_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy,scipy
-          CIBW_TEST_SOURCES: tests/example_data
-          # test_basic.py itself is not run: check_predictor() builds its DMatrix
-          # from a SciPy CSR matrix via np.array(..., copy=False, dtype=cast),
-          # which numpy 2 (the only line with a riscv64 wheel) rejects outright
-          # on any platform -- a tl2cgen/numpy2 gap, not a riscv64 one.
-          # DMatrix-from-dense-ndarray with no dtype override asks for no such cast.
-          CIBW_TEST_COMMAND: |
-            python3 - <<'PYEOF'
-            import numpy as np
-            import treelite, tl2cgen
-
-            model = treelite.frontend.load_xgboost_model_legacy_binary(
-                'tests/example_data/mushroom/mushroom.model')
-            tl2cgen.export_lib(model, toolchain='gcc', libpath='/tmp/mushroom.so', verbose=True)
-            predictor = tl2cgen.Predictor(libpath='/tmp/mushroom.so', verbose=True)
-            data = np.random.rand(5, predictor.num_feature).astype('float32')
-            out = predictor.predict(tl2cgen.DMatrix(data))
-            assert out.size == 5 and np.isfinite(out).all(), out
-            print(out.flatten())
-            PYEOF
+          name: tl2cgen-${{ env.TL2CGEN_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries libtl2cgen and a vendored libgomp
         run: |
@@ -139,12 +146,6 @@ jobs:
                   raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
           print("\n".join(n for n in names if ".so" in n))
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tl2cgen-${{ env.TL2CGEN_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -175,7 +176,7 @@ jobs:
 
   publish:
     name: Publish tl2cgen ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

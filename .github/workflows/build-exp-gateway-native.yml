@@ -52,6 +52,119 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build exp-gateway-native ${{ matrix.version }} cp312-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "exp-gateway-native"
+      version: "${{ matrix.version }}"
+      repository: "${{ github.repository }}"
+      ref: "${{ github.sha }}"
+      artifact-tag: "cp312-manylinux_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        export EXP_GATEWAY_NATIVE_VERSION='${{ matrix.version }}'
+        set -euo pipefail
+        url="$(curl -sSfL "https://pypi.org/pypi/exp-gateway-native/${EXP_GATEWAY_NATIVE_VERSION}/json" \
+          | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+        curl -sSfL -o sdist.tar.gz "$url"
+        tar xzf sdist.tar.gz
+        mv "exp_gateway_native-${EXP_GATEWAY_NATIVE_VERSION}" pkg
+        test -f pkg/pyproject.toml
+        test -f pkg/Cargo.lock
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        mkdir -p pkg/tests
+        cat > pkg/tests/test_exp_gateway_native.py <<'PYTEST'
+        """Smoke tests for the riscv64 exp-gateway-native wheel.
+
+        Upstream ships no Python test suite, so these exercise the compiled
+        PyO3 extension directly: the module-level helpers and the
+        dependency-free RegexDetector/CaptureResponse/fixture encoders that
+        need no running server or control-plane callback.
+        """
+
+        import json
+
+        import exp_gateway_native as egn
+
+
+        def test_extension_module_is_compiled():
+            from exp_gateway_native import exp_gateway_native as ext
+
+            assert ext.__file__.endswith(".so"), ext.__file__
+
+
+        def test_metrics_snapshot_json():
+            snapshot = json.loads(egn.metrics_snapshot_json())
+            assert isinstance(snapshot, dict)
+
+
+        def test_regex_detector_matches_and_redacts():
+            spec = json.dumps({"patterns": [r"\d{3}-\d{2}-\d{4}"], "replacement": "[redacted]"})
+            detector = egn.RegexDetector(spec)
+            assert detector.matches("ssn 123-45-6789 on file")
+            assert not detector.matches("no match here")
+            assert detector.redact("ssn 123-45-6789 on file") == "ssn [redacted] on file"
+            assert detector.redact("no match here") is None
+
+
+        def test_capture_response_round_trip():
+            body = json.dumps({"id": "resp_1", "object": "response", "status": "completed"}).encode()
+            response = egn.CaptureResponse("responses", body, False)
+            assert response.completed is True
+            assert json.loads(response.body_json)["id"] == "resp_1"
+            assert response.events_json is None
+
+
+        def test_execution_bindings_register_and_remove():
+            bindings = egn.ExecutionBindings(capacity=8)
+            bindings.remove("absent-token")
+
+
+        def test_failure_public_error_fixture():
+            encoded = json.loads(egn.failure_public_error_fixture("throttled", "slow down"))
+            assert encoded["code"] == "unavailable_route"
+            assert encoded["message"] == "slow down"
+
+
+        def test_normalize_stream_fixture_rejects_unknown_dialect():
+            try:
+                egn.normalize_stream_fixture("not-a-real-dialect", "[]")
+            except Exception as exc:
+                assert "dialect" in str(exc).lower() or "not-a-real-dialect" in str(exc)
+            else:
+                raise AssertionError("expected normalize_stream_fixture to reject an unknown dialect")
+        PYTEST
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "pkg"
+      # pyo3 abi3-py312 (Cargo.toml), matching upstream's own single
+      # wheel per platform for every 3.12+ interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # No [tool.cibuildwheel] table upstream, so the Rust toolchain the
+      # maturin backend needs is installed in-container here.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "pkg/tests"
+      cibw-test-command: "python -m pytest -v pkg/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     # axum/tokio/reqwest/rustls/rusqlite(bundled)/symphonia pull a large crate
     # graph into the cdylib; sase-core-rs's sase_gateway alone needed ~20 min
@@ -61,105 +174,14 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       EXP_GATEWAY_NATIVE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Fetch exp-gateway-native ${{ env.EXP_GATEWAY_NATIVE_VERSION }} sdist
-        run: |
-          set -euo pipefail
-          url="$(curl -sSfL "https://pypi.org/pypi/exp-gateway-native/${EXP_GATEWAY_NATIVE_VERSION}/json" \
-            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
-          curl -sSfL -o sdist.tar.gz "$url"
-          tar xzf sdist.tar.gz
-          mv "exp_gateway_native-${EXP_GATEWAY_NATIVE_VERSION}" pkg
-          test -f pkg/pyproject.toml
-          test -f pkg/Cargo.lock
-
-      - name: Stage smoke tests
-        run: |
-          mkdir -p pkg/tests
-          cat > pkg/tests/test_exp_gateway_native.py <<'PYTEST'
-          """Smoke tests for the riscv64 exp-gateway-native wheel.
-
-          Upstream ships no Python test suite, so these exercise the compiled
-          PyO3 extension directly: the module-level helpers and the
-          dependency-free RegexDetector/CaptureResponse/fixture encoders that
-          need no running server or control-plane callback.
-          """
-
-          import json
-
-          import exp_gateway_native as egn
-
-
-          def test_extension_module_is_compiled():
-              from exp_gateway_native import exp_gateway_native as ext
-
-              assert ext.__file__.endswith(".so"), ext.__file__
-
-
-          def test_metrics_snapshot_json():
-              snapshot = json.loads(egn.metrics_snapshot_json())
-              assert isinstance(snapshot, dict)
-
-
-          def test_regex_detector_matches_and_redacts():
-              spec = json.dumps({"patterns": [r"\d{3}-\d{2}-\d{4}"], "replacement": "[redacted]"})
-              detector = egn.RegexDetector(spec)
-              assert detector.matches("ssn 123-45-6789 on file")
-              assert not detector.matches("no match here")
-              assert detector.redact("ssn 123-45-6789 on file") == "ssn [redacted] on file"
-              assert detector.redact("no match here") is None
-
-
-          def test_capture_response_round_trip():
-              body = json.dumps({"id": "resp_1", "object": "response", "status": "completed"}).encode()
-              response = egn.CaptureResponse("responses", body, False)
-              assert response.completed is True
-              assert json.loads(response.body_json)["id"] == "resp_1"
-              assert response.events_json is None
-
-
-          def test_execution_bindings_register_and_remove():
-              bindings = egn.ExecutionBindings(capacity=8)
-              bindings.remove("absent-token")
-
-
-          def test_failure_public_error_fixture():
-              encoded = json.loads(egn.failure_public_error_fixture("throttled", "slow down"))
-              assert encoded["code"] == "unavailable_route"
-              assert encoded["message"] == "slow down"
-
-
-          def test_normalize_stream_fixture_rejects_unknown_dialect():
-              try:
-                  egn.normalize_stream_fixture("not-a-real-dialect", "[]")
-              except Exception as exc:
-                  assert "dialect" in str(exc).lower() or "not-a-real-dialect" in str(exc)
-              else:
-                  raise AssertionError("expected normalize_stream_fixture to reject an unknown dialect")
-          PYTEST
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          package-dir: pkg
-          output-dir: wheelhouse/
-          # pyo3 abi3-py312 (Cargo.toml), matching upstream's own single
-          # wheel per platform for every 3.12+ interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # No [tool.cibuildwheel] table upstream, so the Rust toolchain the
-          # maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: pkg/tests
-          CIBW_TEST_COMMAND: python -m pytest -v pkg/tests
+          name: exp-gateway-native-${{ env.EXP_GATEWAY_NATIVE_VERSION }}-cp312-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the compiled extension
         run: |
@@ -171,15 +193,9 @@ jobs:
           print("extension:", sos[0])
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: exp-gateway-native-${{ env.EXP_GATEWAY_NATIVE_VERSION }}-cp312-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish exp-gateway-native ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

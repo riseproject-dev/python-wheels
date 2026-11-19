@@ -52,67 +52,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build lameenc ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "lameenc"
+      version: "${{ matrix.version }}"
+      repository: "chrisstaite/lameenc"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/lameenc/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Replaces upstream's per-container build.sh, which loops every
+      # /opt/python/*/bin itself; cibuildwheel does that looping for us.
+      cibw-before-all-linux: "curl -fsSL https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz/download -o lame.tar.gz && echo \"ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e lame.tar.gz\" | sha256sum -c - && tar xzf lame.tar.gz && sed -i 's/0-9\\*0-9\\*/[0-9]*[0-9]*/g' lame-3.100/configure && cp {project}/fixed-libmp3lame.sym lame-3.100/include/libmp3lame.sym && cd lame-3.100 && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . && ./configure \"CFLAGS=-fPIC -fno-fast-math\" LDFLAGS=-fPIC --prefix=/tmp/lame --enable-expopt --enable-nasm --disable-frontend --disable-decoder --disable-analyzer-hooks --disable-debug --disable-dependency-tracking && make && make install && cp COPYING {project}/LICENSE.lame"
+      cibw-build-frontend: "build; args: -C--build-option=--libdir=/tmp/lame/lib -C--build-option=--incdir=/tmp/lame/include/lame"
+      # `git apply` above dirties the tree, which renames the
+      # setuptools_scm version; pin it back to the tag.
+      cibw-environment-linux: "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LAMEENC=${{ matrix.version }}"
+      cibw-test-command: "python3 -c \"import lameenc; enc = lameenc.Encoder(); enc.set_bit_rate(128); enc.set_in_sample_rate(16000); enc.set_channels(1); enc.set_quality(2); data = enc.encode(b'\\x00\\x00' * 16000) + enc.flush(); assert len(data) > 0, 'no mp3 data produced'\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       LAMEENC_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout lameenc v${{ env.LAMEENC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: chrisstaite/lameenc
-          ref: v${{ env.LAMEENC_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch lameenc source
-        run: git apply python-wheels/patches/lameenc/${{ env.LAMEENC_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces upstream's per-container build.sh, which loops every
-          # /opt/python/*/bin itself; cibuildwheel does that looping for us.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl -fsSL
-            https://sourceforge.net/projects/lame/files/lame/${{ env.LAME_VERSION }}/lame-${{ env.LAME_VERSION }}.tar.gz/download
-            -o lame.tar.gz &&
-            echo "${{ env.LAME_SHA256 }}  lame.tar.gz" | sha256sum -c - &&
-            tar xzf lame.tar.gz &&
-            sed -i 's/0-9\*0-9\*/[0-9]*[0-9]*/g' lame-${{ env.LAME_VERSION }}/configure &&
-            cp {project}/fixed-libmp3lame.sym lame-${{ env.LAME_VERSION }}/include/libmp3lame.sym &&
-            cd lame-${{ env.LAME_VERSION }} &&
-            cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . &&
-            ./configure "CFLAGS=-fPIC -fno-fast-math" LDFLAGS=-fPIC --prefix=/tmp/lame
-            --enable-expopt --enable-nasm --disable-frontend --disable-decoder
-            --disable-analyzer-hooks --disable-debug --disable-dependency-tracking &&
-            make && make install &&
-            cp COPYING {project}/LICENSE.lame
-          CIBW_BUILD_FRONTEND: >-
-            build; args: -C--build-option=--libdir=/tmp/lame/lib
-            -C--build-option=--incdir=/tmp/lame/include/lame
-          # `git apply` above dirties the tree, which renames the
-          # setuptools_scm version; pin it back to the tag.
-          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LAMEENC=${{ env.LAMEENC_VERSION }}
-          CIBW_TEST_COMMAND: >-
-            python3 -c "import lameenc; enc = lameenc.Encoder(); enc.set_bit_rate(128);
-            enc.set_in_sample_rate(16000); enc.set_channels(1); enc.set_quality(2);
-            data = enc.encode(b'\x00\x00' * 16000) + enc.flush();
-            assert len(data) > 0, 'no mp3 data produced'"
+          name: lameenc-${{ env.LAMEENC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension and both licences
         run: |
@@ -125,12 +115,6 @@ jobs:
               assert licences == {"LICENSE", "LICENSE.lame"}, (whl, licences)
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: lameenc-${{ env.LAMEENC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -161,7 +145,7 @@ jobs:
 
   publish:
     name: Publish lameenc ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

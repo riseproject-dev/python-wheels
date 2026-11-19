@@ -57,54 +57,51 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build dbt-extractor ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dbt-extractor"
+      version: "${{ matrix.version }}"
+      repository: "dbt-labs/dbt-extractor"
+      ref: "89d46724fc9c7dcd94a03f58342bc4f0d2b7a82e"
+      artifact-tag: "cp39-abi3-manylinux_riscv64"
+      timeout-minutes: 90
+      # pyo3 is built with the `abi3-py39` feature, so maturin emits a single
+      # cp39-abi3 wheel whatever interpreter builds it - matching the one
+      # Linux wheel upstream publishes per arch. cibuildwheel compiles once
+      # for cp312 and then reuses that wheel for cp313/cp314 while still
+      # running the test phase on each. musllinux is excluded because
+      # rustup.rs ships no riscv64 musl toolchain (as in build-fastuuid.yml).
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # cibuildwheel's default frontend runs `python -m build /project` with
+      # cwd=/project, and the repo root holds a dev helper named build.py
+      # that shadows the `build` module (it imports tree_sitter at top level,
+      # so the run dies before maturin is reached). pip is unaffected.
+      cibw-build-frontend: "pip"
+      # dbt-extractor ships no [tool.cibuildwheel], so install the Rust
+      # toolchain its maturin backend needs in-container and put it on PATH.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Upstream only checks `import dbt_extractor` after building a wheel;
+      # extract from a model that exercises all three result kinds instead.
+      cibw-test-command: "python -c \"import dbt_extractor; src = '''{{ config(materialized='table', tags=['a','b']) }} select * from {{ ref('other_model') }} join {{ source('my_src','my_tbl') }}'''; r = dbt_extractor.py_extract_from_source(src); assert r['refs'] == [{'name': 'other_model'}], r; assert r['sources'] == {('my_src','my_tbl')}, r; assert r['configs'] == [('materialized','table'), ('tags',['a','b'])], r; print('dbt_extractor OK:', r)\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       DBT_EXTRACTOR_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout dbt-extractor ${{ env.DBT_EXTRACTOR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: dbt-labs/dbt-extractor
-          ref: ${{ env.DBT_EXTRACTOR_REF }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # pyo3 is built with the `abi3-py39` feature, so maturin emits a single
-          # cp39-abi3 wheel whatever interpreter builds it - matching the one
-          # Linux wheel upstream publishes per arch. cibuildwheel compiles once
-          # for cp312 and then reuses that wheel for cp313/cp314 while still
-          # running the test phase on each. musllinux is excluded because
-          # rustup.rs ships no riscv64 musl toolchain (as in build-fastuuid.yml).
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cibuildwheel's default frontend runs `python -m build /project` with
-          # cwd=/project, and the repo root holds a dev helper named build.py
-          # that shadows the `build` module (it imports tree_sitter at top level,
-          # so the run dies before maturin is reached). pip is unaffected.
-          CIBW_BUILD_FRONTEND: pip
-          # dbt-extractor ships no [tool.cibuildwheel], so install the Rust
-          # toolchain its maturin backend needs in-container and put it on PATH.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          # Upstream only checks `import dbt_extractor` after building a wheel;
-          # extract from a model that exercises all three result kinds instead.
-          CIBW_TEST_COMMAND: >-
-            python -c "import dbt_extractor;
-            src = '''{{ config(materialized='table', tags=['a','b']) }}
-            select * from {{ ref('other_model') }} join {{ source('my_src','my_tbl') }}''';
-            r = dbt_extractor.py_extract_from_source(src);
-            assert r['refs'] == [{'name': 'other_model'}], r;
-            assert r['sources'] == {('my_src','my_tbl')}, r;
-            assert r['configs'] == [('materialized','table'), ('tags',['a','b'])], r;
-            print('dbt_extractor OK:', r)"
+          name: dbt-extractor-${{ env.DBT_EXTRACTOR_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension made it into the wheel
         run: |
@@ -117,15 +114,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dbt-extractor-${{ env.DBT_EXTRACTOR_VERSION }}-cp39-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish dbt-extractor ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

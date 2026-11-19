@@ -49,35 +49,39 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build squirrel-lang-sq305 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "squirrel-lang-sq305"
+      version: "${{ matrix.version }}"
+      repository: "shabbywu/squirrel-py"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "true"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "SQUIRREL_PY_VARIANT=sq305 SQUIRREL_PY_PACKAGE_NAME=squirrel-lang-sq305"
+      cibw-before-build: "cp libs/SQUIRREL305/COPYRIGHT {project}/LICENSE.squirrel-core.txt"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       SQUIRREL_LANG_SQ305_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout squirrel-py v${{ env.SQUIRREL_LANG_SQ305_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: shabbywu/squirrel-py
-          ref: v${{ env.SQUIRREL_LANG_SQ305_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      # The project builds the sq32 and sq305 variants of the same tree from these
-      # two env vars (setup.py); pypi.riseproject.dev only tracks the sq305 one.
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: SQUIRREL_PY_VARIANT=sq305 SQUIRREL_PY_PACKAGE_NAME=squirrel-lang-sq305
-          CIBW_BEFORE_BUILD: cp libs/SQUIRREL305/COPYRIGHT {project}/LICENSE.squirrel-core.txt
+          name: squirrel-lang-sq305-${{ env.SQUIRREL_LANG_SQ305_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the bundled licences made it into the wheel
         run: |
@@ -91,15 +95,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: squirrel-lang-sq305-${{ env.SQUIRREL_LANG_SQ305_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish squirrel-lang-sq305 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

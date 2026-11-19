@@ -48,58 +48,66 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build icsneopy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "icsneopy"
+      version: "${{ matrix.version }}"
+      repository: "intrepidcs/libicsneo"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      checkout-fetch-depth: 0
+      pre-build: |-
+        set -euo pipefail
+        tag() { sed -n "/GIT_REPOSITORY .*\/$1\.git/{n;s/.*GIT_TAG *//p}" "$2"; }
+        gh=https://raw.githubusercontent.com
+        icspb=$(sed -n '/FetchContent_Declare(icspb/,/)/s/.*GIT_TAG *//p' CMakeLists.txt)
+        protobuf=$(curl -fsSL --retry 5 "$gh/intrepidcs/icspb/$icspb/CMakeLists.txt" | sed -n 's/.*set(ICSPB_BOOTSTRAP_PROTOBUF_VERSION \([0-9.]*\)).*/\1/p')
+        abseil=$(curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/cmake/dependencies.cmake" | sed -n 's/^set(abseil-cpp-version "\(.*\)")$/\1/p')
+        libpcap=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' ci/bootstrap-libpcap.sh)
+        curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/LICENSE" -o LICENSE.protobuf
+        curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/third_party/utf8_range/LICENSE" -o LICENSE.utf8_range
+        curl -fsSL --retry 5 "$gh/abseil/abseil-cpp/$abseil/LICENSE" -o LICENSE.abseil-cpp
+        curl -fsSL --retry 5 "$gh/the-tcpdump-group/libpcap/libpcap-$libpcap/LICENSE" -o LICENSE.libpcap
+        curl -fsSL --retry 5 "$gh/Zeranoe/libredxx/$(tag libredxx CMakeLists.txt)/LICENSE" -o LICENSE.libredxx
+        curl -fsSL --retry 5 "$gh/pybind/pybind11/$(tag pybind11 bindings/python/CMakeLists.txt)/LICENSE" -o LICENSE.pybind11
+        cp third-party/fatfs/LICENSE.txt LICENSE.fatfs
+        cp include/icsneo/third-party/concurrentqueue/LICENSE.md LICENSE.concurrentqueue
+        cp include/icsneo/third-party/readerwriterqueue/LICENSE.md LICENSE.readerwriterqueue
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-environment-linux: "PCAP_ROOT=/project/libpcap/install SKBUILD_CMAKE_DEFINE=ICSPB_BOOTSTRAP_DIR=/project/icspb"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # ci/bootstrap-cibuildwheel.sh is this yum line plus Intrepid's internal CA, which only their private icspb mirror needs.
+      cibw-before-all: "yum install -y flex && sh ci/bootstrap-libpcap.sh"
+      cibw-test-command: "python -c \"import icsneopy; print(icsneopy.get_version()); assert icsneopy.get_supported_devices()\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ICSNEOPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout libicsneo ${{ env.ICSNEOPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: intrepidcs/libicsneo
-          ref: ${{ env.ICSNEOPY_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      # libpcap, protobuf, abseil, libredxx, pybind11 and the in-tree third-party code are compiled into the extension; upstream ships none of their notices.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          set -euo pipefail
-          tag() { sed -n "/GIT_REPOSITORY .*\/$1\.git/{n;s/.*GIT_TAG *//p}" "$2"; }
-          gh=https://raw.githubusercontent.com
-          icspb=$(sed -n '/FetchContent_Declare(icspb/,/)/s/.*GIT_TAG *//p' CMakeLists.txt)
-          protobuf=$(curl -fsSL --retry 5 "$gh/intrepidcs/icspb/$icspb/CMakeLists.txt" | sed -n 's/.*set(ICSPB_BOOTSTRAP_PROTOBUF_VERSION \([0-9.]*\)).*/\1/p')
-          abseil=$(curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/cmake/dependencies.cmake" | sed -n 's/^set(abseil-cpp-version "\(.*\)")$/\1/p')
-          libpcap=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' ci/bootstrap-libpcap.sh)
-          curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/LICENSE" -o LICENSE.protobuf
-          curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/third_party/utf8_range/LICENSE" -o LICENSE.utf8_range
-          curl -fsSL --retry 5 "$gh/abseil/abseil-cpp/$abseil/LICENSE" -o LICENSE.abseil-cpp
-          curl -fsSL --retry 5 "$gh/the-tcpdump-group/libpcap/libpcap-$libpcap/LICENSE" -o LICENSE.libpcap
-          curl -fsSL --retry 5 "$gh/Zeranoe/libredxx/$(tag libredxx CMakeLists.txt)/LICENSE" -o LICENSE.libredxx
-          curl -fsSL --retry 5 "$gh/pybind/pybind11/$(tag pybind11 bindings/python/CMakeLists.txt)/LICENSE" -o LICENSE.pybind11
-          cp third-party/fatfs/LICENSE.txt LICENSE.fatfs
-          cp include/icsneo/third-party/concurrentqueue/LICENSE.md LICENSE.concurrentqueue
-          cp include/icsneo/third-party/readerwriterqueue/LICENSE.md LICENSE.readerwriterqueue
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # ci/bootstrap-cibuildwheel.sh is this yum line plus Intrepid's internal CA, which only their private icspb mirror needs.
-          CIBW_BEFORE_ALL: yum install -y flex && sh ci/bootstrap-libpcap.sh
-          CIBW_ENVIRONMENT: PCAP_ROOT=/project/libpcap/install
-          SKBUILD_CMAKE_DEFINE: ICSPB_BOOTSTRAP_DIR=/project/icspb
-          CIBW_TEST_COMMAND: >-
-            python -c "import icsneopy; print(icsneopy.get_version());
-            assert icsneopy.get_supported_devices()"
+          name: icsneopy-${{ env.ICSNEOPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -119,16 +127,9 @@ jobs:
                               "LICENSE.readerwriterqueue", "LICENSE.utf8_range"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: icsneopy-${{ env.ICSNEOPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish icsneopy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

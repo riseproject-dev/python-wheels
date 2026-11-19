@@ -52,68 +52,70 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cf-units ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cf-units"
+      version: "${{ matrix.version }}"
+      repository: "SciTools/cf-units"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      checkout-fetch-depth: 0
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/cf-units/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # udunits2-devel is EPEL-only (gotcha 51: no EPEL on riscv64), so
+      # UDUNITS-2 is built from source instead, the same workaround
+      # build-pygame.yml uses for portmidi. The tag archive has no generated
+      # scanner.c/parser.c/.info, hence flex, bison and texinfo (CRB).
+      cibw-before-all-linux: |-
+        set -eux
+        dnf install -y expat-devel flex bison texinfo
+        curl -fsSL --retry 5 https://github.com/Unidata/UDUNITS-2/archive/refs/tags/v2.2.28.tar.gz -o udunits2.tar.gz
+        tar xzf udunits2.tar.gz
+        cmake -S UDUNITS-2-2.2.28 -B udunits2-build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
+        cmake --build udunits2-build -j"$(nproc)"
+        cmake --install udunits2-build
+        echo /usr/local/lib > /etc/ld.so.conf.d/udunits2.conf
+        ldconfig
+        cp UDUNITS-2-2.2.28/COPYRIGHT LICENSE.udunits2
+      cibw-environment-linux: "CF_UNITS_LIMITED_API=1 UDUNITS2_INCDIR=/usr/local/include UDUNITS2_LIBDIR=/usr/local/lib UDUNITS2_XML_PATH=/usr/local/share/udunits/udunits2.xml SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CF_UNITS=${{ matrix.version }} PIP_ONLY_BINARY=numpy"
+      cibw-test-requires: "pytest tomli"
+      cibw-test-command: "python -c \"import cf_units; print(f'cf-units v{cf_units.__version__}')\" && python -m pytest --pyargs cf_units"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CF_UNITS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cf-units v${{ env.CF_UNITS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: SciTools/cf-units
-          ref: v${{ env.CF_UNITS_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch cf-units source
-        run: git apply python-wheels/patches/cf-units/${{ env.CF_UNITS_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # udunits2-devel is EPEL-only (gotcha 51: no EPEL on riscv64), so
-          # UDUNITS-2 is built from source instead, the same workaround
-          # build-pygame.yml uses for portmidi. The tag archive has no generated
-          # scanner.c/parser.c/.info, hence flex, bison and texinfo (CRB).
-          CIBW_BEFORE_ALL_LINUX: |
-            set -eux
-            dnf install -y expat-devel flex bison texinfo
-            curl -fsSL --retry 5 https://github.com/Unidata/UDUNITS-2/archive/refs/tags/v${{ env.UDUNITS2_VERSION }}.tar.gz -o udunits2.tar.gz
-            tar xzf udunits2.tar.gz
-            cmake -S UDUNITS-2-${{ env.UDUNITS2_VERSION }} -B udunits2-build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
-            cmake --build udunits2-build -j"$(nproc)"
-            cmake --install udunits2-build
-            echo /usr/local/lib > /etc/ld.so.conf.d/udunits2.conf
-            ldconfig
-            cp UDUNITS-2-${{ env.UDUNITS2_VERSION }}/COPYRIGHT LICENSE.udunits2
-          CIBW_ENVIRONMENT_LINUX: >-
-            CF_UNITS_LIMITED_API=1
-            UDUNITS2_INCDIR=/usr/local/include
-            UDUNITS2_LIBDIR=/usr/local/lib
-            UDUNITS2_XML_PATH=/usr/local/share/udunits/udunits2.xml
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CF_UNITS=${{ env.CF_UNITS_VERSION }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: pytest tomli
-          CIBW_TEST_COMMAND: >-
-            python -c "import cf_units; print(f'cf-units v{cf_units.__version__}')" &&
-            python -m pytest --pyargs cf_units
+          name: cf-units-${{ env.CF_UNITS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the compiled extension and its licence
         run: |
@@ -127,15 +129,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cf-units-${{ env.CF_UNITS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cf-units ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

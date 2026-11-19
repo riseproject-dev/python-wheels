@@ -50,6 +50,47 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build quickjs-ng ${{ matrix.version }} cp310-abi3-${{ matrix.libc }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # abi3 (pyproject.toml: [tool.distutils.bdist_wheel] py_limited_api =
+        # "cp310"), so the single cp310 build (the abi3 floor, gotcha 96) is
+        # loadable on every newer CPython; pyproject.toml's [tool.cibuildwheel]
+        # skips cp*t-* so there is no free-threaded build.
+        libc: [manylinux, musllinux]
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "quickjs-ng"
+      version: "${{ matrix.version }}"
+      repository: "genotrance/quickjs-ng"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp310-abi3-${{ matrix.libc }}_riscv64"
+      checkout-submodules: "recursive"
+      pre-build: |-
+        export QUICKJS_NG_VERSION='${{ matrix.version }}'
+        sed -i "s/^version = \".*\"/version = \"${QUICKJS_NG_VERSION}\"/" pyproject.toml
+        grep -qx "version = \"${QUICKJS_NG_VERSION}\"" pyproject.toml
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp upstream-quickjs/LICENSE LICENSE.upstream-quickjs
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "cp310-${{ matrix.libc }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
@@ -61,45 +102,14 @@ jobs:
         # loadable on every newer CPython; pyproject.toml's [tool.cibuildwheel]
         # skips cp*t-* so there is no free-threaded build.
         libc: [manylinux, musllinux]
-
     env:
       QUICKJS_NG_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout quickjs-ng v${{ env.QUICKJS_NG_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: genotrance/quickjs-ng
-          ref: v${{ env.QUICKJS_NG_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      # The PyPI sdist omits upstream-quickjs/quickjs-c-atomics.h (setup.py's
-      # own get_c_sources() header list misses it), so quickjs.c fails to
-      # compile from that sdist on any platform without a prebuilt wheel;
-      # building from this checkout (submodule present on disk) sidesteps it.
-      #
-      # pyproject.toml carries a stale placeholder version; upstream's own
-      # build.yml stamps the real one from the tag the same way.
-      - name: Set version from tag
-        run: |
-          sed -i "s/^version = \".*\"/version = \"${QUICKJS_NG_VERSION}\"/" pyproject.toml
-          grep -qx "version = \"${QUICKJS_NG_VERSION}\"" pyproject.toml
-
-      # upstream-quickjs/LICENSE (the vendored engine, statically compiled in)
-      # isn't covered by setup.py's own license-file globbing, which only
-      # picks up the root LICENSE (the wrapper's).
-      - name: Stage the vendored engine's licence for the wheel
-        run: cp upstream-quickjs/LICENSE LICENSE.upstream-quickjs
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: cp310-${{ matrix.libc }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          name: quickjs-ng-${{ env.QUICKJS_NG_VERSION }}-cp310-abi3-${{ matrix.libc }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and licences made it into the wheel
         run: |
@@ -115,15 +125,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: quickjs-ng-${{ env.QUICKJS_NG_VERSION }}-cp310-abi3-${{ matrix.libc }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish quickjs-ng ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

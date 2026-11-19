@@ -46,51 +46,51 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cylp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cylp"
+      version: "${{ matrix.version }}"
+      repository: "coin-or/CyLP"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 480
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Passed rather than set through CIBW_ENVIRONMENT, which would replace pyproject.toml's.
+      # auditwheel vendors the coinbrew-built CoinUtils/Osi/Clp/Cgl/Cbc; ship their licences.
+      cibw-before-build-linux: |-
+        for p in CoinUtils Osi Clp Cgl Cbc; do
+        cp "$p/LICENSE" "LICENSE.$(echo "$p" | tr '[:upper:]' '[:lower:]')"
+        done
+      # Upstream sets test-requires but no test-command, so its own suite never runs there.
+      cibw-test-sources: "cylp/tests cylp/input"
+      cibw-test-requires: "pytest"
+      # Deselected tests fail identically with upstream's own x86_64 wheel: the Python pivot
+      # tests segfault, the rest use np.float and the removed CyCbcModel.branchAndBound.
+      cibw-test-command: "pytest cylp/tests -k \"not (TestCyClpSimplex and (Dantzig or LIFO or MostFrequent or test_PE)) and not TestQP and not (TestMIP and (NodeCompare or SetInt_CopyIn or isInt or (multiDim and not Cbc_solve))) and not scale_scale and not scale_unscale\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CYLP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout CyLP v${{ env.CYLP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: coin-or/CyLP
-          ref: v${{ env.CYLP_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-          # Passed rather than set through CIBW_ENVIRONMENT, which would replace pyproject.toml's.
-          CIBW_ENVIRONMENT_PASS_LINUX: PIP_EXTRA_INDEX_URL PIP_ONLY_BINARY
-          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
-          PIP_ONLY_BINARY: numpy,scipy
-          # auditwheel vendors the coinbrew-built CoinUtils/Osi/Clp/Cgl/Cbc; ship their licences.
-          CIBW_BEFORE_BUILD_LINUX: |
-            for p in CoinUtils Osi Clp Cgl Cbc; do
-              cp "$p/LICENSE" "LICENSE.$(echo "$p" | tr '[:upper:]' '[:lower:]')"
-            done
-          # Upstream sets test-requires but no test-command, so its own suite never runs there.
-          CIBW_TEST_SOURCES: cylp/tests cylp/input
-          CIBW_TEST_REQUIRES: pytest
-          # Deselected tests fail identically with upstream's own x86_64 wheel: the Python pivot
-          # tests segfault, the rest use np.float and the removed CyCbcModel.branchAndBound.
-          CIBW_TEST_COMMAND: >-
-            pytest cylp/tests
-            -k "not (TestCyClpSimplex and (Dantzig or LIFO or MostFrequent or test_PE))
-            and not TestQP
-            and not (TestMIP and (NodeCompare or SetInt_CopyIn or isInt or (multiDim and not Cbc_solve)))
-            and not scale_scale and not scale_unscale"
+          name: cylp-${{ env.CYLP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extensions, the COIN-OR libraries and their licences
         run: |
@@ -111,15 +111,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cylp-${{ env.CYLP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cylp ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

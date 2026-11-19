@@ -49,47 +49,51 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build arm-pyart ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "arm-pyart"
+      version: "${{ matrix.version }}"
+      repository: "ARM-DOE/pyart"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Repeats upstream's own PIP_ONLY_BINARY=:all: (pyproject.toml's
+      # [tool.cibuildwheel] table, which CIBW_ENVIRONMENT would otherwise drop)
+      # and adds our registry for numpy/cython (build) and cartopy/netcdf4/scipy/
+      # matplotlib/pandas/cftime (runtime/test) - PyPI ships none of these for
+      # riscv64. Everything else the test install needs (xarray, fsspec,
+      # mda-xdrlib, open-radar-data, pint, pooch, s3fs, xradar) is a pure-Python
+      # py3-none-any wheel on PyPI already.
+      cibw-environment-linux: "PIP_ONLY_BINARY=:all:"
+      # test_grid_xradar asserts a float32 gridded minimum at the default rtol=1e-7;
+      # riscv64 gives -1.320179 vs -1.3201784 (rel. diff 6.2e-7, a few float32 ULP),
+      # an arch float-rounding difference (gotcha 304). -k, not --deselect (gotcha 14).
+      cibw-test-command: "pytest --mpl {project}/tests -k \"not test_grid_xradar\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ARM_PYART_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyart v${{ env.ARM_PYART_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ARM-DOE/pyart
-          ref: v${{ env.ARM_PYART_VERSION }}
-          fetch-depth: 0  # setuptools_scm derives the version from the tag history
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Repeats upstream's own PIP_ONLY_BINARY=:all: (pyproject.toml's
-          # [tool.cibuildwheel] table, which CIBW_ENVIRONMENT would otherwise drop)
-          # and adds our registry for numpy/cython (build) and cartopy/netcdf4/scipy/
-          # matplotlib/pandas/cftime (runtime/test) - PyPI ships none of these for
-          # riscv64. Everything else the test install needs (xarray, fsspec,
-          # mda-xdrlib, open-radar-data, pint, pooch, s3fs, xradar) is a pure-Python
-          # py3-none-any wheel on PyPI already.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=:all:
-          # test_grid_xradar asserts a float32 gridded minimum at the default rtol=1e-7;
-          # riscv64 gives -1.320179 vs -1.3201784 (rel. diff 6.2e-7, a few float32 ULP),
-          # an arch float-rounding difference (gotcha 304). -k, not --deselect (gotcha 14).
-          CIBW_TEST_COMMAND: >-
-            pytest --mpl {project}/tests -k "not test_grid_xradar"
+          name: arm-pyart-${{ env.ARM_PYART_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -107,16 +111,9 @@ jobs:
           assert licences == {"LICENSE.txt"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: arm-pyart-${{ env.ARM_PYART_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish arm-pyart ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

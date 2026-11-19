@@ -49,32 +49,39 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build simsimd ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "simsimd"
+      version: "${{ matrix.version }}"
+      repository: "ashvardanian/SimSIMD"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Replaces upstream's `environment` table, which only sets SIMSIMD_IN_QEMU
+      # to skip half-precision and complex tests: we build on real hardware.
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       SIMSIMD_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout simsimd v${{ env.SIMSIMD_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ashvardanian/SimSIMD
-          ref: v${{ env.SIMSIMD_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces upstream's `environment` table, which only sets SIMSIMD_IN_QEMU
-          # to skip half-precision and complex tests: we build on real hardware.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          name: simsimd-${{ env.SIMSIMD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the compiled extension
         run: |
@@ -85,12 +92,6 @@ jobs:
               assert any(n.startswith("simsimd.cpython-") and n.endswith(".so") for n in names), names
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: simsimd-${{ env.SIMSIMD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -127,7 +128,7 @@ jobs:
 
   publish:
     name: Publish simsimd ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

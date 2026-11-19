@@ -52,48 +52,55 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build dynet38 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dynet38"
+      version: "${{ matrix.version }}"
+      repository: "taishi-i/dynet"
+      ref: "3c9f35de86e98a5809e9c81394194c8f6e0aa0dc"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/dynet38/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_USE_PEP517=1 PIP_ONLY_BINARY=numpy"
+      # setup.py links _dynet against build/<py>-64bit/dynet/libdynet.so but gives it an RPATH into the deleted build venv.
+      cibw-repair-wheel-command-linux: "LD_LIBRARY_PATH=\"$(echo {project}/build/py3*-64bit/dynet)\" auditwheel repair -w {dest_dir} {wheel}"
+      cibw-test-command: "cd {project}/tests/python && python test.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       DYNET38_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout dynet ${{ env.DYNET38_REF }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: taishi-i/dynet
-          ref: ${{ env.DYNET38_REF }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/dynet38/${{ env.DYNET38_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_USE_PEP517=1
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # setup.py links _dynet against build/<py>-64bit/dynet/libdynet.so but gives it an RPATH into the deleted build venv.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            LD_LIBRARY_PATH="$(echo {project}/build/py3*-64bit/dynet)"
-            auditwheel repair -w {dest_dir} {wheel}
-          CIBW_TEST_COMMAND: cd {project}/tests/python && python test.py
+          name: dynet38-${{ env.DYNET38_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -106,16 +113,9 @@ jobs:
           assert licences == {"LICENSE.txt", "LICENSE.eigen-mpl2"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dynet38-${{ env.DYNET38_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish dynet38 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

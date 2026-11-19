@@ -57,44 +57,45 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build dependency-injector ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dependency-injector"
+      version: "${{ matrix.version }}"
+      repository: "ets-labs/python-dependency-injector"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp310-abi3-manylinux_riscv64"
+      timeout-minutes: 90
+      # cp310 first, matching setup.py's py_limited_api="cp310" floor (gotcha 96):
+      # building the abi3 wheel on a newer interpreter can silently break older
+      # ones despite the tag. The later entries build nothing; they re-test it.
+      cibw-build: "cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      cibw-environment-linux: "DEPENDENCY_INJECTOR_LIMITED_API=1"
+      # cp310/cp311 lag our registry's newest numpy/scipy (gotcha 67/84): the
+      # newest PyPI release still supporting 3.10 has no riscv64 wheel here, so
+      # unconstrained pip tries to build it from source and fails on missing OpenBLAS.
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,scipy"
+      cibw-test-requires: "pytest pytest-asyncio httpx fastapi flask aiohttp numpy scipy boto3 mypy_boto3_s3 pydantic-settings werkzeug fast-depends \"cython>=3,<4\" setuptools"
+      cibw-test-extras: "yaml"
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-command: "python -m pytest tests/unit"
+
+  verify_wheels:
+    needs: [setup, build_abi3]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       DEPENDENCY_INJECTOR_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout dependency-injector ${{ env.DEPENDENCY_INJECTOR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ets-labs/python-dependency-injector
-          ref: ${{ env.DEPENDENCY_INJECTOR_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          # cp310 first, matching setup.py's py_limited_api="cp310" floor (gotcha 96):
-          # building the abi3 wheel on a newer interpreter can silently break older
-          # ones despite the tag. The later entries build nothing; they re-test it.
-          CIBW_BUILD: >-
-            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
-            cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            DEPENDENCY_INJECTOR_LIMITED_API=1
-          # cp310/cp311 lag our registry's newest numpy/scipy (gotcha 67/84): the
-          # newest PyPI release still supporting 3.10 has no riscv64 wheel here, so
-          # unconstrained pip tries to build it from source and fails on missing OpenBLAS.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy
-          CIBW_TEST_REQUIRES: ${{ env.TEST_REQUIRES }}
-          CIBW_TEST_EXTRAS: yaml
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: ${{ env.TEST_COMMAND }}
+          name: dependency-injector-${{ env.DEPENDENCY_INJECTOR_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the Cython extensions made it into the wheel
         run: |
@@ -117,15 +118,6 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dependency-injector-${{ env.DEPENDENCY_INJECTOR_VERSION }}-cp310-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
-  # Free-threaded builds get no abi3 wheel: setup.py drops py_limited_api under
-  # Py_GIL_DISABLED, same shape as build-pycryptodomex.yml. Upstream itself skips
-  # cp3??t-* in CIBW_SKIP, so this has no upstream wheel to mirror.
   build_freethreaded:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
@@ -134,45 +126,24 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build dependency-injector ${{ matrix.version }} cp314t-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
-
-    env:
-      DEPENDENCY_INJECTOR_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout dependency-injector ${{ env.DEPENDENCY_INJECTOR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ets-labs/python-dependency-injector
-          ref: ${{ env.DEPENDENCY_INJECTOR_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: cp314t-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            DEPENDENCY_INJECTOR_LIMITED_API=1
-          CIBW_TEST_REQUIRES: ${{ env.TEST_REQUIRES }}
-          CIBW_TEST_EXTRAS: yaml
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: ${{ env.TEST_COMMAND }}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dependency-injector-${{ env.DEPENDENCY_INJECTOR_VERSION }}-cp314t-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dependency-injector"
+      version: "${{ matrix.version }}"
+      repository: "ets-labs/python-dependency-injector"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp314t-manylinux_riscv64"
+      timeout-minutes: 90
+      cibw-build: "cp314t-manylinux_riscv64"
+      cibw-environment-linux: "DEPENDENCY_INJECTOR_LIMITED_API=1"
+      cibw-test-requires: "pytest pytest-asyncio httpx fastapi flask aiohttp numpy scipy boto3 mypy_boto3_s3 pydantic-settings werkzeug fast-depends \"cython>=3,<4\" setuptools"
+      cibw-test-extras: "yaml"
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-command: "python -m pytest tests/unit"
 
   publish:
     name: Publish dependency-injector ${{ matrix.version }}
-    needs: [setup, build_abi3, build_freethreaded]
+    needs: [setup, build_abi3, build_freethreaded, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -51,7 +51,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build marisa-trie ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
@@ -67,33 +66,49 @@ jobs:
           - python: "cp314t"
             parallel_test: " && python -m pytest tests --parallel-threads 4"
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "marisa-trie"
+      version: "${{ matrix.version }}"
+      repository: "pytries/marisa-trie"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      checkout-submodules: "true"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # hypothesis has no riscv64 wheel on public PyPI
+      # nh3 (readme_renderer) has no free-threaded riscv64 wheel; keep pip off
+      # its Rust sdist so it falls back to the bleach-based readme_renderer
+      cibw-test-environment: "PIP_ONLY_BINARY=nh3"
+      cibw-test-extras: "test"
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-command: "python -m pytest tests${{ matrix.parallel_test }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+        include:
+          # Upstream runs the suite a second time under pytest-run-parallel on
+          # free-threaded interpreters.
+          - python: "cp314t"
+            parallel_test: " && python -m pytest tests --parallel-threads 4"
     env:
       MARISA_TRIE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout marisa-trie ${{ env.MARISA_TRIE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pytries/marisa-trie
-          ref: ${{ env.MARISA_TRIE_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # hypothesis has no riscv64 wheel on public PyPI
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # nh3 (readme_renderer) has no free-threaded riscv64 wheel; keep pip off
-          # its Rust sdist so it falls back to the bleach-based readme_renderer
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=nh3
-          CIBW_TEST_EXTRAS: test
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: python -m pytest tests${{ matrix.parallel_test }}
+          name: marisa-trie-${{ env.MARISA_TRIE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the C extension made it into the wheel
         run: |
@@ -105,15 +120,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: marisa-trie-${{ env.MARISA_TRIE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish marisa-trie ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

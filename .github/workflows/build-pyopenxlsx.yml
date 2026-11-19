@@ -48,58 +48,63 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyopenxlsx ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyopenxlsx"
+      version: "${{ matrix.version }}"
+      repository: "twn39/pyopenxlsx"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "recursive"
+      pre-build: |-
+        set -euo pipefail
+        tp=third_party/OpenXLSX/third_party
+        cp third_party/OpenXLSX/LICENSE.md LICENSE.OpenXLSX
+        cp third_party/nanobind/LICENSE LICENSE.nanobind
+        cp third_party/nanobind/ext/robin_map/LICENSE LICENSE.robin-map
+        cp "$tp/GSL/LICENSE" LICENSE.GSL
+        cp "$tp/fast_float/LICENSE-MIT" LICENSE.fast-float
+        cp "$tp/fmt/LICENSE" LICENSE.fmt
+        cp "$tp/libzip/LICENSE" LICENSE.libzip
+        cp "$tp/mbedtls/LICENSE" LICENSE.mbedtls
+        cp "$tp/pugixml/LICENSE.md" LICENSE.pugixml
+        cp "$tp/unordered_dense/LICENSE" LICENSE.unordered-dense
+        cp "$tp/zlib/LICENSE.md" LICENSE.zlib-ng
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # build[uv] needs a host uv for the audit step, which the riscv64 runner lacks (gotcha 13).
+      cibw-build-frontend: "build"
+      # Upstream's test-extras pull numpy and pillow; without PIP_ONLY_BINARY pip takes
+      # PyPI's newer sdists over our wheels and Pillow's fails on missing jpeg (gotchas 30/67).
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,pillow SKBUILD_WHEEL_LICENSE_FILES=\"LICENSE;LICENSE.*\""
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYOPENXLSX_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout twn39/pyopenxlsx v${{ env.PYOPENXLSX_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: twn39/pyopenxlsx
-          ref: v${{ env.PYOPENXLSX_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      # The extension statically links OpenXLSX and its vendored libraries, whose
-      # notices upstream's default licence glob (root LICENSE only) leaves out.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          set -euo pipefail
-          tp=third_party/OpenXLSX/third_party
-          cp third_party/OpenXLSX/LICENSE.md LICENSE.OpenXLSX
-          cp third_party/nanobind/LICENSE LICENSE.nanobind
-          cp third_party/nanobind/ext/robin_map/LICENSE LICENSE.robin-map
-          cp "$tp/GSL/LICENSE" LICENSE.GSL
-          cp "$tp/fast_float/LICENSE-MIT" LICENSE.fast-float
-          cp "$tp/fmt/LICENSE" LICENSE.fmt
-          cp "$tp/libzip/LICENSE" LICENSE.libzip
-          cp "$tp/mbedtls/LICENSE" LICENSE.mbedtls
-          cp "$tp/pugixml/LICENSE.md" LICENSE.pugixml
-          cp "$tp/unordered_dense/LICENSE" LICENSE.unordered-dense
-          cp "$tp/zlib/LICENSE.md" LICENSE.zlib-ng
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # build[uv] needs a host uv for the audit step, which the riscv64 runner lacks (gotcha 13).
-          CIBW_BUILD_FRONTEND: build
-          # Upstream's test-extras pull numpy and pillow; without PIP_ONLY_BINARY pip takes
-          # PyPI's newer sdists over our wheels and Pillow's fails on missing jpeg (gotchas 30/67).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,pillow
-            SKBUILD_WHEEL_LICENSE_FILES="LICENSE;LICENSE.*"
+          name: pyopenxlsx-${{ env.PYOPENXLSX_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -118,15 +123,9 @@ jobs:
                               "LICENSE.zlib-ng"}, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyopenxlsx-${{ env.PYOPENXLSX_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyopenxlsx ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

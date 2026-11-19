@@ -57,58 +57,71 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build piper-tts ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "piper-tts"
+      version: "${{ matrix.version }}"
+      repository: "OHF-voice/piper1-gpl"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp39-abi3-manylinux_riscv64"
+      timeout-minutes: 240
+      pre-build: |-
+        export ESPEAK_NG_REF=724808c5a83f9ef95fdd0db886ba7ba537ff224a
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v python-wheels/patches/piper-tts/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        set -euo pipefail
+        base="https://raw.githubusercontent.com/espeak-ng/espeak-ng/${ESPEAK_NG_REF}"
+        curl -fsSL --retry 5 "$base/COPYING" -o COPYING.espeak-ng
+        curl -fsSL --retry 5 "$base/COPYING.APACHE" -o COPYING.espeak-ng.APACHE
+        curl -fsSL --retry 5 "$base/COPYING.BSD2" -o COPYING.espeak-ng.BSD2
+        curl -fsSL --retry 5 "$base/COPYING.UCD" -o COPYING.espeak-ng.UCD
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # Upstream builds cp39-* only, and the wheel is cp39-abi3 (setup.cfg's
+      # py_limited_api); cp312-cp314 reuse that wheel and only re-run the tests,
+      # which need onnxruntime - our riscv64 onnxruntime wheels start at cp312.
+      # No cp314t: py_limited_api rules out a free-threaded build, and upstream
+      # publishes no free-threaded wheel either.
+      cibw-build: "cp39-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      cibw-test-skip: "cp39-manylinux_riscv64"
+      # Upstream runs `pytest {project}/tests`; staging the suite and its ini
+      # keeps that working now that cibuildwheel takes test-sources instead.
+      cibw-test-sources: "tests pytest.ini"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -m pytest -vv tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PIPER_TTS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout piper1-gpl v${{ env.PIPER_TTS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: OHF-voice/piper1-gpl
-          ref: v${{ env.PIPER_TTS_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply -v python-wheels/patches/piper-tts/${{ env.PIPER_TTS_VERSION }}/*.patch
-
-      # The patch above widens setup.py's license_files to licenses/*, so these
-      # reach dist-info/licenses/ with the licences upstream already ships there.
-      - name: Stage the eSpeak NG licences
-        working-directory: licenses
-        run: |
-          set -euo pipefail
-          base="https://raw.githubusercontent.com/espeak-ng/espeak-ng/${ESPEAK_NG_REF}"
-          curl -fsSL --retry 5 "$base/COPYING" -o COPYING.espeak-ng
-          curl -fsSL --retry 5 "$base/COPYING.APACHE" -o COPYING.espeak-ng.APACHE
-          curl -fsSL --retry 5 "$base/COPYING.BSD2" -o COPYING.espeak-ng.BSD2
-          curl -fsSL --retry 5 "$base/COPYING.UCD" -o COPYING.espeak-ng.UCD
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          # Upstream builds cp39-* only, and the wheel is cp39-abi3 (setup.cfg's
-          # py_limited_api); cp312-cp314 reuse that wheel and only re-run the tests,
-          # which need onnxruntime - our riscv64 onnxruntime wheels start at cp312.
-          # No cp314t: py_limited_api rules out a free-threaded build, and upstream
-          # publishes no free-threaded wheel either.
-          CIBW_BUILD: cp39-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_TEST_SKIP: cp39-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream runs `pytest {project}/tests`; staging the suite and its ini
-          # keeps that working now that cibuildwheel takes test-sources instead.
-          CIBW_TEST_SOURCES: tests pytest.ini
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: python -m pytest -vv tests
+          name: piper-tts-${{ env.PIPER_TTS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension, the eSpeak NG data and the licences made it into the wheel
         run: |
@@ -129,12 +142,6 @@ jobs:
               assert licenses == expected, f"{whl}: {sorted(licenses)}"
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: piper-tts-${{ env.PIPER_TTS_VERSION }}-cp39-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -178,7 +185,7 @@ jobs:
 
   publish:
     name: Publish piper-tts ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

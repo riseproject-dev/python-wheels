@@ -48,52 +48,55 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build anastruct ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "anastruct"
+      version: "${{ matrix.version }}"
+      repository: "ritchie46/anaStruct"
+      ref: "release-v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy (build-time + runtime) and scipy (runtime; scipy>=1.10.0 is a hard
+      # dependency) both need OpenBLAS/gfortran to build from sdist, which the
+      # manylinux_riscv64 image doesn't carry, so both are pinned to binary --
+      # only our registry has them for riscv64. matplotlib (test-only) is pinned
+      # for the same reason: no public-PyPI riscv64 wheel, and it is slow to
+      # build from source. pillow (a matplotlib runtime dep, also test-only) is
+      # pinned too: unpinned, pip resolves PyPI's newest pillow -- which has no
+      # riscv64 wheel anywhere -- ahead of our registry's, and its sdist build
+      # fails outright (RequiredDependencyException: jpeg; the manylinux image
+      # carries no libjpeg headers). Cython (the other build-time requirement) is
+      # left unrestricted: our registry only carries riscv64 Cython wheels for
+      # cp312+, and letting pip fall back to Cython's own (portable,
+      # non-arch-specific) sdist for cp310/cp311 builds cleanly, as it already
+      # does for crick.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,matplotlib,pillow MPLBACKEND=Agg"
+      cibw-test-sources: "tests examples"
+      cibw-test-requires: "pytest pytest-describe matplotlib numpy"
+      cibw-test-command: "python -m pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ANASTRUCT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout anaStruct release-v${{ env.ANASTRUCT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ritchie46/anaStruct
-          ref: release-v${{ env.ANASTRUCT_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy (build-time + runtime) and scipy (runtime; scipy>=1.10.0 is a hard
-          # dependency) both need OpenBLAS/gfortran to build from sdist, which the
-          # manylinux_riscv64 image doesn't carry, so both are pinned to binary --
-          # only our registry has them for riscv64. matplotlib (test-only) is pinned
-          # for the same reason: no public-PyPI riscv64 wheel, and it is slow to
-          # build from source. pillow (a matplotlib runtime dep, also test-only) is
-          # pinned too: unpinned, pip resolves PyPI's newest pillow -- which has no
-          # riscv64 wheel anywhere -- ahead of our registry's, and its sdist build
-          # fails outright (RequiredDependencyException: jpeg; the manylinux image
-          # carries no libjpeg headers). Cython (the other build-time requirement) is
-          # left unrestricted: our registry only carries riscv64 Cython wheels for
-          # cp312+, and letting pip fall back to Cython's own (portable,
-          # non-arch-specific) sdist for cp310/cp311 builds cleanly, as it already
-          # does for crick.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,matplotlib,pillow
-            MPLBACKEND=Agg
-          CIBW_TEST_SOURCES: tests examples
-          CIBW_TEST_REQUIRES: pytest pytest-describe matplotlib numpy
-          CIBW_TEST_COMMAND: python -m pytest tests
+          name: anastruct-${{ env.ANASTRUCT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -106,16 +109,9 @@ jobs:
           assert licences == {"LICENSE.txt"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: anastruct-${{ env.ANASTRUCT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish anastruct ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

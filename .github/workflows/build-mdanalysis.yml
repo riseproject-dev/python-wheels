@@ -51,55 +51,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mdanalysis ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "mdanalysis"
+      version: "${{ matrix.version }}"
+      repository: "MDAnalysis/mdanalysis"
+      ref: "release-${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 300
+      checkout-fetch-depth: 0
+      pre-build: |-
+        export MDANALYSIS_VERSION='${{ matrix.version }}'
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        patches="$PWD/python-wheels/patches/mdanalysis/${MDANALYSIS_VERSION}"
+        if [ -d "$patches" ]; then
+          git apply -v "$patches"/*.patch
+        fi
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "package"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,fonttools,msgpack,hypothesis"
+      # Upstream's wheel job runs no tests; run the suite of its sdist install check
+      # against the wheel, with MDAnalysisTests installed from the same checkout.
+      cibw-before-test: "pip install --no-deps {project}/testsuite"
+      cibw-test-requires: "pytest hypothesis pytest-xdist pytest-timeout"
+      cibw-test-command: "python -m pytest --timeout=200 -n logical --pyargs MDAnalysisTests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MDANALYSIS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout mdanalysis ${{ env.MDANALYSIS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: MDAnalysis/mdanalysis
-          ref: release-${{ env.MDANALYSIS_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # Only some versions need patching, so a missing directory is not an error.
-      - name: Apply patches
-        run: |
-          patches="$PWD/python-wheels/patches/mdanalysis/${MDANALYSIS_VERSION}"
-          if [ -d "$patches" ]; then
-            git apply -v "$patches"/*.patch
-          fi
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: package
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,fonttools,msgpack,hypothesis
-          # Upstream's wheel job runs no tests; run the suite of its sdist install check
-          # against the wheel, with MDAnalysisTests installed from the same checkout.
-          CIBW_BEFORE_TEST: pip install --no-deps {project}/testsuite
-          CIBW_TEST_REQUIRES: pytest hypothesis pytest-xdist pytest-timeout
-          CIBW_TEST_COMMAND: python -m pytest --timeout=200 -n logical --pyargs MDAnalysisTests
+          name: mdanalysis-${{ env.MDANALYSIS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the licences and the compiled extensions
         run: |
@@ -119,13 +128,6 @@ jobs:
           # -fopenmp makes auditwheel vendor the image's libgomp, hence the gpl_sources job.
           assert any(n.startswith("mdanalysis.libs/libgomp") for n in names), [n for n in names if ".libs/" in n]
           EOF
-
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mdanalysis-${{ env.MDANALYSIS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -160,7 +162,7 @@ jobs:
 
   publish:
     name: Publish mdanalysis ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

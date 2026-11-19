@@ -48,60 +48,65 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build icu4py ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "icu4py"
+      version: "${{ matrix.version }}"
+      repository: "adamchainz/icu4py"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      pre-build: |-
+        tag=$(sed -n 's|^BASE_URL = "https://github.com/adamchainz/icu4c-builds/releases/download/\(.*\)"$|\1|p' download_icu.py)
+        test -n "$tag"
+        echo "ICU4C_BUILDS_TAG=$tag" >> "$GITHUB_ENV"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        rm -rf "icu4c-builds"
+        git init -q "icu4c-builds"
+        git -C "icu4c-builds" remote add origin "${GITHUB_SERVER_URL}/adamchainz/icu4c-builds.git"
+        git -C "icu4c-builds" fetch -q --no-tags --depth=1 origin "$ICU4C_BUILDS_TAG"
+        git -C "icu4c-builds" checkout -q --detach FETCH_HEAD
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # CIBW_BEFORE_ALL runs once per container before cibuildwheel puts any
+      # interpreter-specific bin dir on PATH, so plain `python` resolves to this
+      # image's default bootstrap interpreter -- cp39 here, regardless of which
+      # interpreter the job is actually building for. build.py's own
+      # `from typing import assert_never` needs 3.11+, so it ImportErrors
+      # identically on every leg. Pin to a floor interpreter new enough instead.
+      cibw-before-all-linux: "cd {project}/icu4c-builds && /opt/python/cp312-cp312/bin/python build.py --platform linux --in-docker && mkdir -p /tmp/icu && cp -a build/install /tmp/icu/icu && cp /tmp/icu/icu/LICENSE {project}/LICENSE-ICU"
+      cibw-test-requires: "pytest pytest-randomly"
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-environment: "PYTHONDEVMODE=1"
+      cibw-test-command: "python -W error -m pytest tests"
+
+  verify_wheels:
+    needs: [setup, build]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ICU4PY_VERSION: ${{ matrix.version }}
-
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: adamchainz/icu4py
-          ref: ${{ env.ICU4PY_VERSION }}
-          persist-credentials: false
-
-      # icu4c-builds publishes no riscv64 ICU for download_icu.py; build its pinned release with its own build.py.
-      - name: Resolve the icu4c-builds release download_icu.py pins
-        run: |
-          tag=$(sed -n 's|^BASE_URL = "https://github.com/adamchainz/icu4c-builds/releases/download/\(.*\)"$|\1|p' download_icu.py)
-          test -n "$tag"
-          echo "ICU4C_BUILDS_TAG=$tag" >> "$GITHUB_ENV"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: adamchainz/icu4c-builds
-          ref: ${{ env.ICU4C_BUILDS_TAG }}
-          path: icu4c-builds
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # CIBW_BEFORE_ALL runs once per container before cibuildwheel puts any
-          # interpreter-specific bin dir on PATH, so plain `python` resolves to this
-          # image's default bootstrap interpreter -- cp39 here, regardless of which
-          # interpreter the job is actually building for. build.py's own
-          # `from typing import assert_never` needs 3.11+, so it ImportErrors
-          # identically on every leg. Pin to a floor interpreter new enough instead.
-          CIBW_BEFORE_ALL_LINUX: >-
-            cd {project}/icu4c-builds &&
-            /opt/python/cp312-cp312/bin/python build.py --platform linux --in-docker &&
-            mkdir -p /tmp/icu &&
-            cp -a build/install /tmp/icu/icu &&
-            cp /tmp/icu/icu/LICENSE {project}/LICENSE-ICU
-          CIBW_TEST_REQUIRES: pytest pytest-randomly
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_ENVIRONMENT: PYTHONDEVMODE=1
-          CIBW_TEST_COMMAND: python -W error -m pytest tests
+          name: icu4py-${{ env.ICU4PY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel bundles ICU and its licence
         run: |
@@ -116,15 +121,9 @@ jobs:
               print(whl, "OK")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: icu4py-${{ env.ICU4PY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish icu4py ${{ matrix.version }}
-    needs: [setup, build]
+    needs: [setup, build, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

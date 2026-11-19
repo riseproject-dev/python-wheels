@@ -54,64 +54,65 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build burner-redis ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "burner-redis"
+      version: "${{ matrix.version }}"
+      repository: "prefectlabs/burner-redis"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp310-abi3-manylinux_riscv64"
+      timeout-minutes: 240
+      pre-build: |-
+        cp THIRDPARTY.yml NOTICE.THIRDPARTY.yml
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # Cargo.toml pins pyo3 to `abi3-py310`, so maturin tags every build
+      # `cp310-abi3` whatever interpreter runs it. Selecting the five
+      # interpreters therefore compiles the Rust ONCE (on cp310, the oldest the
+      # tag claims) and then find_compatible_wheel reuses that wheel for
+      # cp311-cp314 while still running the test phase on each. cp314t is
+      # excluded: pyo3's abi3 mode cannot target free-threaded CPython, which is
+      # also why upstream publishes no cp3??t wheel.
+      cibw-build: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+      # Upstream also ships musllinux wheels, but rustup.rs publishes no
+      # riscv64gc-unknown-linux-musl *host* toolchain (only rust-std, a cross
+      # target), so the musl container has no cargo to build with.
+      cibw-skip: "*-musllinux_*"
+      # burner-redis ships no [tool.cibuildwheel], so the Rust toolchain its
+      # maturin backend needs is installed in-container here. The crate is
+      # edition 2024 with no nightly features, so stable satisfies it.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Upstream's `.[dev]` extra, minus maturin (cibuildwheel drives the build).
+      cibw-test-requires: "pytest pytest-asyncio redis"
+      # pyproject.toml carries [tool.pytest.ini_options] (asyncio_mode = auto,
+      # the `integration` marker and the `-m 'not integration'` default) that the
+      # suite cannot run without. Staging only these two paths leaves the
+      # importable `python/burner_redis` out of the test cwd, so `import
+      # burner_redis` can only resolve to the installed wheel.
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-command: "python -m pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       BURNER_REDIS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout burner-redis v${{ env.BURNER_REDIS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: prefectlabs/burner-redis
-          ref: v${{ env.BURNER_REDIS_VERSION }}
-          persist-credentials: false
-
-      # The wheel statically links vendored Lua 5.4 and 60+ MIT/Apache-2.0 crates
-      # whose notices upstream only ships in the sdist. maturin's default
-      # licence-file globs (LICEN[CS]E*, COPYING*, NOTICE*, AUTHORS*) are rooted at
-      # the pyproject directory, so copying the inventory to a NOTICE* name is
-      # enough to land it in dist-info/licenses/ with no packaging change.
-      - name: Ship the third-party licence inventory in the wheel
-        run: cp THIRDPARTY.yml NOTICE.THIRDPARTY.yml
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ARCHS: riscv64
-          # Cargo.toml pins pyo3 to `abi3-py310`, so maturin tags every build
-          # `cp310-abi3` whatever interpreter runs it. Selecting the five
-          # interpreters therefore compiles the Rust ONCE (on cp310, the oldest the
-          # tag claims) and then find_compatible_wheel reuses that wheel for
-          # cp311-cp314 while still running the test phase on each. cp314t is
-          # excluded: pyo3's abi3 mode cannot target free-threaded CPython, which is
-          # also why upstream publishes no cp3??t wheel.
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
-          # Upstream also ships musllinux wheels, but rustup.rs publishes no
-          # riscv64gc-unknown-linux-musl *host* toolchain (only rust-std, a cross
-          # target), so the musl container has no cargo to build with.
-          CIBW_SKIP: "*-musllinux_*"
-          # burner-redis ships no [tool.cibuildwheel], so the Rust toolchain its
-          # maturin backend needs is installed in-container here. The crate is
-          # edition 2024 with no nightly features, so stable satisfies it.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's `.[dev]` extra, minus maturin (cibuildwheel drives the build).
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio redis
-          # pyproject.toml carries [tool.pytest.ini_options] (asyncio_mode = auto,
-          # the `integration` marker and the `-m 'not integration'` default) that the
-          # suite cannot run without. Staging only these two paths leaves the
-          # importable `python/burner_redis` out of the test cwd, so `import
-          # burner_redis` can only resolve to the installed wheel.
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: python -m pytest tests
+          name: burner-redis-${{ env.BURNER_REDIS_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension module and licences made it into the wheel
         run: |
@@ -128,15 +129,9 @@ jobs:
           print('OK:', sys.argv[1], sos, lic)
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: burner-redis-${{ env.BURNER_REDIS_VERSION }}-cp310-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish burner-redis ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

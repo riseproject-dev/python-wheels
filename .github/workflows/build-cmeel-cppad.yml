@@ -48,43 +48,48 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cmeel-cppad ${{ matrix.version }} py3-none-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cmeel-cppad"
+      version: "${{ matrix.version }}"
+      repository: "cmake-wheel/cmeel-cppad"
+      ref: "v${{ matrix.version }}.c0"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "true"
+      cibw-build: "cp312-manylinux_riscv64"
+      # CppAD's own CMakeLists.txt declares cmake_minimum_required(VERSION
+      # 3.5), exactly at the floor CMake >= 4 still accepts, and carries no
+      # -march=native/-mavx/-msse or other x86-specific flags anywhere in
+      # its CMake tree (confirmed against the real coin-or/CppAD source at
+      # the pinned submodule commit) - unlike cmeel-gklib, no workaround
+      # needed here.
+      cibw-environment-linux: "CMEEL_LOG_LEVEL=DEBUG"
+      # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+      cibw-repair-wheel-command: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       CMEEL_CPPAD_VERSION: ${{ matrix.version }}
-
     steps:
-      # has-sitelib = false: the wheel holds no Python extension, so one
-      # py3-none wheel covers every interpreter.
-      - name: Checkout cmeel-cppad v${{ env.CMEEL_CPPAD_VERSION }}.c0
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cmake-wheel/cmeel-cppad
-          ref: v${{ env.CMEEL_CPPAD_VERSION }}.c0
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # CppAD's own CMakeLists.txt declares cmake_minimum_required(VERSION
-          # 3.5), exactly at the floor CMake >= 4 still accepts, and carries no
-          # -march=native/-mavx/-msse or other x86-specific flags anywhere in
-          # its CMake tree (confirmed against the real coin-or/CppAD source at
-          # the pinned submodule commit) - unlike cmeel-gklib, no workaround
-          # needed here.
-          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG
-          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
+          name: cmeel-cppad-${{ env.CMEEL_CPPAD_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -115,15 +120,9 @@ jobs:
           print(lib)
           "
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cmeel-cppad-${{ env.CMEEL_CPPAD_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cmeel-cppad ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -54,7 +54,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build python-stretch ${{ matrix.version }} cp312-abi3-${{ matrix.libc }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
@@ -76,41 +75,69 @@ jobs:
               assert (s.blockSamples(), s.intervalSamples(), s.inputLatency()) == (5292, 1323, 2646), (s.blockSamples(), s.intervalSamples(), s.inputLatency());
               print('python_stretch OK')"
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "python-stretch"
+      version: "${{ matrix.version }}"
+      repository: "gregogiudici/python-stretch"
+      ref: "ac1fbfc9f5d6b912e2a9248d8e0f53888846588b"
+      artifact-tag: "cp312-abi3-${{ matrix.libc }}_riscv64"
+      checkout-submodules: "true"
+      pre-build: |-
+        export PYTHON_STRETCH_VERSION='${{ matrix.version }}'
+        grep -qx "version = \"${PYTHON_STRETCH_VERSION}\"" pyproject.toml
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp include/stretch/LICENSE.txt LICENSE.signalsmith-stretch.txt
+        cp include/stretch/dsp/LICENSE.txt LICENSE.signalsmith-dsp.txt
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-before-build: "python -m pip install nanobind && python -c \"import importlib.metadata as m, shutil; shutil.copy(next(f.locate() for f in m.files('nanobind') if f.name == 'LICENSE'), '{project}/LICENSE.nanobind')\""
+      cibw-build: "cp312-${{ matrix.libc }}_riscv64 cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-test-requires: "${{ matrix.test_requires }}"
+      cibw-test-command: "${{ matrix.test_command }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+        include:
+          - libc: manylinux
+            test_requires: pytest numpy
+            test_command: pytest {project}/tests
+          # No musllinux riscv64 numpy wheel exists, and every process() call takes one.
+          - libc: musllinux
+            test_requires: ''
+            test_command: >-
+              python -c "import python_stretch as ps;
+              s = ps.Signalsmith.Stretch();
+              s.preset(2, 44100.0);
+              s.setTimeFactor(0.5);
+              s.setTransposeSemitones(12);
+              assert (s.blockSamples(), s.intervalSamples(), s.inputLatency()) == (5292, 1323, 2646), (s.blockSamples(), s.intervalSamples(), s.inputLatency());
+              print('python_stretch OK')"
     env:
       PYTHON_STRETCH_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout python-stretch ${{ env.PYTHON_STRETCH_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: gregogiudici/python-stretch
-          ref: ${{ env.PYTHON_STRETCH_REF }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Check version
-        run: grep -qx "version = \"${PYTHON_STRETCH_VERSION}\"" pyproject.toml
-
-      - name: Stage bundled licences
-        run: |
-          cp include/stretch/LICENSE.txt LICENSE.signalsmith-stretch.txt
-          cp include/stretch/dsp/LICENSE.txt LICENSE.signalsmith-dsp.txt
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_BEFORE_BUILD: >-
-            python -m pip install nanobind &&
-            python -c "import importlib.metadata as m, shutil; shutil.copy(next(f.locate() for f in m.files('nanobind') if f.name == 'LICENSE'), '{project}/LICENSE.nanobind')"
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: >-
-            cp312-${{ matrix.libc }}_riscv64
-            cp313-${{ matrix.libc }}_riscv64
-            cp314-${{ matrix.libc }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: ${{ matrix.test_requires }}
-          CIBW_TEST_COMMAND: ${{ matrix.test_command }}
+          name: python-stretch-${{ env.PYTHON_STRETCH_VERSION }}-cp312-abi3-${{ matrix.libc }}_riscv64
+          path: wheelhouse
 
       - name: Check the bundled licences made it into the wheel
         run: |
@@ -125,15 +152,9 @@ jobs:
               print(whl, sorted(found))
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: python-stretch-${{ env.PYTHON_STRETCH_VERSION }}-cp312-abi3-${{ matrix.libc }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish python-stretch ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -51,59 +51,61 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build libtorrent ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "libtorrent"
+      version: "${{ matrix.version }}"
+      repository: "arvidn/libtorrent"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      checkout-submodules: "recursive"
+      pre-build: |-
+        . tools/cibuildwheel/manylinux/openssl-version.sh
+        cp LICENSE bindings/python/
+        cp deps/try_signal/LICENSE bindings/python/LICENSE.try_signal
+        cp deps/libdatachannel/LICENSE bindings/python/LICENSE.libdatachannel
+        cp deps/libdatachannel/deps/libjuice/LICENSE bindings/python/LICENSE.libjuice
+        cp deps/libdatachannel/deps/usrsctp/LICENSE.md bindings/python/LICENSE.usrsctp
+        cp deps/libdatachannel/deps/plog/LICENSE bindings/python/LICENSE.plog
+        curl -fsSL -o bindings/python/LICENSE.openssl \
+          "https://raw.githubusercontent.com/openssl/openssl/${OPENSSL_ROOT}/LICENSE.txt"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # The image's OpenSSL 3.5 makes setup_openssl.sh skip its static build, and
+      # Rocky 10 ships no libssl.a, so build upstream's pinned OpenSSL here instead.
+      cibw-before-build-linux: "${{ matrix.platform == 'manylinux' && 'yum install -y perl-core && . {project}/tools/cibuildwheel/manylinux/openssl-version.sh && curl -fsSL -o /tmp/openssl.tar.gz \"$OPENSSL_DOWNLOAD_URL/$OPENSSL_ROOT.tar.gz\" && echo \"$OPENSSL_HASH /tmp/openssl.tar.gz\" | sha256sum -c && tar -xzf /tmp/openssl.tar.gz -C /tmp && cd /tmp/$OPENSSL_ROOT && ./Configure no-shared --prefix=/usr/local --libdir=lib && make -j\"$(nproc)\" build_sw && make install_sw' || '' }}"
+      # setup_ccache_on_manylinux.sh skips riscv64, so upstream's `ccache -s` has no ccache.
+      cibw-before-test-linux: "${{ matrix.platform == 'musllinux' && 'ccache -s' || '' }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       LIBTORRENT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout libtorrent v${{ env.LIBTORRENT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: arvidn/libtorrent
-          ref: v${{ env.LIBTORRENT_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Stage licences beside bindings/python/setup.py
-        # setup.py builds from bindings/python, so setuptools' default licence glob
-        # never sees the root LICENSE; upstream's wheel ships no licence at all.
-        run: |
-          . tools/cibuildwheel/manylinux/openssl-version.sh
-          cp LICENSE bindings/python/
-          cp deps/try_signal/LICENSE bindings/python/LICENSE.try_signal
-          cp deps/libdatachannel/LICENSE bindings/python/LICENSE.libdatachannel
-          cp deps/libdatachannel/deps/libjuice/LICENSE bindings/python/LICENSE.libjuice
-          cp deps/libdatachannel/deps/usrsctp/LICENSE.md bindings/python/LICENSE.usrsctp
-          cp deps/libdatachannel/deps/plog/LICENSE bindings/python/LICENSE.plog
-          curl -fsSL -o bindings/python/LICENSE.openssl \
-            "https://raw.githubusercontent.com/openssl/openssl/${OPENSSL_ROOT}/LICENSE.txt"
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # The image's OpenSSL 3.5 makes setup_openssl.sh skip its static build, and
-          # Rocky 10 ships no libssl.a, so build upstream's pinned OpenSSL here instead.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            ${{ matrix.platform == 'manylinux' && 'yum install -y perl-core &&
-            . {project}/tools/cibuildwheel/manylinux/openssl-version.sh &&
-            curl -fsSL -o /tmp/openssl.tar.gz "$OPENSSL_DOWNLOAD_URL/$OPENSSL_ROOT.tar.gz" &&
-            echo "$OPENSSL_HASH  /tmp/openssl.tar.gz" | sha256sum -c &&
-            tar -xzf /tmp/openssl.tar.gz -C /tmp &&
-            cd /tmp/$OPENSSL_ROOT &&
-            ./Configure no-shared --prefix=/usr/local --libdir=lib &&
-            make -j"$(nproc)" build_sw && make install_sw' || '' }}
-          # setup_ccache_on_manylinux.sh skips riscv64, so upstream's `ccache -s` has no ccache.
-          CIBW_BEFORE_TEST_LINUX: ${{ matrix.platform == 'musllinux' && 'ccache -s' || '' }}
+          name: libtorrent-${{ env.LIBTORRENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries the extension and the licences
         run: |
@@ -119,12 +121,6 @@ jobs:
               }, (whl, licences)
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: libtorrent-${{ env.LIBTORRENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -160,7 +156,7 @@ jobs:
 
   publish:
     name: Publish libtorrent ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

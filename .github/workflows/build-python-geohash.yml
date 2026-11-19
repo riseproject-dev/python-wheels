@@ -58,38 +58,42 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build python-geohash ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "python-geohash"
+      version: "${{ matrix.version }}"
+      repository: "hkwi/python-geohash"
+      ref: "1159f4f751d3c97406d8af016d7b4119aa03b8a3"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      timeout-minutes: 90
+      # setup.py hardcodes cp38-abi3, so cibuildwheel compiles once for
+      # cp312 and reuses+tests that wheel for cp313/cp314. No cp314t: pyo3's
+      # abi3 feature cannot build for Py_GIL_DISABLED (verified locally),
+      # and upstream ships no free-threaded wheel either.
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -c \"import geohash; assert geohash._geohash.__file__.endswith('.so'), geohash._geohash.__file__\" && pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       GEOHASH_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout python-geohash ${{ env.GEOHASH_REF }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: hkwi/python-geohash
-          ref: ${{ env.GEOHASH_REF }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # setup.py hardcodes cp38-abi3, so cibuildwheel compiles once for
-          # cp312 and reuses+tests that wheel for cp313/cp314. No cp314t: pyo3's
-          # abi3 feature cannot build for Py_GIL_DISABLED (verified locally),
-          # and upstream ships no free-threaded wheel either.
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: >-
-            python -c "import geohash; assert geohash._geohash.__file__.endswith('.so'), geohash._geohash.__file__" &&
-            pytest tests
+          name: python-geohash-${{ env.GEOHASH_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension and license made it into the wheel
         run: |
@@ -102,15 +106,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: python-geohash-${{ env.GEOHASH_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish python-geohash ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

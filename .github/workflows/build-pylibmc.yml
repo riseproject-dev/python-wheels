@@ -58,85 +58,90 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pylibmc ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pylibmc"
+      version: "${{ matrix.version }}"
+      repository: "lericson/pylibmc"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pylibmc/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Mirrors upstream's install_libaec/install_hdf5-style before-all
+      # (build-h5py.yml): fetch, configure and install the dependency into
+      # the container instead of yum-installing a devel package. SASL and
+      # OpenSSL-crypto support are left at their (off) CMake defaults --
+      # pylibmc's own tests exercise neither, and upstream's official
+      # wheel pulls in a large Kerberos/GSSAPI stack for SASL that isn't
+      # worth the added scope for an untested feature.
+      cibw-before-all-linux: |-
+        set -ex
+        dnf -y install zlib-devel flex
+        mkdir -p /tmp/libmemcached
+        curl -fsSL "https://github.com/awesomized/libmemcached/archive/refs/tags/$LIBMEMCACHED_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libmemcached
+        cmake -S /tmp/libmemcached -B /tmp/libmemcached/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr \
+        -D BUILD_TESTING=OFF \
+        -D ENABLE_HASH_HSIEH=ON \
+        -D ENABLE_HASH_FNV64=ON \
+        -D ENABLE_HASH_MURMUR=ON
+        cmake --build /tmp/libmemcached/build -j "$(nproc)"
+        cmake --install /tmp/libmemcached/build
+        ldconfig
+      # LIBMEMCACHED_VERSION must be restated here: CIBW_BEFORE_ALL_LINUX
+      # runs inside the manylinux container via `sh -c`, which does not
+      # inherit the job's plain `env:` (only what CIBW_ENVIRONMENT passes
+      # through).
+      cibw-environment-linux: "LIBMEMCACHED_VERSION=1.1.4"
+      cibw-test-requires: "pytest"
+      # Rocky 10's `memcached` package (appstream, no EPEL needed) stands
+      # in for upstream's CI service container; it refuses to start as
+      # root without an explicit -u.
+      cibw-before-test-linux: |-
+        dnf -y install memcached
+        memcached -d -u root
+      # src-layout checkout (package_dir={'': 'src'}) has no top-level
+      # pylibmc/ to shadow the installed wheel (gotcha territory:
+      # testing-and-shadowing.md), so testing straight from {project} is
+      # safe -- mirrors upstream's `runtests.py -v tests --with-doctest`.
+      cibw-test-command: "python -c \"import importlib.metadata as m; f = sorted(p.name for p in m.files('pylibmc') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.libmemcached'], f\" && cd {project} && python -m pytest -v tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYLIBMC_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pylibmc ${{ env.PYLIBMC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: lericson/pylibmc
-          ref: ${{ env.PYLIBMC_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pylibmc source
-        run: git apply python-wheels/patches/pylibmc/${{ env.PYLIBMC_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors upstream's install_libaec/install_hdf5-style before-all
-          # (build-h5py.yml): fetch, configure and install the dependency into
-          # the container instead of yum-installing a devel package. SASL and
-          # OpenSSL-crypto support are left at their (off) CMake defaults --
-          # pylibmc's own tests exercise neither, and upstream's official
-          # wheel pulls in a large Kerberos/GSSAPI stack for SASL that isn't
-          # worth the added scope for an untested feature.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            dnf -y install zlib-devel flex
-            mkdir -p /tmp/libmemcached
-            curl -fsSL "https://github.com/awesomized/libmemcached/archive/refs/tags/$LIBMEMCACHED_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libmemcached
-            cmake -S /tmp/libmemcached -B /tmp/libmemcached/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr \
-              -D BUILD_TESTING=OFF \
-              -D ENABLE_HASH_HSIEH=ON \
-              -D ENABLE_HASH_FNV64=ON \
-              -D ENABLE_HASH_MURMUR=ON
-            cmake --build /tmp/libmemcached/build -j "$(nproc)"
-            cmake --install /tmp/libmemcached/build
-            ldconfig
-          # LIBMEMCACHED_VERSION must be restated here: CIBW_BEFORE_ALL_LINUX
-          # runs inside the manylinux container via `sh -c`, which does not
-          # inherit the job's plain `env:` (only what CIBW_ENVIRONMENT passes
-          # through).
-          CIBW_ENVIRONMENT: >-
-            LIBMEMCACHED_VERSION=${{ env.LIBMEMCACHED_VERSION }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest
-          # Rocky 10's `memcached` package (appstream, no EPEL needed) stands
-          # in for upstream's CI service container; it refuses to start as
-          # root without an explicit -u.
-          CIBW_BEFORE_TEST_LINUX: |
-            dnf -y install memcached
-            memcached -d -u root
-          # src-layout checkout (package_dir={'': 'src'}) has no top-level
-          # pylibmc/ to shadow the installed wheel (gotcha territory:
-          # testing-and-shadowing.md), so testing straight from {project} is
-          # safe -- mirrors upstream's `runtests.py -v tests --with-doctest`.
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m;
-            f = sorted(p.name for p in m.files('pylibmc') if '.dist-info/licenses/' in str(p));
-            assert f == ['LICENSE', 'LICENSE.libmemcached'], f" &&
-            cd {project} && python -m pytest -v tests
+          name: pylibmc-${{ env.PYLIBMC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel is a compiled extension
         run: |
@@ -148,15 +153,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pylibmc-${{ env.PYLIBMC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pylibmc ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -49,83 +49,88 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyo ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyo"
+      version: "${{ matrix.version }}"
+      repository: "belangeo/pyo"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream's manylinux-pre-build-script.sh dnf-installs portaudio-devel/
+      # portmidi-devel directly and builds liblo/libsndfile/alsa-lib/JACK2 from
+      # source, then ships --use-jack --use-double. EPEL is empty on riscv64
+      # (gotcha 51), so portaudio-devel/portmidi-devel aren't available via dnf
+      # either; alsa-lib-devel is (Rocky 10 AppStream, no EPEL needed, same
+      # package build-pygame.yml already uses on this image). portaudio 19.7.0
+      # and portmidi 2.0.3 are built from source the same way build-sherpa-onnx.yml
+      # (portaudio tarball) and build-pygame.yml (portmidi via CMake) already do
+      # on this riscv64 image; liblo and libsndfile have no in-repo precedent but
+      # are plain autotools builds with no arch-specific code. JACK2's own
+      # waf-based server build has no riscv64 precedent here and exists only to
+      # match --use-jack bit-for-bit, so --use-jack is dropped (no jackd on this
+      # headless CI runner either way) -- a documented divergence from upstream,
+      # kept to --use-double otherwise. pyo's own setup.py has no arch-specific
+      # (x86/SIMD) code path.
+      cibw-before-all: |-
+        set -euo pipefail
+        dnf install -y -q alsa-lib-devel
+
+        export MAKEFLAGS="-j$(nproc)"
+        mkdir -p /tmp/pyo-deps && cd /tmp/pyo-deps
+
+        # portaudio 19.7.0, liblo 0.31 and libsndfile 1.0.31 each bundle a
+        # config.guess/config.sub too old to recognise riscv64 ("cannot guess
+        # build type"); automake's copy on this image already does (gotcha 138).
+        config_scripts=(/usr/share/automake-*/config.guess /usr/share/automake-*/config.sub)
+
+        curl -fsSL --retry 5 -o portaudio.tgz http://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
+        tar xzf portaudio.tgz
+        cp "${config_scripts[@]}" portaudio/
+        (cd portaudio && ./configure && make && make install)
+
+        curl -fsSL --retry 5 -o portmidi.tar.gz https://github.com/PortMidi/portmidi/archive/refs/tags/v2.0.3.tar.gz
+        tar xzf portmidi.tar.gz
+        (cd portmidi-2.0.3 && cmake . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
+
+        curl -fsSL --retry 5 -o liblo.tar.gz https://downloads.sourceforge.net/liblo/liblo-0.31.tar.gz
+        tar xzf liblo.tar.gz
+        cp "${config_scripts[@]}" liblo-0.31/
+        (cd liblo-0.31 && ./configure && make && make install)
+
+        curl -fsSL --retry 5 -o libsndfile.tar.bz2 https://github.com/libsndfile/libsndfile/releases/download/1.0.31/libsndfile-1.0.31.tar.bz2
+        tar xjf libsndfile.tar.bz2
+        cp "${config_scripts[@]}" libsndfile-1.0.31/
+        (cd libsndfile-1.0.31 && ./configure && make && make install)
+
+        ldconfig
+      cibw-config-settings: "--build-option=--use-double"
+      cibw-environment-linux: "CFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib"
+      cibw-test-command: "python -c \"import pyo; print(pyo.getVersion())\" && python -c \"import pyo64; print(pyo64.getVersion())\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYO_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyo ${{ env.PYO_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: belangeo/pyo
-          ref: ${{ env.PYO_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's manylinux-pre-build-script.sh dnf-installs portaudio-devel/
-          # portmidi-devel directly and builds liblo/libsndfile/alsa-lib/JACK2 from
-          # source, then ships --use-jack --use-double. EPEL is empty on riscv64
-          # (gotcha 51), so portaudio-devel/portmidi-devel aren't available via dnf
-          # either; alsa-lib-devel is (Rocky 10 AppStream, no EPEL needed, same
-          # package build-pygame.yml already uses on this image). portaudio 19.7.0
-          # and portmidi 2.0.3 are built from source the same way build-sherpa-onnx.yml
-          # (portaudio tarball) and build-pygame.yml (portmidi via CMake) already do
-          # on this riscv64 image; liblo and libsndfile have no in-repo precedent but
-          # are plain autotools builds with no arch-specific code. JACK2's own
-          # waf-based server build has no riscv64 precedent here and exists only to
-          # match --use-jack bit-for-bit, so --use-jack is dropped (no jackd on this
-          # headless CI runner either way) -- a documented divergence from upstream,
-          # kept to --use-double otherwise. pyo's own setup.py has no arch-specific
-          # (x86/SIMD) code path.
-          CIBW_BEFORE_ALL: |
-            set -euo pipefail
-            dnf install -y -q alsa-lib-devel
-
-            export MAKEFLAGS="-j$(nproc)"
-            mkdir -p /tmp/pyo-deps && cd /tmp/pyo-deps
-
-            # portaudio 19.7.0, liblo 0.31 and libsndfile 1.0.31 each bundle a
-            # config.guess/config.sub too old to recognise riscv64 ("cannot guess
-            # build type"); automake's copy on this image already does (gotcha 138).
-            config_scripts=(/usr/share/automake-*/config.guess /usr/share/automake-*/config.sub)
-
-            curl -fsSL --retry 5 -o portaudio.tgz http://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
-            tar xzf portaudio.tgz
-            cp "${config_scripts[@]}" portaudio/
-            (cd portaudio && ./configure && make && make install)
-
-            curl -fsSL --retry 5 -o portmidi.tar.gz https://github.com/PortMidi/portmidi/archive/refs/tags/v2.0.3.tar.gz
-            tar xzf portmidi.tar.gz
-            (cd portmidi-2.0.3 && cmake . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
-
-            curl -fsSL --retry 5 -o liblo.tar.gz https://downloads.sourceforge.net/liblo/liblo-0.31.tar.gz
-            tar xzf liblo.tar.gz
-            cp "${config_scripts[@]}" liblo-0.31/
-            (cd liblo-0.31 && ./configure && make && make install)
-
-            curl -fsSL --retry 5 -o libsndfile.tar.bz2 https://github.com/libsndfile/libsndfile/releases/download/1.0.31/libsndfile-1.0.31.tar.bz2
-            tar xjf libsndfile.tar.bz2
-            cp "${config_scripts[@]}" libsndfile-1.0.31/
-            (cd libsndfile-1.0.31 && ./configure && make && make install)
-
-            ldconfig
-          CIBW_CONFIG_SETTINGS: --build-option=--use-double
-          CIBW_ENVIRONMENT: CFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib
-          CIBW_TEST_COMMAND: >-
-            python -c "import pyo; print(pyo.getVersion())" &&
-            python -c "import pyo64; print(pyo64.getVersion())"
+          name: pyo-${{ env.PYO_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships both the single- and double-precision extensions
         run: |
@@ -138,15 +143,9 @@ jobs:
           print(sys.argv[1], "->", sos)
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyo-${{ env.PYO_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyo ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

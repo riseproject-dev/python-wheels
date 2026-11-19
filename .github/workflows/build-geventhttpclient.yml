@@ -50,6 +50,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build geventhttpclient ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # gevent, a hard runtime dependency, publishes no free-threaded wheel on
+          # any platform, so the cp314t wheel cannot be installed to be tested.
+          - python: "cp314t"
+            test_skip: "*"
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "geventhttpclient"
+      version: "${{ matrix.version }}"
+      repository: "geventhttpclient/geventhttpclient"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      checkout-submodules: "recursive"
+      pre-build: |-
+        export GEVENTHTTPCLIENT_VERSION='${{ matrix.version }}'
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        patches="$PWD/python-wheels/patches/geventhttpclient/${GEVENTHTTPCLIENT_VERSION}"
+        if [ -d "$patches" ]; then
+          git apply -v "$patches"/*.patch
+        fi
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # gevent and brotli have no riscv64 wheel on public PyPI.
+      cibw-test-skip: "${{ matrix.test_skip }}"
+      # pyproject.toml registers the `network` marker.
+      cibw-test-sources: "tests pyproject.toml"
+      # Up to 2.5.1 the test tools are the `dev` extra; from 2.6.0 they are the `dev`
+      # dependency group (PEP 735) and the extra is gone (pip only warns about it).
+      cibw-test-extras: "dev"
+      cibw-test-groups: "dev"
+      cibw-test-command: "python -c \"import importlib.metadata as m; l = {str(p).split('.dist-info/licenses/')[1] for p in m.files('geventhttpclient') if '.dist-info/licenses/' in str(p)}; assert l in ({'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, {'LICENSE-MIT', 'llhttp/LICENSE'}), l\" && python -m pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
@@ -62,58 +113,15 @@ jobs:
           # any platform, so the cp314t wheel cannot be installed to be tested.
           - python: "cp314t"
             test_skip: "*"
-
     env:
       GEVENTHTTPCLIENT_VERSION: ${{ matrix.version }}
-
     steps:
-      # The llhttp parser is a submodule; setup.py compiles its sources directly.
-      - name: Checkout geventhttpclient ${{ env.GEVENTHTTPCLIENT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: geventhttpclient/geventhttpclient
-          ref: ${{ env.GEVENTHTTPCLIENT_VERSION }}
-          submodules: recursive
-          persist-credentials: false
+          name: geventhttpclient-${{ env.GEVENTHTTPCLIENT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # llhttp is compiled into the extension under its own MIT notice, which
-      # upstream's wheels do not ship before 2.6.0, so only older versions are patched.
-      - name: Patch geventhttpclient source
-        run: |
-          patches="$PWD/python-wheels/patches/geventhttpclient/${GEVENTHTTPCLIENT_VERSION}"
-          if [ -d "$patches" ]; then
-            git apply -v "$patches"/*.patch
-          fi
-
-      # musllinux is skipped: our registry carries gevent and brotli for
-      # manylinux riscv64 only, so a musl wheel could be neither installed nor tested.
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # gevent and brotli have no riscv64 wheel on public PyPI.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
-          # pyproject.toml registers the `network` marker.
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          # Up to 2.5.1 the test tools are the `dev` extra; from 2.6.0 they are the `dev`
-          # dependency group (PEP 735) and the extra is gone (pip only warns about it).
-          CIBW_TEST_EXTRAS: dev
-          CIBW_TEST_GROUPS: dev
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m;
-            l = {str(p).split('.dist-info/licenses/')[1] for p in m.files('geventhttpclient') if '.dist-info/licenses/' in str(p)};
-            assert l in ({'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, {'LICENSE-MIT', 'llhttp/LICENSE'}), l" &&
-            python -m pytest tests
-
-      # The only proof the untested cp314t wheel really carries the extension.
       - name: Check the wheel ships the parser extension
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
@@ -123,15 +131,9 @@ jobs:
           assert len(sos) == 1 and sos[0].startswith("geventhttpclient/_parser."), sos
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: geventhttpclient-${{ env.GEVENTHTTPCLIENT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish geventhttpclient ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

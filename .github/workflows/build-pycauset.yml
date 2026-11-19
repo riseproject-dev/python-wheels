@@ -49,60 +49,63 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pycauset ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pycauset"
+      version: "${{ matrix.version }}"
+      repository: "BrorH/pycauset"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      checkout-fetch-depth: 0
+      pre-build: |-
+        cat > collect-licenses.sh <<'EOF'
+        #!/bin/bash
+        set -euo pipefail
+        project="${1:?usage: collect-licenses.sh <project-dir>}"
+        cp /usr/share/licenses/openblas/LICENSE "${project}/LICENSE.openblas"
+        cp /usr/share/doc/lapack/LICENSE "${project}/LICENSE.lapack"
+        curl -fsSL --retry 3 https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2 -o "${project}/LICENSE.eigen"
+        curl -fsSL --retry 3 https://raw.githubusercontent.com/pybind/pybind11/v2.12.0/LICENSE -o "${project}/LICENSE.pybind11"
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream's before-all minus gcc-toolset-12 and ccache: the image's default GCC already has full C++20.
+      # lapack marks its LICENSE %doc (/usr/share/doc/lapack/LICENSE), which the image's
+      # tsflags=nodocs drops, so install with docs enabled (gotcha 137).
+      cibw-before-all-linux: "dnf -y --setopt=tsflags= install libatomic openblas-devel lapack-devel && bash {project}/collect-licenses.sh {project}"
+      cibw-environment-linux: "CMAKE_ARGS='-DPython_FIND_STRATEGY=LOCATION' PIP_ONLY_BINARY=numpy"
+      cibw-test-extras: "test"
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -m pytest tests/python -q"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYCAUSET_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pycauset v${{ env.PYCAUSET_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: BrorH/pycauset
-          ref: v${{ env.PYCAUSET_VERSION }}
-          fetch-depth: 0  # setuptools_scm derives the version from git tag history
-          persist-credentials: false
-
-      - name: Write the licence collector
-        # auditwheel vendors OpenBLAS and LAPACK(E) into pycauset.libs/, and the
-        # extension compiles in Eigen and pybind11 headers; scikit-build-core's
-        # default LICEN[CS]E* glob ships whatever is staged at the project root.
-        run: |
-          cat > collect-licenses.sh <<'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          project="${1:?usage: collect-licenses.sh <project-dir>}"
-          cp /usr/share/licenses/openblas/LICENSE "${project}/LICENSE.openblas"
-          cp /usr/share/doc/lapack/LICENSE "${project}/LICENSE.lapack"
-          curl -fsSL --retry 3 https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2 -o "${project}/LICENSE.eigen"
-          curl -fsSL --retry 3 https://raw.githubusercontent.com/pybind/pybind11/v2.12.0/LICENSE -o "${project}/LICENSE.pybind11"
-          EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's before-all minus gcc-toolset-12 and ccache: the image's default GCC already has full C++20.
-          # lapack marks its LICENSE %doc (/usr/share/doc/lapack/LICENSE), which the image's
-          # tsflags=nodocs drops, so install with docs enabled (gotcha 137).
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y --setopt=tsflags= install libatomic openblas-devel lapack-devel &&
-            bash {project}/collect-licenses.sh {project}
-          CIBW_ENVIRONMENT_LINUX: >-
-            CMAKE_ARGS='-DPython_FIND_STRATEGY=LOCATION'
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_EXTRAS: test
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: python -m pytest tests/python -q
+          name: pycauset-${{ env.PYCAUSET_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension and all licences
         run: |
@@ -116,12 +119,6 @@ jobs:
               assert licences == {"LICENSE", "LICENSE.openblas", "LICENSE.lapack", "LICENSE.eigen", "LICENSE.pybind11"}, (whl, licences)
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pycauset-${{ env.PYCAUSET_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -157,7 +154,7 @@ jobs:
 
   publish:
     name: Publish pycauset ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

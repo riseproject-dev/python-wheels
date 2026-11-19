@@ -54,64 +54,69 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build freetype-py ${{ matrix.version }} py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "freetype-py"
+      version: "${{ matrix.version }}"
+      repository: "rougier/freetype-py"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/freetype-py/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        ft_ver="$(sed -n 's/^FREETYPE_TARBALL = "freetype-\(.*\)\.tar\.xz"/\1/p' setup-build-freetype.py)"
+        hb_ver="$(sed -n 's/^HARFBUZZ_TARBALL = "harfbuzz-\(.*\)\.tar\.xz"/\1/p' setup-build-freetype.py)"
+        ft_tag="VER-$(echo "$ft_ver" | tr '.' '-')"
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/freetype/freetype/${ft_tag}/docs/FTL.TXT" -o LICENSE.FreeType.txt
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/harfbuzz/harfbuzz/${hb_ver}/COPYING" -o COPYING.HarfBuzz
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # setup.py's BdistWheel.get_tag() forces py3-none, so one build serves every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # backend.py adds a `cmake` build dependency, but the `cmake` PyPI package has
+      # no riscv64 wheel; use the image's own cmake and skip isolated dependency resolution.
+      # setup.py's SharedLibBuildExt calls distutils.dir_util.mkpath()/file_util.copy_file()
+      # with dry_run=, a kwarg setuptools >=81 dropped from its vendored distutils (gotcha 256).
+      cibw-before-build: "dnf install -y cmake && pip install -q -U \"setuptools<81\" wheel \"setuptools_scm[toml]\" certifi"
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # CMAKE_POLICY_VERSION_MINIMUM (gotcha 257) as an env var, not a `-D` flag:
+      # setup-build-freetype.py's cmake invocations aren't ours to add flags to.
+      cibw-environment-linux: "FREETYPEPY_BUNDLE_FT=yes PYTHON_ARCH=64 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FREETYPE_PY=${{ matrix.version }} CMAKE_POLICY_VERSION_MINIMUM=3.5"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest {project}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       FREETYPE_PY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout freetype-py v${{ env.FREETYPE_PY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: rougier/freetype-py
-          ref: v${{ env.FREETYPE_PY_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # mirrors.sarata.com (setup-build-freetype.py's default FreeType mirror) 403s
-      # non-browser clients (gotcha 258); gotcha 31 pins the sdist version since this dirties the tree.
-      - name: Patch freetype-py source
-        run: git apply python-wheels/patches/freetype-py/${{ env.FREETYPE_PY_VERSION }}/*.patch
-
-      # setup.py bundles a compiled FreeType (statically linking Harfbuzz); upstream
-      # ships only its own LICENSE.txt, so stage the two other licences ourselves.
-      - name: Stage the FreeType and HarfBuzz licences
-        run: |
-          ft_ver="$(sed -n 's/^FREETYPE_TARBALL = "freetype-\(.*\)\.tar\.xz"/\1/p' setup-build-freetype.py)"
-          hb_ver="$(sed -n 's/^HARFBUZZ_TARBALL = "harfbuzz-\(.*\)\.tar\.xz"/\1/p' setup-build-freetype.py)"
-          ft_tag="VER-$(echo "$ft_ver" | tr '.' '-')"
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/freetype/freetype/${ft_tag}/docs/FTL.TXT" -o LICENSE.FreeType.txt
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/harfbuzz/harfbuzz/${hb_ver}/COPYING" -o COPYING.HarfBuzz
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # setup.py's BdistWheel.get_tag() forces py3-none, so one build serves every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # backend.py adds a `cmake` build dependency, but the `cmake` PyPI package has
-          # no riscv64 wheel; use the image's own cmake and skip isolated dependency resolution.
-          # setup.py's SharedLibBuildExt calls distutils.dir_util.mkpath()/file_util.copy_file()
-          # with dry_run=, a kwarg setuptools >=81 dropped from its vendored distutils (gotcha 256).
-          CIBW_BEFORE_BUILD: >-
-            dnf install -y cmake &&
-            pip install -q -U "setuptools<81" wheel "setuptools_scm[toml]" certifi
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # CMAKE_POLICY_VERSION_MINIMUM (gotcha 257) as an env var, not a `-D` flag:
-          # setup-build-freetype.py's cmake invocations aren't ours to add flags to.
-          CIBW_ENVIRONMENT: >-
-            FREETYPEPY_BUNDLE_FT=yes PYTHON_ARCH=64
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FREETYPE_PY=${{ env.FREETYPE_PY_VERSION }}
-            CMAKE_POLICY_VERSION_MINIMUM=3.5
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {project}/tests
+          name: freetype-py-${{ env.FREETYPE_PY_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the bundled library and licences made it into the wheel
         run: |
@@ -127,15 +132,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: freetype-py-${{ env.FREETYPE_PY_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish freetype-py ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

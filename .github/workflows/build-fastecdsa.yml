@@ -48,47 +48,52 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fastecdsa ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "fastecdsa"
+      version: "${{ matrix.version }}"
+      repository: "AntonKueltz/fastecdsa"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # v4.0.0 rewrote the extension in Rust (maturin, pyo3); it ships no
+      # [tool.cibuildwheel], so the Rust toolchain its build backend needs is
+      # installed in-container here and put on PATH for the build (same
+      # pattern as build-fastuuid.yml). No more GMP: the new fastecdsa-rs-core
+      # crate is pure Rust (crypto-bigint/num-bigint), so there is nothing left
+      # to auditwheel-vendor and no extra CFLAGS/LDFLAGS to set.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # pyproject.toml is deliberately left unstaged: its addopts demand pytest-cov
+      # and its pythonpath would import the checkout instead of the wheel.
+      cibw-test-sources: "tests"
+      # tests/wycheproof/*.py and the point-at-infinity/ed25519/ed448 tests
+      # import parameterized directly; upstream's own pyproject.toml test
+      # extra lists it but CIBW_TEST_REQUIRES doesn't inherit extras.
+      cibw-test-requires: "pytest parameterized"
+      cibw-test-command: "python -m pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       FASTECDSA_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout fastecdsa v${{ env.FASTECDSA_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: AntonKueltz/fastecdsa
-          ref: v${{ env.FASTECDSA_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # v4.0.0 rewrote the extension in Rust (maturin, pyo3); it ships no
-          # [tool.cibuildwheel], so the Rust toolchain its build backend needs is
-          # installed in-container here and put on PATH for the build (same
-          # pattern as build-fastuuid.yml). No more GMP: the new fastecdsa-rs-core
-          # crate is pure Rust (crypto-bigint/num-bigint), so there is nothing left
-          # to auditwheel-vendor and no extra CFLAGS/LDFLAGS to set.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          # pyproject.toml is deliberately left unstaged: its addopts demand pytest-cov
-          # and its pythonpath would import the checkout instead of the wheel.
-          CIBW_TEST_SOURCES: tests
-          # tests/wycheproof/*.py and the point-at-infinity/ed25519/ed448 tests
-          # import parameterized directly; upstream's own pyproject.toml test
-          # extra lists it but CIBW_TEST_REQUIRES doesn't inherit extras.
-          CIBW_TEST_REQUIRES: pytest parameterized
-          CIBW_TEST_COMMAND: python -m pytest tests
+          name: fastecdsa-${{ env.FASTECDSA_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and licence made it into the wheel
         run: |
@@ -102,15 +107,9 @@ jobs:
           print(sorted(sos), sorted(lic))
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fastecdsa-${{ env.FASTECDSA_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish fastecdsa ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

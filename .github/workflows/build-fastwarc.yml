@@ -49,76 +49,72 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fastwarc ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "fastwarc"
+      version: "${{ matrix.version }}"
+      repository: "chatnoir-eu/chatnoir-resiliparse"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        cp LICENSE fastwarc-py/
+        cat > collect-lz4-license.sh <<'EOF'
+        #!/bin/bash
+        set -euo pipefail
+        project="${1:?usage: collect-lz4-license.sh <project-dir>}"
+        mapfile -t files < <(rpm -q --licensefiles lz4-libs 2>/dev/null || true)
+        if [ -z "${files[0]:-}" ]; then
+          dnf -y --disablerepo=extras reinstall --setopt=tsflags= lz4-libs
+          mapfile -t files < <(rpm -qd lz4-libs | grep -iE '/(LICEN[CS]E|COPYING)')
+        fi
+        cp "${files[0]}" "$project/LICENSE.lz4"
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "fastwarc-py"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # zlib-devel resolves without EPEL; lz4-devel needs the extras
+      # mirror disabled (gotcha 51). The image ships no Rust toolchain for
+      # the setuptools-rust/pyo3 extension; rustup provisions a native
+      # riscv64gc-unknown-linux-gnu one (gotcha 10).
+      cibw-before-all-linux: "dnf -y --disablerepo=extras install zlib-devel lz4-devel && bash {project}/collect-lz4-license.sh {project}/fastwarc-py && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # test-sources paths are relative to cibuildwheel's cwd (the checkout
+      # root), not to package-dir, and are staged at that same relative
+      # path (gotcha 104); fastwarc-pytest's own fixture lookup climbs two
+      # parents to fastwarc-rs/tests/fixtures, so that sibling has to be
+      # staged too.
+      cibw-test-sources: "fastwarc-py/fastwarc-pytest fastwarc-rs/tests/fixtures"
+      cibw-test-command: "python -m pytest -v fastwarc-py/fastwarc-pytest"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       FASTWARC_VERSION: ${{ matrix.version }}
-
     steps:
-      # fastwarc-py is a subdirectory of the chatnoir-resiliparse monorepo; its
-      # pytest suite reads fixtures from the sibling fastwarc-rs/tests/fixtures,
-      # so the checkout is at the workspace root, not fastwarc-py itself.
-      - name: Checkout chatnoir-resiliparse v${{ env.FASTWARC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: chatnoir-eu/chatnoir-resiliparse
-          ref: v${{ env.FASTWARC_VERSION }}
-          persist-credentials: false
-
-      - name: Stage the LICENSE and the lz4-licence collector
-        # Upstream's wheel ships no LICENSE at all: setuptools' default
-        # license_files glob runs against fastwarc-py, not the repo root the
-        # Apache-2.0 file actually sits in (gotcha 86). The Cython legacy
-        # extension links lz4, which auditwheel vendors into the wheel (zlib
-        # stays external - it's on the manylinux allowlist, lz4 isn't), so
-        # collect the licence actually shipped by the build image's own
-        # package rather than hand-pinning an lz4 release tag (gotcha 137).
-        run: |
-          cp LICENSE fastwarc-py/
-          cat > collect-lz4-license.sh <<'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          project="${1:?usage: collect-lz4-license.sh <project-dir>}"
-          mapfile -t files < <(rpm -q --licensefiles lz4-libs 2>/dev/null || true)
-          if [ -z "${files[0]:-}" ]; then
-            dnf -y --disablerepo=extras reinstall --setopt=tsflags= lz4-libs
-            mapfile -t files < <(rpm -qd lz4-libs | grep -iE '/(LICEN[CS]E|COPYING)')
-          fi
-          cp "${files[0]}" "$project/LICENSE.lz4"
-          EOF
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: fastwarc-py
-          output-dir: wheelhouse/
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # zlib-devel resolves without EPEL; lz4-devel needs the extras
-          # mirror disabled (gotcha 51). The image ships no Rust toolchain for
-          # the setuptools-rust/pyo3 extension; rustup provisions a native
-          # riscv64gc-unknown-linux-gnu one (gotcha 10).
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y --disablerepo=extras install zlib-devel lz4-devel &&
-            bash {project}/collect-lz4-license.sh {project}/fastwarc-py &&
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # test-sources paths are relative to cibuildwheel's cwd (the checkout
-          # root), not to package-dir, and are staged at that same relative
-          # path (gotcha 104); fastwarc-pytest's own fixture lookup climbs two
-          # parents to fastwarc-rs/tests/fixtures, so that sibling has to be
-          # staged too.
-          CIBW_TEST_SOURCES: fastwarc-py/fastwarc-pytest fastwarc-rs/tests/fixtures
-          CIBW_TEST_COMMAND: python -m pytest -v fastwarc-py/fastwarc-pytest
+          name: fastwarc-${{ env.FASTWARC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extensions and the licences made it into the wheel
         run: |
@@ -133,15 +129,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fastwarc-${{ env.FASTWARC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish fastwarc ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

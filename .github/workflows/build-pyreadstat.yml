@@ -49,58 +49,52 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyreadstat ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyreadstat"
+      version: "${{ matrix.version }}"
+      repository: "Roche/pyreadstat"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # gcc 13+ miscompiles readstat_writer.c's strict-aliasing violations at -O2
+      # (silently drops value-label writes); upstream's own CI carries the same flag.
+      cibw-environment-linux: "CFLAGS=\"-O2 -fno-strict-aliasing\""
+      # The test requirements install pandas (and numpy), whose newest PyPI release has no
+      # riscv64 wheel; only our registry does, and only-binary keeps pip from compiling it.
+      cibw-test-environment: "PIP_ONLY_BINARY=pandas,numpy"
+      # polars has no riscv64 wheel, so test_narwhalified.py (which imports it
+      # unconditionally) is dropped; test_runtime_types.py and test_typing.yml
+      # keep running with their polars-only cases deselected. test_runtime_types.py
+      # only imports pyreadstat inside its own `if __name__ == "__main__":` guard, so
+      # it has to run as a script (its unittest -k, not pytest's) or that name is undefined.
+      cibw-test-sources: "tests test_data"
+      cibw-test-requires: "pytest mypy pytest-mypy-plugins pandas-stubs pandas"
+      cibw-test-command: "python tests/test_basic.py && python tests/test_http_integration.py && python tests/test_runtime_types.py -k test_read_default_returns_pandas -k test_read_output_pandas -k test_read_output_dict -k test_write_returns_none -k test_metadata_field_types -k test_set_value_labels_pandas -k test_set_catalog_to_sas_pandas && python -m pytest tests/test_typing.yml --mypy-ini-file=tests/test_mypy_setup.ini -k \"not polars and not worker_types\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYREADSTAT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyreadstat v${{ env.PYREADSTAT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Roche/pyreadstat
-          ref: v${{ env.PYREADSTAT_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # gcc 13+ miscompiles readstat_writer.c's strict-aliasing violations at -O2
-          # (silently drops value-label writes); upstream's own CI carries the same flag.
-          CIBW_ENVIRONMENT_LINUX: >-
-            CFLAGS="-O2 -fno-strict-aliasing"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The test requirements install pandas (and numpy), whose newest PyPI release has no
-          # riscv64 wheel; only our registry does, and only-binary keeps pip from compiling it.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=pandas,numpy
-          # polars has no riscv64 wheel, so test_narwhalified.py (which imports it
-          # unconditionally) is dropped; test_runtime_types.py and test_typing.yml
-          # keep running with their polars-only cases deselected. test_runtime_types.py
-          # only imports pyreadstat inside its own `if __name__ == "__main__":` guard, so
-          # it has to run as a script (its unittest -k, not pytest's) or that name is undefined.
-          CIBW_TEST_SOURCES: tests test_data
-          CIBW_TEST_REQUIRES: pytest mypy pytest-mypy-plugins pandas-stubs pandas
-          CIBW_TEST_COMMAND: >-
-            python tests/test_basic.py &&
-            python tests/test_http_integration.py &&
-            python tests/test_runtime_types.py
-            -k test_read_default_returns_pandas -k test_read_output_pandas
-            -k test_read_output_dict -k test_write_returns_none -k test_metadata_field_types
-            -k test_set_value_labels_pandas -k test_set_catalog_to_sas_pandas
-            &&
-            python -m pytest tests/test_typing.yml --mypy-ini-file=tests/test_mypy_setup.ini
-            -k "not polars and not worker_types"
+          name: pyreadstat-${{ env.PYREADSTAT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the Cython extensions made it into the wheel
         run: |
@@ -114,15 +108,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyreadstat-${{ env.PYREADSTAT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyreadstat ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

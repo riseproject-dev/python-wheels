@@ -49,74 +49,71 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pillow-jxl-plugin ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pillow-jxl-plugin"
+      version: "${{ matrix.version }}"
+      repository: "Isotr0py/pillow-jpegxl-plugin"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pillow-jxl-plugin/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # [tool.maturin] already has `features = [..., "vendored"]`, which
+      # builds libjxl/highway/brotli from source via jpegxl-src's CMake
+      # invocation - no MATURIN_PEP517_ARGS needed. `cargo metadata
+      # --features vendored` unpacks jpegxl-src (an optional dependency
+      # gated by that feature) so its bundled licences can be staged here
+      # for the widened `license-files` glob to pick up.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && export PATH=\"$PATH:$HOME/.cargo/bin\" && cargo metadata --manifest-path {package}/Cargo.toml --features vendored --format-version=1 >/dev/null && JXL_SRC=\"$(find \"$HOME/.cargo/registry/src\" -maxdepth 2 -type d -name 'jpegxl-src-*' | head -1)\" && cp \"$JXL_SRC/libjxl/LICENSE\" {package}/LICENSE.libjxl && cp \"$JXL_SRC/libjxl/PATENTS\" {package}/PATENTS.libjxl && cp \"$JXL_SRC/libjxl/third_party/highway/LICENSE\" {package}/LICENSE.highway && cp \"$JXL_SRC/libjxl/third_party/brotli/LICENSE\" {package}/LICENSE.brotli && cp \"$JXL_SRC/libjxl/third_party/skcms/LICENSE\" {package}/LICENSE.skcms"
+      # PIP_ONLY_BINARY=pillow: cp310/cp311 only have an 11.3.0/12.2.0
+      # riscv64 Pillow wheel on our registry (Pillow 12.0+ dropped
+      # cp310, 12.3.0 dropped cp311); without this, pip's resolver
+      # prefers the newest Pillow sdist visible on the combined
+      # index over the older prebuilt wheel, and that sdist then
+      # fails to build for lack of libjpeg headers in the test venv.
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" PIP_ONLY_BINARY=pillow"
+      cibw-test-requires: "pytest numpy"
+      cibw-test-sources: "test"
+      # test/test_plugin.py's OpenEXR/pyexiv2-gated tests are patched to
+      # pytest.importorskip: pyexiv2 has no riscv64 wheel on our registry
+      # at all, and OpenEXR has none for cp310/cp311.
+      cibw-test-command: "python -c \"import pillow_jxl; from pillow_jxl import JpegXLImagePlugin\" && python -m pytest test/test_plugin.py -v"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PILLOW_JXL_PLUGIN_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pillow-jxl-plugin v${{ env.PILLOW_JXL_PLUGIN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Isotr0py/pillow-jpegxl-plugin
-          ref: v${{ env.PILLOW_JXL_PLUGIN_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pillow-jxl-plugin source
-        run: git apply python-wheels/patches/pillow-jxl-plugin/${{ env.PILLOW_JXL_PLUGIN_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # [tool.maturin] already has `features = [..., "vendored"]`, which
-          # builds libjxl/highway/brotli from source via jpegxl-src's CMake
-          # invocation - no MATURIN_PEP517_ARGS needed. `cargo metadata
-          # --features vendored` unpacks jpegxl-src (an optional dependency
-          # gated by that feature) so its bundled licences can be staged here
-          # for the widened `license-files` glob to pick up.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            export PATH="$PATH:$HOME/.cargo/bin" &&
-            cargo metadata --manifest-path {package}/Cargo.toml --features vendored --format-version=1 >/dev/null &&
-            JXL_SRC="$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'jpegxl-src-*' | head -1)" &&
-            cp "$JXL_SRC/libjxl/LICENSE" {package}/LICENSE.libjxl &&
-            cp "$JXL_SRC/libjxl/PATENTS" {package}/PATENTS.libjxl &&
-            cp "$JXL_SRC/libjxl/third_party/highway/LICENSE" {package}/LICENSE.highway &&
-            cp "$JXL_SRC/libjxl/third_party/brotli/LICENSE" {package}/LICENSE.brotli &&
-            cp "$JXL_SRC/libjxl/third_party/skcms/LICENSE" {package}/LICENSE.skcms
-          # PIP_ONLY_BINARY=pillow: cp310/cp311 only have an 11.3.0/12.2.0
-          # riscv64 Pillow wheel on our registry (Pillow 12.0+ dropped
-          # cp310, 12.3.0 dropped cp311); without this, pip's resolver
-          # prefers the newest Pillow sdist visible on the combined
-          # index over the older prebuilt wheel, and that sdist then
-          # fails to build for lack of libjpeg headers in the test venv.
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=pillow
-          CIBW_TEST_REQUIRES: pytest numpy
-          CIBW_TEST_SOURCES: test
-          # test/test_plugin.py's OpenEXR/pyexiv2-gated tests are patched to
-          # pytest.importorskip: pyexiv2 has no riscv64 wheel on our registry
-          # at all, and OpenEXR has none for cp310/cp311.
-          CIBW_TEST_COMMAND: >-
-            python -c "import pillow_jxl; from pillow_jxl import JpegXLImagePlugin" &&
-            python -m pytest test/test_plugin.py -v
+          name: pillow-jxl-plugin-${{ env.PILLOW_JXL_PLUGIN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel contents
         run: |
@@ -132,15 +129,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pillow-jxl-plugin-${{ env.PILLOW_JXL_PLUGIN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pillow-jxl-plugin ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

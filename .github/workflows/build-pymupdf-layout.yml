@@ -61,39 +61,38 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pymupdf-layout ${{ matrix.version }} cp312-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pymupdf-layout"
+      version: "${{ matrix.version }}"
+      repository: "ArtifexSoftware/pymupdf_layout"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      cibw-build: "cp312-manylinux_riscv64"
+      cibw-environment-linux: "PYMUPDF_LAYOUT_SETUP_SWIG=swig"
+      # The extensions link the MuPDF shared libraries shipped inside the
+      # installed pymupdf wheel and find them at runtime via $ORIGIN, so
+      # auditwheel must not vendor a second 36MB copy of them (gotcha 17).
+      cibw-repair-wheel-command: "auditwheel repair -w {dest_dir} {wheel} --exclude 'libmupdf.so.*' --exclude 'libmupdfcpp.so.*'"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -c \"import pymupdf.features, pymupdf.tgif\" && pytest {package}/tests"
 
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PYMUPDF_LAYOUT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pymupdf-layout ${{ env.PYMUPDF_LAYOUT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ArtifexSoftware/pymupdf_layout
-          ref: ${{ env.PYMUPDF_LAYOUT_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PYMUPDF_LAYOUT_SETUP_SWIG=swig
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The extensions link the MuPDF shared libraries shipped inside the
-          # installed pymupdf wheel and find them at runtime via $ORIGIN, so
-          # auditwheel must not vendor a second 36MB copy of them (gotcha 17).
-          CIBW_REPAIR_WHEEL_COMMAND: >-
-            auditwheel repair -w {dest_dir} {wheel}
-            --exclude 'libmupdf.so.*' --exclude 'libmupdfcpp.so.*'
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import pymupdf.features, pymupdf.tgif" &&
-            pytest {package}/tests
+          name: pymupdf-layout-${{ env.PYMUPDF_LAYOUT_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension modules made it into the wheel
         run: |
@@ -106,15 +105,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pymupdf-layout-${{ env.PYMUPDF_LAYOUT_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pymupdf-layout ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

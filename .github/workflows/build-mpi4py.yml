@@ -55,80 +55,80 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mpi4py ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "mpi4py"
+      version: "${{ matrix.version }}"
+      repository: "mpi4py/mpi4py"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        cat > riscv64-repair.sh <<'EOF'
+        #!/bin/bash
+        set -euo pipefail
+        wheel="$1"
+        dest_dir="$2"
+        tmpdir=$(mktemp -d)
+        trap 'rm -rf "$tmpdir"' EXIT
+        unzip -q "$wheel" -d "$tmpdir"
+        so=$(find "$tmpdir/mpi4py" -name 'MPI.*.so')
+        args=()
+        for lib in $(ldd "$so" | awk '{print $1}' | grep -E '^lib(mpi|open-pal|open-rte|event|hwloc|pmix|fabric)' | sort -u); do
+          args+=(--exclude "$lib")
+        done
+        auditwheel repair "${args[@]}" -w "$dest_dir" "$wheel"
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Matches upstream's own ci-test.yml "Configure hostname" step: without a resolvable
+      # hostname, Open MPI's out-of-band TCP setup for a multi-process run can hang.
+      cibw-before-all-linux: "dnf -y install openmpi-devel && echo \"127.0.0.1 $(hostname)\" >> /etc/hosts"
+      cibw-environment-linux: "PATH=\"/usr/lib64/openmpi/bin:$PATH\" LD_LIBRARY_PATH=\"/usr/lib64/openmpi/lib:${LD_LIBRARY_PATH:-}\""
+      # Open MPI compiles its MCA components statically into libmpi/libopen-pal on this
+      # image (no lib/openmpi/*.so plugin tree), so excluding the whole chain here and
+      # requiring the target system's own Open MPI is safe - a partial vendor would
+      # otherwise ship a libmpi.so with no matching runtime.
+      cibw-repair-wheel-command-linux: "bash {project}/riscv64-repair.sh {wheel} {dest_dir}"
+      # The manylinux container runs as root, which Open MPI's mpiexec refuses by default.
+      cibw-test-environment-linux: "OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+      cibw-test-sources: "test"
+      # Dynamic process management (MPI_Comm_spawn, used by test_spawn/test_dynproc and
+      # mpi4py.futures' pool in test_util_pool) hangs PRTE's resource mapper in this
+      # container ("prte-rmaps-base:all-available-resources-used", then no progress) -
+      # deselect those modules; `timeout` turns any other hang into a fast failure
+      # instead of riding out the job timeout. `--oversubscribe` is needed because the
+      # riscv64 CI runner exposes fewer slots than the `-n 2` run requests, and PRTE
+      # refuses to oversubscribe by default.
+      cibw-test-command: "python -m mpi4py --prefix && python -m mpi4py --mpi-library && timeout 600 mpiexec --oversubscribe -n 1 python test/main.py -v -e spawn -e dynproc -e util_pool && timeout 600 mpiexec --oversubscribe -n 2 python test/main.py -v -f -e spawn -e dynproc -e util_pool"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MPI4PY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout mpi4py ${{ env.MPI4PY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: mpi4py/mpi4py
-          ref: ${{ env.MPI4PY_VERSION }}
-          persist-credentials: false
-
-      - name: Write repair script
-        run: |
-          cat > riscv64-repair.sh <<'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          wheel="$1"
-          dest_dir="$2"
-          tmpdir=$(mktemp -d)
-          trap 'rm -rf "$tmpdir"' EXIT
-          unzip -q "$wheel" -d "$tmpdir"
-          so=$(find "$tmpdir/mpi4py" -name 'MPI.*.so')
-          args=()
-          for lib in $(ldd "$so" | awk '{print $1}' | grep -E '^lib(mpi|open-pal|open-rte|event|hwloc|pmix|fabric)' | sort -u); do
-            args+=(--exclude "$lib")
-          done
-          auditwheel repair "${args[@]}" -w "$dest_dir" "$wheel"
-          EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: .
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Matches upstream's own ci-test.yml "Configure hostname" step: without a resolvable
-          # hostname, Open MPI's out-of-band TCP setup for a multi-process run can hang.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install openmpi-devel &&
-            echo "127.0.0.1 $(hostname)" >> /etc/hosts
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="/usr/lib64/openmpi/bin:$PATH"
-            LD_LIBRARY_PATH="/usr/lib64/openmpi/lib:${LD_LIBRARY_PATH:-}"
-          # Open MPI compiles its MCA components statically into libmpi/libopen-pal on this
-          # image (no lib/openmpi/*.so plugin tree), so excluding the whole chain here and
-          # requiring the target system's own Open MPI is safe - a partial vendor would
-          # otherwise ship a libmpi.so with no matching runtime.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: bash {project}/riscv64-repair.sh {wheel} {dest_dir}
-          # The manylinux container runs as root, which Open MPI's mpiexec refuses by default.
-          CIBW_TEST_ENVIRONMENT_LINUX: >-
-            OMPI_ALLOW_RUN_AS_ROOT=1
-            OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
-          CIBW_TEST_SOURCES: test
-          # Dynamic process management (MPI_Comm_spawn, used by test_spawn/test_dynproc and
-          # mpi4py.futures' pool in test_util_pool) hangs PRTE's resource mapper in this
-          # container ("prte-rmaps-base:all-available-resources-used", then no progress) -
-          # deselect those modules; `timeout` turns any other hang into a fast failure
-          # instead of riding out the job timeout. `--oversubscribe` is needed because the
-          # riscv64 CI runner exposes fewer slots than the `-n 2` run requests, and PRTE
-          # refuses to oversubscribe by default.
-          CIBW_TEST_COMMAND: >-
-            python -m mpi4py --prefix &&
-            python -m mpi4py --mpi-library &&
-            timeout 600 mpiexec --oversubscribe -n 1 python test/main.py -v -e spawn -e dynproc -e util_pool &&
-            timeout 600 mpiexec --oversubscribe -n 2 python test/main.py -v -f -e spawn -e dynproc -e util_pool
+          name: mpi4py-${{ env.MPI4PY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel links Open MPI instead of vendoring it
         run: |
@@ -141,15 +141,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mpi4py-${{ env.MPI4PY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish mpi4py ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
