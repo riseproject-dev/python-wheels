@@ -18,6 +18,16 @@ checks immutable repository selectors and the exact original dispatch/run
 binding, and authorizes the concrete target before calling the artifact client.
 It does not change general resource-scope validation.
 
+A subsequent live run uploaded the artifact but failed finalization with
+`Unsupported Claim effect target field: name`. The upstream verifier returned
+artifact descriptor metadata where the native delivery checker expected an
+authorization target. The patch now preserves the private upload-time native
+target and returns a registered `createClaimResourceVerification` proof with a
+separate `authority_resource`, checked by `withClaimResourceVerification`.
+The artifact descriptor still retains its exact ID/name/run/digest metadata;
+no general target fields are broadened. This is the existing native verifier
+pattern, not a fabricated Result or a new delivery protocol.
+
 Unchanged: durable Completion requirement, original Claim and factory fences,
 repository-ID checks, immutable Work scope, original native run binding,
 closed effect channels, private in-process delivery receipt, independent
@@ -33,7 +43,9 @@ credentials and run `upstreaming/gh_aw_compat.py` against the flat runtime modul
 The installer checks the original handler SHA-256, applies only
 `native-artifact.patch`, and checks the exact resulting SHA-256. Unknown source,
 symlink, failed application or unexpected output aborts the job. Reapplication
-of the exact patched file is idempotent.
+of the exact patched file is idempotent. The patch uses zero-context hunks;
+application is permitted only after the exact source SHA-256 matches, and the
+runtime is replaced only after the complete output SHA-256 matches.
 
 Compiler-generated lock files are never edited by hand. The gh-aw release,
 setup action and CLI stay pinned to v1.2.2.
@@ -41,7 +53,7 @@ setup action and CLI stay pinned to v1.2.2.
 ## Tests
 
 ```sh
-python3 -m unittest upstreaming.tests.test_gh_aw_compat
+uv run --no-project --with-requirements upstreaming/requirements.txt python -m unittest upstreaming.tests.test_gh_aw_compat
 sh upstreaming/gh-aw-compat/check.sh
 ```
 
@@ -54,9 +66,12 @@ upload. Existing tests reject foreign Claims, cancelled Claims, reused factories
 closed channels and every altered artifact metadata field. All APIs and uploads
 are mocked. No remote state is changed.
 
-Local result: 109 tests pass (30 artifact tests, 79 resource-scope tests).
+Local result: 110 tests pass (31 artifact tests, 79 resource-scope tests).
+The added test exercises `inspectClaimDelivery`, not just artifact upload or
+a standalone verifier, and checks a verified descriptor after private target
+receipt authorization.
 Live end-to-end validation is still required; this result alone does not prove
-that the pipeline publishes or that numpy CI runs.
+that the pipeline publishes or that contribution CI runs.
 
 Two companion integration corrections use the actual v1.2.2 behavior:
 

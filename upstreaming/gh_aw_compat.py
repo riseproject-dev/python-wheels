@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 
 SOURCE_SHA256 = "5713a810aacb0c748eebb787876e21c64400fc675d966c234c44e318c5f7a52b"
-PATCHED_SHA256 = "40dab6558f2a3620cf46061044b5d8f73516f500ccf4baf6a2a36a6017fa6fca"
+PATCHED_SHA256 = "d0cb0128220bb95633b0acbbb20ccb6e26c53a7b4a3d07d4e33347f7657a15a0"
 PATCH = Path(__file__).with_name("gh-aw-compat") / "native-artifact.patch"
 
 
@@ -35,7 +35,7 @@ def apply(actions: Path) -> str:
         candidate = Path(tmp) / handler.name
         candidate.write_bytes(handler.read_bytes())
         for check in (True, False):
-            subprocess.run(["git", "apply", "-p4", *(["--check"] if check else []), str(PATCH)],
+            subprocess.run(["git", "apply", "--unidiff-zero", "-p4", *(["--check"] if check else []), str(PATCH)],
                            cwd=tmp, check=True, capture_output=True)
         data = candidate.read_bytes()
         if hashlib.sha256(data).hexdigest() != PATCHED_SHA256:

@@ -156,6 +156,28 @@ describe("upload_artifact actual disabled/single/multi-Claim entrypoints", () =>
     expect(f.effects.get("h1")).toEqual([]);
   });
 
+  it("finalizes the native artifact descriptor through its separate protected authorization receipt", async () => {
+    const f = setup();
+    await f.stage("h1");
+    await f.complete();
+    const message = { type: "upload_artifact", path: "report.txt", claim_handle: "h1" };
+    const result = await f.execute("h1", async () => (await runtime.main({}))(message));
+    expect(result.success).toBe(true);
+    const github = { rest: { actions: { getArtifact: vi.fn().mockResolvedValue({ data: {
+      id: 101, name: result.artifactName, expired: false, workflow_run: { id: 42 },
+      digest: `sha256:${digest}`, size_in_bytes: 6,
+    } }) } } };
+    const { inspectClaimDelivery } = require("./work_queue_delivery.cjs");
+    const receipt = await f.execute("h1", () => inspectClaimDelivery({
+      assignment: f.fixture.assignment, claim_handle: "h1", messages: [message],
+      results: [{ messageIndex: 0, success: true, result }], effects: f.effects.get("h1"),
+      authorize: request => authorizeWorkerClaim({ ...f.options, ...request }),
+      context: f.fixture.workerContext, github, verifyOutput: runtime.verifyArtifactDelivery,
+    }), { closedEffectChannel: true });
+    expect(receipt.verification).toBe("verified");
+    expect(receipt.descriptor.outputs[0].resource).toMatchObject({ kind: "artifact", target_run_id: "42", name: result.artifactName });
+  });
+
   it("authorizes Claim artifact uploads on the configured enterprise host", async () => {
     process.env.GITHUB_SERVER_URL = "https://contoso.example";
     const f = setup(1, "contoso.example");

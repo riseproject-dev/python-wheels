@@ -112,6 +112,32 @@ def intake_issues(api: Api, max_pages: int = 3) -> list[dict]:
     return [i for i in items if "pull_request" not in i]
 
 
+def tracking_issue_context(issue: dict, expected: dict) -> dict:
+    """Freeze the whole issue description into a task; never truncate it.
+    The URL is constructed from the verified control-repository issue identity.
+    Comments remain available for the agent to read through that URL/API."""
+    from .common import sha256_text
+    if issue.get("id") != expected["id"] or issue.get("number") != expected["number"]:
+        raise CollectError("tracking issue identity changed")
+    body = issue.get("body") or ""
+    if not isinstance(body, str) or len(body.encode("utf-8")) > 16384:
+        raise CollectError("tracking issue description exceeds the intake limit; not truncated")
+    return {"id": issue["id"], "number": issue["number"],
+            "url": f"https://github.com/{CONTROL_REPO}/issues/{issue['number']}",
+            "description": body, "description_digest": sha256_text(body)}
+
+
+def tracking_issues(api: Api, contributions: Iterable[dict], intake_issues: list[dict]) -> dict[int, dict]:
+    """Fresh descriptions for every live tracked issue (not just labeled intake)."""
+    from .lifecycle import TERMINAL
+    issues = {i["number"]: i for i in intake_issues}
+    for rec in contributions:
+        n = rec["tracking_issue"]["number"]
+        if rec["phase"] not in TERMINAL and n not in issues:
+            issues[n] = api.get(f"/repos/{CONTROL_REPO}/issues/{n}")
+    return issues
+
+
 def label_acceptances(api: Api, issues: Iterable[dict], label: str, authority: Iterable[int]) -> dict[int, int]:
     """issue id -> the authorized actor who added ``label`` (from the issue's
     events). Adding the intake label is how a RISE owner accepts a request
