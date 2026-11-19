@@ -90,6 +90,9 @@ safe-outputs:
   noop:
     report-as-issue: false
 pre-agent-steps:
+  - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+    with:
+      enable-cache: false
   - name: Check out the upstream project (read-only)
     env:
       GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions

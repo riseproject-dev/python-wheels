@@ -88,9 +88,15 @@ reserved for non-GitHub sources and general discovery. The
 trusted `record` job still independently resolves and validates the exact native
 Result. A new dependent `notify` job renders that verified dossier into a bounded,
 idempotent tracking-issue comment, verifies readback and uploads a receipt. Agent
-prose, staging and unverified artifacts cannot reach the issue. After this code
-merges, `upstreaming-state/` and the development `work-queue` branch will be reset
-and a clean controller run will bootstrap the canonical contract.
+prose, staging and unverified artifacts cannot reach the issue. Development state and the native queue have been reset and the canonical
+contract bootstrapped. Live authenticated GitHub research succeeded without
+anonymous rate-limit failures, the agent's file preflight passed, artifact staging
+and claim-finish intent both succeeded. The trusted gate then exposed a local
+namespace bug: it hashed pretty pipeline JSON rather than gh-aw's compact,
+key-sorted native Claim identity. The staged directory matched the native codec;
+no Result or tracking comment was accepted. The correction uses the exact native
+codec and installs `uv` in the agent job for the required preflight. Another
+development reset and live run remain required.
 
 Previously merged implementation:
 
