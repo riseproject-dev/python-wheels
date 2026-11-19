@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
+import sys
 
 from upstreaming import capacity, collect, controller, dossier_gate, schemas, work
 from upstreaming.common import canonical_json, sha256_text
@@ -58,6 +60,19 @@ def dossier():
 class TestDossierCompleteness(unittest.TestCase):
     def test_complete_dossier_accepted(self):
         dossier_gate.validate(dossier(), proposal(), task())
+
+    def test_agent_preflight_cli_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, value in (("dossier", dossier()), ("proposal", proposal()), ("task", task())):
+                (root / f"{name}.json").write_text(json.dumps(value))
+            command = [sys.executable, "-m", "upstreaming.dossier_gate",
+                       "--dossier", str(root / "dossier.json"), "--proposal", str(root / "proposal.json"),
+                       "--task", str(root / "task.json")]
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            invalid = dossier(); invalid["history"] = [[ISSUE_URL, "open"]]
+            (root / "dossier.json").write_text(json.dumps(invalid))
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
 
     def test_every_category_is_required(self):
         for category in dossier_gate.RESEARCH_CATEGORIES:

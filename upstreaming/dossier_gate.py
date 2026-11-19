@@ -103,11 +103,23 @@ def check_stage(assignment: dict, staging: Path, finish_root: Path) -> str:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--staging", type=Path, required=True)
-    parser.add_argument("--finish-root", type=Path, required=True)
+    parser.add_argument("--staging", type=Path)
+    parser.add_argument("--finish-root", type=Path)
+    parser.add_argument("--dossier", type=Path)
+    parser.add_argument("--proposal", type=Path)
+    parser.add_argument("--task", type=Path)
     parser.add_argument("--assignment-env", default="ASSIGNMENT")
     args = parser.parse_args()
-    raw = os.environ[args.assignment_env]
-    if len(raw.encode()) > 49152:
-        raise DossierError("assignment exceeds native bound")
-    print(check_stage(json.loads(raw), args.staging, args.finish_root))
+    files = (args.dossier, args.proposal, args.task)
+    if any(files):
+        if not all(files) or args.staging or args.finish_root:
+            parser.error("--dossier, --proposal and --task must be supplied together")
+        validate(*(json.loads(path.read_text()) for path in files))
+        print("dossier, proposal and task satisfy the research contract")
+    else:
+        if not args.staging or not args.finish_root:
+            parser.error("--staging and --finish-root are required for trusted staging validation")
+        raw = os.environ[args.assignment_env]
+        if len(raw.encode()) > 49152:
+            raise DossierError("assignment exceeds native bound")
+        print(check_stage(json.loads(raw), args.staging, args.finish_root))
