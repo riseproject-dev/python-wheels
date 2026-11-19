@@ -265,7 +265,7 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
         key = by_cid[cid]
         c = contributions[key]
         op = snap.operations.get(receipt.get("operation_id"))
-        if not op or op["kind"] != "dev_pr_create" or op["status"] not in recovery.OPEN \
+        if not op or op["kind"] not in ("dev_pr_create", "dev_pr_update") or op["status"] not in recovery.OPEN \
                 or c["phase"] != "development" or c.get("active_operation_id") != op["operation_id"] \
                 or c["revision"] != receipt.get("revision") or receipt.get("status") != "published":
             continue
@@ -280,8 +280,10 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
             dev_pr_report.append({"contribution": cid, "status": "readback unavailable"})
             continue
         marker = op["proposed"].get("marker")
+        body_ok = (marker in (pr.get("body") or "") if op["kind"] == "dev_pr_create"
+                   else "<!-- upstreaming-development:" in (pr.get("body") or ""))
         if pr.get("id") != receipt.get("pr_id") or pr.get("state") != "open" \
-                or marker not in (pr.get("body") or "") \
+                or not body_ok \
                 or (pr.get("head") or {}).get("sha") != op["target"]["expected_head"] \
                 or (pr.get("head") or {}).get("ref") != "riscv64" \
                 or (pr.get("head") or {}).get("repo", {}).get("id") != op["target"]["repository_id"] \

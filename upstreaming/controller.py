@@ -272,6 +272,36 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         res.stage("contributions", changed)
         res.report["dev_pr_requests"].append({"operation_id": op["operation_id"], "contribution_id": cid})
 
+    # Bootstrap CI once for an already recorded PR. This separate operation is
+    # needed when GitHub registered no inherited workflows at PR creation time.
+    for cid, c in list(by_id.items()):
+        if len(res.report["dev_pr_requests"]) >= 1:
+            break
+        fork = c.get("fork") or {}
+        artifact = c.get("proposal_artifact") or {}
+        if c["phase"] != "development" or c.get("paused") or c.get("blocked_reason") \
+                or c.get("active_operation_id") or fork.get("pr_number") is None \
+                or c.get("last_ci_evidence_id") or artifact.get("outcome") != "published":
+            continue
+        prior = [op for op in operations.values() if op["contribution_id"] == cid \
+                 and op["kind"] == "dev_pr_update" \
+                 and op["target"].get("expected_head") == fork.get("head_sha")]
+        if any(op["status"] in recovery.OPEN | {"confirmed"} for op in prior):
+            continue
+        op = recovery.plan(contribution_id=cid, revision=c["revision"], kind="dev_pr_update",
+                           policy_version=policy["policy_version"],
+                           reason_ids=[f"ci-bootstrap:{fork['head_sha']}"],
+                           target={"repository": fork["name"], "repository_id": fork["repository_id"],
+                                   "ref": "riscv64", "expected_head": fork["head_sha"],
+                                   "base_sha": c["upstream"]["base_sha"]},
+                           proposed={"marker": f"ci-bootstrap:{cid}:r{c['revision']}",
+                                     "content_digest": artifact["digest"]}, now=now)
+        res.stage("operations", op)
+        changed = dict(c, active_operation_id=op["operation_id"], activity="waiting_capacity", updated_at=now)
+        by_id[cid] = changed
+        res.stage("contributions", changed)
+        res.report["dev_pr_requests"].append({"operation_id": op["operation_id"], "contribution_id": cid})
+
     # 8-10. Select bounded work, honouring capacity and one worker.
     candidates = []
     for c in by_id.values():
