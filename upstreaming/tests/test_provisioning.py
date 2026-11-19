@@ -30,6 +30,7 @@ class Api:
         self.writes = []
         self.parent = 1
         self.defaults = {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}
+        self.actions = {"enabled": True, "allowed_actions": "all"}
         self.deny_settings = False
 
     def fork(self):
@@ -51,6 +52,8 @@ class Api:
             return {"commit": {"sha": self.head, "commit": {"tree": {"sha": "d" * 40}}, "parents": []}}
         if path == f"/repos/{FORK}/actions/permissions/workflow":
             return self.defaults
+        if path == f"/repos/{FORK}/actions/permissions":
+            return self.actions
         if path == f"/repos/{FORK}/actions/workflows?per_page=100":
             return {"total_count": 2, "workflows": [{"id": 5, "path": ".github/workflows/wheels.yml"},
                                                      {"id": 6, "path": ".github/workflows/publish.yml"}]}
@@ -70,6 +73,10 @@ class Api:
             return self.fork()
         if path == f"/repos/{FORK}/git/refs":
             self.head = body["sha"]
+        if path == f"/repos/{FORK}/actions/permissions/workflow":
+            self.defaults = dict(body)
+        if path == f"/repos/{FORK}/actions/permissions":
+            self.actions = dict(body)
         return {}
 
 
@@ -86,6 +93,9 @@ class TestProvisioning(unittest.TestCase):
         self.assertIn(("POST", f"/repos/{UP}/forks", {"organization": "riseproject-upstreaming", "name": "proj", "default_branch_only": True}), api.writes)
         self.assertIn(("POST", f"/repos/{FORK}/git/refs", {"ref": "refs/heads/riscv64", "sha": SHA_C}), api.writes)
         self.assertIn(".github/workflows/publish.yml", outcome["disabled_workflows"])
+        self.assertFalse(any(path in (f"/repos/{FORK}/actions/permissions",
+                                      f"/repos/{FORK}/actions/permissions/workflow")
+                             for _, path, _ in api.writes))
 
     def test_existing_fork_is_adopted_not_claimed_as_created(self):
         rec, op = request()
@@ -112,6 +122,7 @@ class TestProvisioning(unittest.TestCase):
         rec, op = request()
         api = Api()
         plan = provisioning.preflight(api, rec, op, policy(read_only=False))
+        api.defaults["default_workflow_permissions"] = "write"
         api.deny_settings = True
         with self.assertRaises(provisioning.ProvisionError):
             provisioning.initialize(api, plan)

@@ -90,8 +90,16 @@ investigator, worker, provisioning or publish-retry workflow completes, plus on
 request labels and commands. A 15-minute schedule is the recovery fallback.
 State-only commits do not trigger the controller, so the chain cannot recurse.
 
-Workflow-only fork provisioning is deployed but real creation/token/settings
-permissions remain unverified.
+Workflow-only fork creation is now live-verified: the trusted job created the
+correct destination fork with matching source/fork repository IDs and minted a
+separate single-fork token. Initialization stopped before branch creation because
+the token lacks repository-administration permission for an Actions-settings
+PUT. Fresh readback showed both desired settings were already inherited exactly
+(read-only workflow token, Actions enabled, all actions allowed). Current local
+code skips unnecessary administrative writes when settings already match and
+still requires exact readback; divergent settings remain fail-closed. The same
+operation can then be retried idempotently to disable inherited privileged
+workflows and create the exact `riscv64` base.
 
 Previously merged implementation:
 

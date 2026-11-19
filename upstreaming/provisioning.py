@@ -168,19 +168,29 @@ def initialize(api, plan: dict) -> dict:
         raise ProvisionError("unexpected existing riscv64 work; never reset it")
     if not head and plan.get("expected_head"):
         raise ProvisionError("recorded branch disappeared; recreation is not authorized")
-    # Fail closed on access denial; never substitute a local write or broader token.
-    api.write("PUT", f"/repos/{plan['fork']}/actions/permissions/workflow",
-              {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False})
-    api.write("PUT", f"/repos/{plan['fork']}/actions/permissions", {"enabled": True, "allowed_actions": "all"})
+    # Avoid requiring repository-administration permission when the organization
+    # and newly created fork already have the fail-closed desired settings. If a
+    # setting differs, attempt the narrow write and require exact readback.
+    permissions = api.get(f"/repos/{plan['fork']}/actions/permissions/workflow")
+    if permissions.get("default_workflow_permissions") != "read" \
+            or permissions.get("can_approve_pull_request_reviews"):
+        api.write("PUT", f"/repos/{plan['fork']}/actions/permissions/workflow",
+                  {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False})
+    actions = api.get(f"/repos/{plan['fork']}/actions/permissions")
+    if actions.get("enabled") is not True or actions.get("allowed_actions") != "all":
+        api.write("PUT", f"/repos/{plan['fork']}/actions/permissions", {"enabled": True, "allowed_actions": "all"})
+    permissions = api.get(f"/repos/{plan['fork']}/actions/permissions/workflow")
+    actions = api.get(f"/repos/{plan['fork']}/actions/permissions")
+    if permissions.get("default_workflow_permissions") != "read" \
+            or permissions.get("can_approve_pull_request_reviews") \
+            or actions.get("enabled") is not True or actions.get("allowed_actions") != "all":
+        raise ProvisionError("fork Actions settings readback failed")
     disabled = disable_unsafe_workflows(api, plan["fork"])
     if head is None:
         api.write("POST", f"/repos/{plan['fork']}/git/refs", {"ref": "refs/heads/riscv64", "sha": plan["base_sha"]})
     observed = collect.branch_head(api, plan["fork"], "riscv64")
-    permissions = api.get(f"/repos/{plan['fork']}/actions/permissions/workflow")
-    if not observed or observed["head"] != (head["head"] if head else plan["base_sha"]) \
-            or permissions.get("default_workflow_permissions") != "read" \
-            or permissions.get("can_approve_pull_request_reviews"):
-        raise ProvisionError("fork provisioning readback failed")
+    if not observed or observed["head"] != (head["head"] if head else plan["base_sha"]):
+        raise ProvisionError("fork provisioning branch readback failed")
     return dict(plan, status="provisioned", head_sha=observed["head"], actions_read_only=True, disabled_workflows=disabled)
 
 
