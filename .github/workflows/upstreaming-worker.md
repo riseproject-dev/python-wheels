@@ -351,4 +351,10 @@ and analogous changes in the proposal diagnosis.
    use `outcome: "needs_clarification"` with the options and your
    recommendation in `diagnosis`.
 8. Commit messages follow the upstream project's conventions. Never mention
-   AI tools or add AI attribution trailers.
+   AI tools or add AI attribution trailers. When the patch adds or relies on the
+   `ubuntu-24.04-riscv` native runner, the commit body must mention
+   `RISC-V GitHub Runners [1]` and end with this reference line exactly:
+
+   ```text
+   [1]: https://ci.riseproject.dev/
+   ```
