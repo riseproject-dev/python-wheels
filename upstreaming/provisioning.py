@@ -141,7 +141,7 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
         # fork even when repository Actions is enabled. Reapply the repository
         # Actions switch with the one-fork Administration token, then require
         # the files to appear before opening/reopening a PR.
-        api.write("PUT", f"/repos/{fork}/actions/permissions", {"enabled": False, "allowed_actions": "all"})
+        api.write("PUT", f"/repos/{fork}/actions/permissions", {"enabled": False})
         api.write("PUT", f"/repos/{fork}/actions/permissions", {"enabled": True, "allowed_actions": "all"})
         inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
         if not inventory.get("workflows"):
