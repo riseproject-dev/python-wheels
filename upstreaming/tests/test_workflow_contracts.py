@@ -72,6 +72,13 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("upstreaming.dossier_comment", notify_text)
         self.assertIn("upstreaming-publication", notify_text)
 
+    def test_provisioning_administration_is_restricted_to_one_verified_fork(self):
+        provision = yaml.safe_load((WF / "upstreaming-provision.yml").read_text())
+        token = next(step for step in provision["jobs"]["provision"]["steps"] if step.get("id") == "fork-token")
+        self.assertEqual(token["with"]["permission-administration"], "write")
+        self.assertEqual(token["with"]["repositories"], "${{ steps.create.outputs.fork_name }}")
+        self.assertEqual(token["with"]["owner"], "riseproject-upstreaming")
+
     def test_controller_chains_every_pipeline_completion_and_has_schedule_fallback(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         triggers = controller.get("on", controller.get(True))
