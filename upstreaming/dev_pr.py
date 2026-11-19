@@ -44,7 +44,7 @@ def load_request(root: Path, operation_id: str) -> tuple[dict, dict]:
     record = json.loads((root / "upstreaming-state/contributions" / f"{cid}.json").read_text())
     schemas.validate("contribution", record)
     fork = record.get("fork") or {}
-    if op["kind"] != "dev_pr_create" or op["status"] != "planned" \
+    if op["kind"] not in ("dev_pr_create", "dev_pr_update") or op["status"] != "planned" \
             or record["phase"] != "development" or record.get("active_operation_id") != operation_id \
             or record["revision"] != op["revision"] or record.get("paused") or record.get("blocked_reason"):
         raise DevPRError("operation is not the current authorized development PR intent")
@@ -92,11 +92,19 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
     query = urllib.parse.urlencode({"state": "open", "head": f"{owner}:{DEV_REF}", "base": base_ref, "per_page": 100})
     pulls = api.get(f"/repos/{repo['full_name']}/pulls?{query}")
     marker = op["proposed"]["marker"]
-    matching = [pr for pr in pulls if marker in (pr.get("body") or "")]
-    unrelated = [pr for pr in pulls if marker not in (pr.get("body") or "")]
-    if len(matching) > 1 or unrelated:
-        raise DevPRError("existing development-head PR is ambiguous or unrelated")
-    expected_body = body(record, op)
+    if op["kind"] == "dev_pr_update":
+        matching = [pr for pr in pulls if pr.get("number") == (record.get("fork") or {}).get("pr_number")
+                    and "<!-- upstreaming-development:" in (pr.get("body") or "")]
+        unrelated = [pr for pr in pulls if pr not in matching]
+        if len(matching) != 1 or unrelated:
+            raise DevPRError("recorded development PR is missing, ambiguous or unrelated")
+        expected_body = matching[0]["body"]
+    else:
+        matching = [pr for pr in pulls if marker in (pr.get("body") or "")]
+        unrelated = [pr for pr in pulls if marker not in (pr.get("body") or "")]
+        if len(matching) > 1 or unrelated:
+            raise DevPRError("existing development-head PR is ambiguous or unrelated")
+        expected_body = body(record, op)
     pr = matching[0] if matching else api.mutate("POST", f"/repos/{repo['full_name']}/pulls", {
         "title": "CI: develop riscv64 wheel support",
         "head": DEV_REF,

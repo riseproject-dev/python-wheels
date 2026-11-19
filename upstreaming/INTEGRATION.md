@@ -142,7 +142,11 @@ retention or release behavior change. It also requires per-file commit history,
 issue/PR/review research and policy evidence before editing changelogs or other
 policy-sensitive files. Existing PR CI that builds but intentionally does not
 upload artifacts is left unchanged; any extra acceptance evidence belongs in a
-separate trusted probe.
+separate trusted probe. If PR creation was confirmed before workflow registration
+was repaired, the controller records a separate `dev_pr_update` CI-bootstrap
+operation. That operation may enable safe workflows and reopen only the exact
+recorded marked PR, once, to emit the normal event without rewriting operation
+history.
 
 Previously merged implementation:
 
