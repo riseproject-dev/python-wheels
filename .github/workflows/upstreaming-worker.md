@@ -25,11 +25,39 @@ tools:
   work-queue:
     require-assignment: true
     worker: true
-  github:
-    toolsets: [repos, issues, pull_requests, actions]
   bash:
     - "*"
   edit:
+mcp-servers:
+  github-authenticated:
+    # Read-only, job-token authenticated history research without the pinned
+    # gateway's incompatible cross-server source-integrity labels.
+    container: "ghcr.io/github/github-mcp-server:v2.1.0"
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${{ github.token }}"
+      GITHUB_READ_ONLY: "1"
+      GITHUB_TOOLSETS: "context,repos,issues,pull_requests,actions"
+      GITHUB_FEATURES: "fields_param"
+    allowed:
+      - get_commit
+      - get_file_contents
+      - get_pull_request
+      - get_pull_request_comments
+      - get_pull_request_diff
+      - get_pull_request_files
+      - get_pull_request_review_comments
+      - get_pull_request_reviews
+      - get_pull_request_status
+      - issue_read
+      - list_commits
+      - list_issues
+      - list_pull_requests
+      - pull_request_read
+      - search_code
+      - search_issues
+      - search_pull_requests
+      - actions_list
+    required: true
 safe-outputs:
   upload-artifact:
     max-uploads: 1
@@ -261,7 +289,8 @@ into scripts or package publication step is rejected.
 ## Mandatory change-history research
 
 Before modifying any file, extensively research whether that kind of change is
-accepted by this project:
+accepted by this project. Use `github-authenticated` for all GitHub issue, PR,
+review, Actions and code queries; do not use anonymous GitHub fetching.
 
 - run `git log --follow -- <path>` and inspect the relevant commits and diffs;
 - use blame where needed to identify the decision and maintainers behind the
