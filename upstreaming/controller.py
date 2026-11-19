@@ -238,6 +238,40 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         by_id[cid] = dict(c, active_operation_id=op["operation_id"], activity="waiting_capacity", updated_at=now)
         res.report["provision_requests"].append({"operation_id": op["operation_id"], "contribution_id": cid})
 
+    # A published development head gets a same-fork development PR before CI
+    # observation. Persist intent first; the trusted workflow creates/discovers
+    # exactly riscv64 -> the frozen upstream base ref and returns a receipt.
+    res.report["dev_pr_requests"] = []
+    for cid, c in list(by_id.items()):
+        if len(res.report["dev_pr_requests"]) >= 1:
+            break
+        fork = c.get("fork") or {}
+        artifact = c.get("proposal_artifact") or {}
+        pubop = operations.get(c.get("publication_operation_id"))
+        if c["phase"] != "development" or c.get("paused") or c.get("blocked_reason") \
+                or c.get("active_operation_id") or fork.get("pr_number") is not None \
+                or not fork.get("repository_id") or not fork.get("head_sha") \
+                or fork.get("head_sha") == c["upstream"].get("base_sha") \
+                or artifact.get("outcome") != "published" or not artifact.get("result_commit") \
+                or not c.get("dossier_evidence_id") or not c.get("scope_paths") \
+                or not pubop or pubop.get("status") != "confirmed":
+            continue
+        marker = f"<!-- upstreaming-development:{cid}:r{c['revision']}:{fork['head_sha']} -->"
+        op = recovery.plan(contribution_id=cid, revision=c["revision"], kind="dev_pr_create",
+                           policy_version=policy["policy_version"],
+                           reason_ids=[c["dossier_evidence_id"], str(artifact["result_commit"])],
+                           target={"repository": fork["name"], "repository_id": fork["repository_id"],
+                                   "ref": "riscv64", "expected_head": fork["head_sha"],
+                                   "base_sha": c["upstream"]["base_sha"]},
+                           proposed={"marker": marker, "content_digest": artifact["digest"]}, now=now)
+        if op["operation_id"] in operations:
+            continue
+        res.stage("operations", op)
+        changed = dict(c, active_operation_id=op["operation_id"], activity="waiting_capacity", updated_at=now)
+        by_id[cid] = changed
+        res.stage("contributions", changed)
+        res.report["dev_pr_requests"].append({"operation_id": op["operation_id"], "contribution_id": cid})
+
     # 8-10. Select bounded work, honouring capacity and one worker.
     candidates = []
     for c in by_id.values():
