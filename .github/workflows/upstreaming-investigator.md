@@ -32,6 +32,46 @@ tools:
     - "*"
   edit:
 mcp-servers:
+  github-authenticated:
+    # Custom read-only server deliberately has no source-integrity guard: the
+    # pinned gateway cannot compose a labeled source with its unlabeled native
+    # queue-control server. Authentication still uses this job's scoped token.
+    container: "ghcr.io/github/github-mcp-server:v2.1.0"
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${{ github.token }}"
+      GITHUB_READ_ONLY: "1"
+      GITHUB_TOOLSETS: "context,repos,issues,pull_requests,actions"
+      GITHUB_FEATURES: "fields_param"
+    allowed:
+      - get_commit
+      - get_file_contents
+      - get_latest_release
+      - get_me
+      - get_pull_request
+      - get_pull_request_comments
+      - get_pull_request_diff
+      - get_pull_request_files
+      - get_pull_request_review_comments
+      - get_pull_request_reviews
+      - get_pull_request_status
+      - get_release_by_tag
+      - get_tag
+      - issue_read
+      - list_branches
+      - list_commits
+      - list_issue_types
+      - list_issues
+      - list_pull_requests
+      - list_releases
+      - list_starred_repositories
+      - list_tags
+      - pull_request_read
+      - search_code
+      - search_issues
+      - search_pull_requests
+      - search_repositories
+      - actions_list
+    required: true
   project-graph:
     container: "ghcr.io/riseproject-dev/sw-ecosystem/project-graph-mcp:latest"
     allowed: ["project_graph_query"]
@@ -270,13 +310,17 @@ must not perform remote mutations or call terminal safe outputs independently.
 
 ## Research route
 
-Use the installed read-only web extension (`web_search`, `fetch_content`,
-`get_search_content`, and its GitHub issue/PR support) for historical issues,
-PRs, reviews, comments and linked pages. Cross-check important claims against
-direct URLs and record the route and source for every category. The pinned MCP
-gateway cannot compose a labeled GitHub source guard with its unlabeled native
-queue-control server, so this read-only investigator intentionally has no GitHub
-MCP server. Do not use authenticated mutation tools or omit inaccessible history.
+Use `github-authenticated` for every GitHub repository, issue, PR, review,
+comment, Actions and code query. It is backed by this job's scoped `GH_TOKEN`,
+is read-only at both the workflow-permission and server levels, and avoids
+anonymous API limits. Do not use the web extension's anonymous GitHub fetcher
+for GitHub URLs. Use the installed read-only web extension (`web_search`,
+`fetch_content`, `get_search_content`) for non-GitHub websites, mailing lists,
+blogs and general discovery, then cross-check GitHub findings with the
+authenticated server. Record the route and source for every category. The custom
+server deliberately has no source-integrity guard because the pinned gateway
+cannot compose a labeled GitHub source with its unlabeled native queue-control
+server. Do not use mutation tools or omit inaccessible history.
 
 ## Required research (do this before drawing conclusions)
 

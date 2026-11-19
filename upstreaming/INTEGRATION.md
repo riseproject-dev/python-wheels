@@ -81,8 +81,10 @@ accepted, and no research comment was published.
 The operator explicitly authorized resetting non-production state and the native
 queue. Current local work consolidates all investigator checkpoints into the
 single canonical `upstreaming-investigator` workflow and removes GitHub MCP from
-that read-only role. The pinned web extension supplies issue, PR, review and web
-research without activating the incompatible cross-server DIFC composition. The
+that read-only role. A custom read-only GitHub MCP server uses the job's scoped `GITHUB_TOKEN` for
+issues, PRs, reviews, Actions and code without anonymous rate limits, while
+omitting the incompatible source-integrity guard. The pinned web extension is
+reserved for non-GitHub sources and general discovery. The
 trusted `record` job still independently resolves and validates the exact native
 Result. A new dependent `notify` job renders that verified dossier into a bounded,
 idempotent tracking-issue comment, verifies readback and uploads a receipt. Agent
@@ -102,9 +104,10 @@ Previously merged implementation:
   historical CI, reviews, documentation, websites, mailing lists, blogs,
   maintainers and release relationships, with recorded queries, pagination scope,
   source URLs and accepted/rejected decisions.
-- The read-only web extension provides issue/PR and broader web research. GitHub
-  MCP is intentionally absent because the pinned gateway cannot compose its
-  labeled source guard with the unlabeled native queue-control server.
+- A custom GitHub MCP server is authenticated with the job's scoped token and
+  forced read-only. It intentionally omits the built-in labeled source guard
+  because the pinned gateway cannot compose that guard with its unlabeled native
+  queue-control server. The web extension covers non-GitHub research.
 - Required project-graph MCP (`:latest`, as requested), with query/result and
   dependency assessment in the dossier. Runtime use is **not yet verified**.
 - Mandatory discovery of a matching ecosystem report; available reports must be

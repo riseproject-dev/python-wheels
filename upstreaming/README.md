@@ -148,8 +148,10 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    *Package build request* issue. The next controller tick creates the
    contribution in `queued` and, unless paused, requests an investigation.
 2. **Investigation.** The dispatcher launches `upstreaming-investigator`.
-   Read-only web tools cover issues, PRs, reviews and other historical sources;
-   the required graph MCP covers dependency evidence. After native delivery,
+   A custom read-only GitHub MCP server uses the job's scoped token for issues,
+   PRs, reviews, Actions and code without anonymous rate limits. Read-only web
+   tools cover non-GitHub historical sources; the required graph MCP covers
+   dependency evidence. After native delivery,
    the trusted `record` job validates the exact Result and the dependent
    `notify` job posts a bounded readable summary to the tracking issue. The
    controller records the dossier as evidence and waits in `investigation` /
