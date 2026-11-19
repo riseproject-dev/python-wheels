@@ -136,6 +136,7 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
     inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
     if inventory.get("total_count", 0) > 100:
         raise ProvisionError("Actions workflow inventory exceeds bounded setup scan")
+    registered_now = False
     if not inventory.get("workflows") and entries:
         # GitHub can leave inherited workflows unregistered on a fresh public
         # fork even when repository Actions is enabled. Reapply the repository
@@ -146,6 +147,7 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
         inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
         if not inventory.get("workflows"):
             raise ProvisionError("fork workflows remain unregistered after Actions re-enable")
+        registered_now = True
     states = {wf.get("path"): wf.get("state") for wf in inventory.get("workflows", [])}
     names = [entry.get("name") for entry in entries if entry.get("type") == "file"]
     if len(names) != len(set(names)):
@@ -179,6 +181,11 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
             identifier = urllib.parse.quote(entry["name"], safe="")
             api.write("PUT", f"/repos/{fork}/actions/workflows/{identifier}/{action}", {})
             changed["disabled" if unsafe else "enabled"].append(path)
+        elif registered_now and not unsafe:
+            # Registration itself changed CI eligibility even when GitHub
+            # immediately reports the safe workflow as active. The caller must
+            # emit one normal PR event for the already-open development PR.
+            changed["enabled"].append(path)
     return changed
 
 

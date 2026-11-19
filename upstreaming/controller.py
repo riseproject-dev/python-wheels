@@ -283,14 +283,14 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
                 or c.get("active_operation_id") or fork.get("pr_number") is None \
                 or c.get("last_ci_evidence_id") or artifact.get("outcome") != "published":
             continue
+        reason = f"ci-bootstrap-event-v2:{fork['head_sha']}"
         prior = [op for op in operations.values() if op["contribution_id"] == cid \
-                 and op["kind"] == "dev_pr_update" \
+                 and op["kind"] == "dev_pr_update" and reason in op["reason_ids"] \
                  and op["target"].get("expected_head") == fork.get("head_sha")]
         if any(op["status"] in recovery.OPEN | {"confirmed"} for op in prior):
             continue
         op = recovery.plan(contribution_id=cid, revision=c["revision"], kind="dev_pr_update",
-                           policy_version=policy["policy_version"],
-                           reason_ids=[f"ci-bootstrap:{fork['head_sha']}"],
+                           policy_version=policy["policy_version"], reason_ids=[reason],
                            target={"repository": fork["name"], "repository_id": fork["repository_id"],
                                    "ref": "riscv64", "expected_head": fork["head_sha"],
                                    "base_sha": c["upstream"]["base_sha"]},
@@ -335,6 +335,11 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
                 rep["deferred"].append({"contribution": c["contribution_id"], "why": why})
                 continue
         slots -= 1
+        reason_ids = []
+        if kind in ("development_repair", "upstream_revision") and c.get("last_ci_evidence_id"):
+            reason_ids = [c["last_ci_evidence_id"]]
+        elif c.get("dossier_evidence_id"):
+            reason_ids = [c["dossier_evidence_id"]]
         work = {
             "type": "submit_work",
             "dedupe_key": f"{c['contribution_id']}@{c['revision']}:{kind}",
@@ -342,6 +347,7 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
             "revision": c["revision"],
             "expected_head": (c.get("fork") or {}).get("head_sha"),
             "task": kind,
+            "reason_ids": reason_ids,
             "effect_contract": ({"kind": "none"} if kind == "investigation"
                                 else {"kind": "fork_branch", "repository": (c.get("fork") or {}).get("name"),
                                       "ref": "riscv64"}),
@@ -355,7 +361,7 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
             "dedupe_key": work["dedupe_key"], "task": kind, "revision": c["revision"],
             "requested_at": now,
             "deadline_at": (inputs.now + timedelta(hours=WORK_DEADLINE_HOURS)).isoformat(),
-            "dispatched_run_id": None})
+            "dispatched_run_id": None, "reason_ids": reason_ids})
         issue = inputs.tracking_issues.get(c["tracking_issue"]["number"]) or next(
             (i for i in inputs.issues if i["number"] == c["tracking_issue"]["number"]), None)
         if issue is not None:

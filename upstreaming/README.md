@@ -185,7 +185,9 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    edit, the worker must inspect per-file commit history, analogous accepted and
    rejected PRs, relevant issues/reviews and repository contribution/release
    policy. Policy-sensitive files such as changelogs are changed only when that
-   evidence establishes the convention. The `upstreaming-worker` then proposes
+   evidence establishes the convention. Repair tasks also receive bounded durable
+   evidence summaries for the exact review or CI feedback that caused them. The
+   `upstreaming-worker` then proposes
    a series, and its trusted `publish` job
    automatically rebuilds, revalidates and pushes it to `riscv64` under the
    exact operation, token and expected-head gates. The controller records a
