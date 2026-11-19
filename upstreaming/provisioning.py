@@ -126,11 +126,39 @@ def create_or_reuse(reader, creator, plan: dict) -> dict:
     return dict(plan, fork_id=result["id"], created=True)
 
 
-def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[str, list[str]]:
+def _literal_false(value) -> bool:
+    return value is False or isinstance(value, str) and value.strip().lower() in ("false", "${{ false }}")
+
+
+def _workflow_unsafe(workflow: dict, text: str) -> bool:
+    if re.search(r"\bpull_request_target\s*:", text):
+        return True
+    permissions = workflow.get("permissions", {})
+    if not isinstance(permissions, dict) or any(permissions.get(k) == "write" for k in
+        ("contents", "issues", "pull-requests", "administration", "workflows", "id-token")):
+        return True
+    for job in (workflow.get("jobs") or {}).values():
+        if not isinstance(job, dict) or _literal_false(job.get("if")):
+            continue
+        permissions = job.get("permissions", {})
+        if not isinstance(permissions, dict) or any(permissions.get(k) == "write" for k in
+            ("contents", "issues", "pull-requests", "administration", "workflows", "id-token")):
+            return True
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict) or _literal_false(step.get("if")):
+                continue
+            uses = str(step.get("uses") or "")
+            run = str(step.get("run") or "")
+            if "pypa/gh-action-pypi-publish" in uses or re.search(r"\btwine\s+upload\b", run):
+                return True
+    return False
+
+
+def configure_inherited_workflows(api, fork: str, content_ref: str) -> dict[str, list[str]]:
     """Enable safe CI and disable privileged/publication workflows.
     Contents are the authoritative inventory because a fresh public fork can
     report zero Actions workflows until one is explicitly enabled."""
-    entries = api.get(f"/repos/{fork}/contents/.github/workflows?ref={urllib.parse.quote(default_branch)}")
+    entries = api.get(f"/repos/{fork}/contents/.github/workflows?ref={urllib.parse.quote(content_ref)}")
     if not isinstance(entries, list) or len(entries) > 100:
         raise ProvisionError("workflow contents inventory is missing or exceeds bounded setup scan")
     inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
@@ -159,7 +187,7 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
                 or not path.startswith(".github/workflows/") or ".." in path.split("/") \
                 or not path.endswith((".yml", ".yaml")):
             raise ProvisionError("unexpected inherited workflow path")
-        data = api.get(f"/repos/{fork}/contents/{urllib.parse.quote(path, safe='/')}?ref={urllib.parse.quote(default_branch)}")
+        data = api.get(f"/repos/{fork}/contents/{urllib.parse.quote(path, safe='/')}?ref={urllib.parse.quote(content_ref)}")
         if data.get("type") != "file" or data.get("encoding") != "base64":
             raise ProvisionError("workflow must be a regular data file")
         raw = base64.b64decode(data["content"])
@@ -169,19 +197,17 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
         workflow = yaml.safe_load(text)
         if not isinstance(workflow, dict):
             raise ProvisionError("invalid inherited workflow")
-        levels = [workflow.get("permissions", {})] + [j.get("permissions", {}) for j in (workflow.get("jobs") or {}).values()]
-        unsafe = bool(re.search(r"pull_request_target|id-token\\s*:\\s*write|twine\\s+upload|pypa/gh-action-pypi-publish", text))
-        for permissions in levels:
-            if not isinstance(permissions, dict):
-                unsafe = True
-            elif any(permissions.get(k) == "write" for k in ("contents", "issues", "pull-requests", "administration", "workflows")):
-                unsafe = True
-        desired, action = ("disabled_manually", "disable") if unsafe else ("active", "enable")
-        if states.get(path) != desired:
-            identifier = urllib.parse.quote(entry["name"], safe="")
-            api.write("PUT", f"/repos/{fork}/actions/workflows/{identifier}/{action}", {})
-            changed["disabled" if unsafe else "enabled"].append(path)
-        elif registered_now and not unsafe:
+        unsafe = _workflow_unsafe(workflow, text)
+        state = states.get(path)
+        identifier = urllib.parse.quote(entry["name"], safe="")
+        if unsafe:
+            if state == "active":
+                api.write("PUT", f"/repos/{fork}/actions/workflows/{identifier}/disable", {})
+            changed["disabled"].append(path)
+        elif state != "active":
+            api.write("PUT", f"/repos/{fork}/actions/workflows/{identifier}/enable", {})
+            changed["enabled"].append(path)
+        elif registered_now:
             # Registration itself changed CI eligibility even when GitHub
             # immediately reports the safe workflow as active. The caller must
             # emit one normal PR event for the already-open development PR.

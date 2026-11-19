@@ -49,9 +49,9 @@ class FakeApi:
                     "fork": True, "parent": {"id": 1, "full_name": "example/proj"}}
         if path == f"/repos/{FORK}/branches/riscv64":
             return {"commit": {"sha": SHA_B, "commit": {"tree": {"sha": "d" * 40}}, "parents": []}}
-        if path == f"/repos/{FORK}/contents/.github/workflows?ref=main":
+        if path == f"/repos/{FORK}/contents/.github/workflows?ref=riscv64":
             return [{"type": "file", "name": "build.yml", "path": ".github/workflows/build.yml"}]
-        if path == f"/repos/{FORK}/contents/.github/workflows/build.yml?ref=main":
+        if path == f"/repos/{FORK}/contents/.github/workflows/build.yml?ref=riscv64":
             import base64
             text = "name: CI\npermissions: {contents: read}\njobs: {}\n"
             return {"type": "file", "encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
