@@ -102,7 +102,14 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("github.event_name == 'workflow_run'", controller["jobs"]["filter"]["if"])
 
     def test_worker_forbids_unrelated_fork_ci_debug_changes(self):
+        worker = source("upstreaming-worker")
+        self.assertNotIn("github", worker["tools"])
+        github = worker["mcp-servers"]["github-authenticated"]
+        self.assertEqual(github["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "${{ github.token }}")
+        self.assertEqual(github["env"]["GITHUB_READ_ONLY"], "1")
+        self.assertTrue(github["required"])
         text = (WF / "upstreaming-worker.md").read_text()
+        self.assertIn("do not use anonymous GitHub fetching", text)
         self.assertIn("do not add `push: riscv64`", text)
         self.assertIn("do not broaden conditions", text)
         self.assertIn("`inputs.upload`", text)
