@@ -49,12 +49,10 @@ SAFE_GIT_CONFIG = [
 FORBIDDEN_WORKFLOW = [
     (re.compile(r"^\s*pull_request_target\s*:", re.M), "pull_request_target trigger"),
     (re.compile(r"\bpull_request_target\b"), "pull_request_target trigger"),
-    (re.compile(r"id-token\s*:\s*write"), "OIDC id-token: write"),
     (re.compile(r"permissions\s*:\s*write-all"), "permissions: write-all"),
     (re.compile(r"\$\{\{\s*secrets\.(?!GITHUB_TOKEN\b)"), "new secret reference"),
     (re.compile(r"\$\{\{\s*github\.event\.(issue|comment|review|pull_request)\.(title|body)"),
      "interpolation of untrusted event text"),
-    (re.compile(r"(pypa/gh-action-pypi-publish|twine\s+upload)"), "package publication"),
 ]
 
 

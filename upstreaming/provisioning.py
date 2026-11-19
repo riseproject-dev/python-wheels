@@ -131,26 +131,26 @@ def _literal_false(value) -> bool:
 
 
 def _workflow_unsafe(workflow: dict, text: str) -> bool:
+    """Protect the fork itself, not external publication credentials.
+
+    riseproject-upstreaming is a credentialless fork-only organization. OIDC,
+    Twine and package-publisher steps receive no configured relying-party trust
+    or package credentials there, so they are allowed to fail naturally. GitHub
+    repository mutation authority remains forbidden.
+    """
     if re.search(r"\bpull_request_target\s*:", text):
         return True
     permissions = workflow.get("permissions", {})
     if not isinstance(permissions, dict) or any(permissions.get(k) == "write" for k in
-        ("contents", "issues", "pull-requests", "administration", "workflows", "id-token")):
+        ("contents", "issues", "pull-requests", "administration", "workflows")):
         return True
     for job in (workflow.get("jobs") or {}).values():
         if not isinstance(job, dict) or _literal_false(job.get("if")):
             continue
         permissions = job.get("permissions", {})
         if not isinstance(permissions, dict) or any(permissions.get(k) == "write" for k in
-            ("contents", "issues", "pull-requests", "administration", "workflows", "id-token")):
+            ("contents", "issues", "pull-requests", "administration", "workflows")):
             return True
-        for step in job.get("steps") or []:
-            if not isinstance(step, dict) or _literal_false(step.get("if")):
-                continue
-            uses = str(step.get("uses") or "")
-            run = str(step.get("run") or "")
-            if "pypa/gh-action-pypi-publish" in uses or re.search(r"\btwine\s+upload\b", run):
-                return True
     return False
 
 

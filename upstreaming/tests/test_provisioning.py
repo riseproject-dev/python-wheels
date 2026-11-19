@@ -90,12 +90,13 @@ class Api:
 
 
 class TestProvisioning(unittest.TestCase):
-    def test_literal_false_publication_job_is_safe_but_active_publisher_is_not(self):
+    def test_credentialless_fork_allows_oidc_publishers_but_not_repo_writes(self):
         workflow = {"permissions": {"contents": "read"}, "jobs": {"build": {"steps": []},
-                    "publish": {"if": False, "permissions": {"id-token": "write"},
-                                "steps": [{"uses": "pypa/gh-action-pypi-publish@v1"}]}}}
+                    "publish": {"permissions": {"id-token": "write"},
+                                "steps": [{"uses": "pypa/gh-action-pypi-publish@v1"},
+                                          {"run": "twine upload dist/*"}]}}}
         self.assertFalse(provisioning._workflow_unsafe(workflow, "jobs: {}"))
-        workflow["jobs"]["publish"].pop("if")
+        workflow["jobs"]["publish"]["permissions"] = {"contents": "write"}
         self.assertTrue(provisioning._workflow_unsafe(workflow, "jobs: {}"))
 
     def test_create_and_exact_base_without_project_execution(self):

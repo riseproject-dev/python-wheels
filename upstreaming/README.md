@@ -187,11 +187,12 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    edit, the worker must use its token-authenticated read-only GitHub research
    server to inspect per-file commit history, analogous accepted and rejected
    PRs, relevant issues/reviews and repository contribution/release policy. Policy-sensitive files such as changelogs are changed only when that
-   evidence establishes the convention. When build CI shares a workflow with an
-   OIDC/package publication job, a separate `{debug}` commit disables only that
-   publication job with literal `if: false`; trusted setup verifies it is
-   unreachable before enabling build/test CI, and cleanup removes the debug
-   commit before handoff. Repair tasks also receive bounded durable evidence summaries for the exact review or CI feedback that caused them. The
+   evidence establishes the convention. The fork organization is a credentialless
+   shell with no package secrets or configured external OIDC trust, so existing
+   OIDC/Twine/package-publisher syntax is not disabled or patched merely for fork
+   CI. Repository-mutating GitHub permissions remain restricted. Commit structure
+   and history updates follow the upstream project's documented and observed
+   conventions. Repair tasks also receive bounded durable evidence summaries for the exact review or CI feedback that caused them. The
    `upstreaming-worker` then proposes
    a series, and its trusted `publish` job
    automatically rebuilds, revalidates and pushes it to `riscv64` under the

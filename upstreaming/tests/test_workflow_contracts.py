@@ -143,6 +143,12 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("rejected/superseded approaches", text)
         self.assertIn("RISC-V GitHub Runners [1]", text)
         self.assertIn("[1]: https://ci.riseproject.dev/", text)
+        self.assertIn("credentialless", text)
+        self.assertIn("configured external OIDC trust", text)
+        self.assertIn("Do not change or", text)
+        self.assertIn("disable `id-token: write`", text)
+        self.assertIn("publication should fail out of the box", text)
+        self.assertIn("Commit structure and history updates follow the upstream project's", text)
 
     def test_development_writers_do_not_wait_for_environment_review(self):
         worker = source("upstreaming-worker")
