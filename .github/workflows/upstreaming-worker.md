@@ -218,7 +218,10 @@ You handle exactly one task for the RISE riscv64 Python-wheels upstreaming
 pipeline. The trusted pre-agent step wrote the immutable task to
 `/tmp/gh-aw/agent/task.json` and checked out the contribution's `riscv64`
 branch in `./fork`. The task's
-`plan` field says what to do; `reason_ids` and `context` say why.
+`plan` field says what to do; `reason_ids` and `context` say why. For repair and
+revision tasks, read every entry in `context.reason_evidence` before researching
+or editing. Treat its concrete review feedback and rejected-change descriptions
+as required repair constraints, then verify them against repository history.
 
 Only process the compiler-supplied `work_queue_assignment`. It has exactly
 one Claim; use its `handle` as `claim_handle` on every safe output and on
