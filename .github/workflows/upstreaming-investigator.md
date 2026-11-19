@@ -346,7 +346,9 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   Include `schema_version: 1`, this task's `contribution_id`,
   `expected_revision: task.revision`, and
   `tracking_issue_description_digest: task.context.tracking_issue.description_digest`.
-  The schema requires `summary`, `research`, `history`, `maintainers`,
+  Every `history` item is a JSON object with keys `url`, `outcome`, `decision`,
+  `reviewers`, and `review_urls`; arrays/tuples are invalid. The schema requires
+  `summary`, `research`, `history`, `maintainers`,
   `dependency_graph`, `ecosystem_report`, and `proposal`. Every `research` category requires
   `status`, `queries`, `coverage: {complete: true, scope: "..."}`, `sources`
   (URL and finding pairs), and `findings`. Only genuinely absent website,
@@ -377,10 +379,21 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   task's `contribution_id`, `revision` and `expected_head`. Put a short
   summary of your findings in `diagnosis`.
 
-Before upload, validate locally with `upstreaming.dossier_gate.validate`
-using the dossier, proposal and task JSON. This is feedback only; the trusted
-safe_outputs job independently checks the exact Claim's staged files before
-native Completion. Agent-controlled checks cannot bypass that gate.
+Before upload, run this exact fail-fast validation from the workspace root:
+
+```bash
+set -euo pipefail
+uv run --no-project --with-requirements upstreaming/requirements.txt \
+  python -m upstreaming.dossier_gate \
+    --dossier upstreaming-out/dossier.json \
+    --proposal upstreaming-out/proposal.json \
+    --task /tmp/gh-aw/agent/task.json
+```
+
+Do not append `;`, `|| true`, another command, or otherwise mask its exit status.
+Upload and finish completed only after this command exits zero. This is feedback
+only; the trusted safe_outputs job independently checks the exact Claim's staged
+files before native Completion. Agent-controlled checks cannot bypass that gate.
 
 Call `work_queue_claim_finish` with `outcome: "completed"` ONLY when every
 mandatory research category is complete and the dossier passes the contract.
