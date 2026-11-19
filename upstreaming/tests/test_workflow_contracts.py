@@ -88,6 +88,22 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertEqual(token["with"]["repositories"], "${{ steps.create.outputs.fork_name }}")
         self.assertEqual(token["with"]["owner"], "riseproject-upstreaming")
 
+    def test_native_workers_explicitly_dispatch_controller_after_terminal_jobs(self):
+        for profile, needs in (("upstreaming-worker", {"safe_outputs", "publish"}),
+                               ("upstreaming-investigator", {"safe_outputs", "record", "notify"})):
+            config = source(profile)
+            job = config["jobs"]["continuation"]
+            self.assertEqual(set(job["needs"]), needs)
+            self.assertEqual(job["if"], "always()")
+            token = next(step for step in job["steps"] if step.get("id") == "control-token")
+            self.assertEqual(token["with"]["owner"], "riseproject-dev")
+            self.assertEqual(token["with"]["repositories"], "python-wheels")
+            self.assertEqual(token["with"]["permission-contents"], "read")
+            self.assertEqual(token["with"]["permission-actions"], "write")
+            self.assertEqual(set(token["with"]), {"client-id", "private-key", "owner", "repositories",
+                                                   "permission-contents", "permission-actions"})
+            self.assertIn("upstreaming-controller.yml", str(job))
+
     def test_controller_chains_every_pipeline_completion_and_has_schedule_fallback(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         triggers = controller.get("on", controller.get(True))
