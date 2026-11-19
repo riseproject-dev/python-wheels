@@ -17,8 +17,7 @@ class TestDependencySynchronization(unittest.TestCase):
         self.root = Path(self.tmp.name)
         for name in ("upstreaming/dependencies/package.json", "upstreaming/dependencies/go.mod",
                      "upstreaming/install_gh_aw.sh", "upstreaming/queue_result.py",
-                     ".github/workflows/upstreaming-investigator.md", ".github/workflows/upstreaming-investigator-v2.md",
-                     ".github/workflows/upstreaming-investigator-v3.md", ".github/workflows/upstreaming-worker.md",
+                     ".github/workflows/upstreaming-investigator.md", ".github/workflows/upstreaming-worker.md",
                      ".github/workflows/upstreaming-dispatcher.md"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +38,7 @@ class TestDependencySynchronization(unittest.TestCase):
     def test_runtime_proposal_needs_source_sync(self):
         self.update("@earendil-works/pi-coding-agent", "1.6.0")
         self.update("pi-web-access", "0.49.0")
-        self.assertEqual(len(SYNC(self.root)), 5)
+        self.assertEqual(len(SYNC(self.root)), 3)
         self.assertEqual(SYNC(self.root, write=True), [])
         self.assertEqual(SYNC(self.root), [])
         source = (self.root / ".github/workflows/upstreaming-investigator.md").read_text()

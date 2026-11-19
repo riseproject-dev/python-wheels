@@ -28,25 +28,21 @@ def run_scripts(value):
 
 class TestWorkflowContracts(unittest.TestCase):
     def test_only_investigator_unsandboxed(self):
-        for profile in ("upstreaming-investigator", "upstreaming-investigator-v2", "upstreaming-investigator-v3"):
-            investigator = source(profile)
-            self.assertFalse(investigator["strict"])
-            self.assertFalse(investigator["sandbox"]["agent"])
-            self.assertFalse(investigator["safe-outputs"]["threat-detection"])
-            self.assertEqual(investigator["permissions"]["contents"], "read")
-            self.assertNotIn("publish", investigator["jobs"])
-            self.assertEqual(investigator["engine"]["extensions"],
-                             ["npm:pi-web-access@0.48.0", "npm:pi-subagents@0.89.0"])
-            self.assertIn("issues", investigator["tools"]["github"]["toolsets"])
-            graph = investigator["mcp-servers"]["project-graph"]
-            self.assertTrue(graph["required"])
-            self.assertEqual(graph["container"], "ghcr.io/riseproject-dev/sw-ecosystem/project-graph-mcp:latest")
-            self.assertEqual(graph["allowed"], ["project_graph_query"])
-        current = source("upstreaming-investigator-v3")
-        self.assertEqual(current["tools"]["github"]["min-integrity"], "approved")
-        current_text = (WF / "upstreaming-investigator-v3.md").read_text()
+        investigator = source("upstreaming-investigator")
+        self.assertFalse(investigator["strict"])
+        self.assertFalse(investigator["sandbox"]["agent"])
+        self.assertFalse(investigator["safe-outputs"]["threat-detection"])
+        self.assertEqual(investigator["permissions"]["contents"], "read")
+        self.assertNotIn("publish", investigator["jobs"])
+        self.assertEqual(investigator["engine"]["extensions"],
+                         ["npm:pi-web-access@0.48.0", "npm:pi-subagents@0.89.0"])
+        self.assertNotIn("github", investigator["tools"])
+        graph = investigator["mcp-servers"]["project-graph"]
+        self.assertTrue(graph["required"])
+        self.assertEqual(graph["container"], "ghcr.io/riseproject-dev/sw-ecosystem/project-graph-mcp:latest")
+        self.assertEqual(graph["allowed"], ["project_graph_query"])
+        current_text = (WF / "upstreaming-investigator.md").read_text()
         self.assertIn("read-only web extension", current_text)
-        self.assertNotIn("min-integrity: none", current_text)
         for name in ("upstreaming-worker", "upstreaming-dispatcher"):
             config = source(name)
             self.assertTrue(config["strict"])
@@ -54,7 +50,7 @@ class TestWorkflowContracts(unittest.TestCase):
             self.assertFalse(config.get("features", {}).get("dangerously-disable-sandbox-agent", False))
 
     def test_completeness_gate_precedes_durable_completion(self):
-        lock = yaml.safe_load((WF / "upstreaming-investigator-v3.lock.yml").read_text())
+        lock = yaml.safe_load((WF / "upstreaming-investigator.lock.yml").read_text())
         steps = lock["jobs"]["safe_outputs"]["steps"]
         names = [s.get("name") for s in steps]
         self.assertLess(names.index("Require complete research before native queue Completion"),
@@ -62,6 +58,12 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertLess(names.index("Require complete research before native queue Completion"),
                         names.index("Process Safe Outputs"))
         self.assertNotIn("detection", lock["jobs"])
+        notify = lock["jobs"]["notify"]
+        self.assertEqual(set(notify["needs"]), {"safe_outputs", "record"})
+        self.assertEqual(notify["permissions"]["issues"], "write")
+        notify_text = str(notify)
+        self.assertIn("upstreaming.dossier_comment", notify_text)
+        self.assertIn("upstreaming-publication", notify_text)
 
     def test_authored_python_ci_invocations_use_uv(self):
         for path in sorted(WF.glob("upstreaming-*")):

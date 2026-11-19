@@ -104,12 +104,12 @@ The repository also gets:
 - The gh-aw workflows, compiled with gh-aw v1.2.2
   (`upstreaming/check_gh_aw.sh` verifies the locks). Two worker profiles
   share the `upstreaming` pool; `work.profile_for` routes each task:
-  - `upstreaming-investigator-v3.md` / `.lock.yml`: new investigations
-  - `upstreaming-investigator-v2.md` and `upstreaming-investigator.md`: retained profile history
-  - `upstreaming-provision.yml`: trusted fork creation, settings and branch setup
-    (`anthropic/claude-sonnet-5-5`). Read and report only; its trusted
-    `record` job checks the verified Result and hands the dossier to the
-    controller. No fork token, no environment.
+  - `upstreaming-investigator.md` / `.lock.yml`: investigations
+    (`anthropic/claude-sonnet-5-5`). Read and report only. Its trusted
+    `record` job independently resolves the exact native Result and validates
+    the dossier. A dependent `notify` job then publishes or discovers the
+    deterministic human-readable tracking-issue comment and uploads its
+    read-back receipt. No fork token or publishing environment.
   - `upstreaming-worker.md` / `.lock.yml`: development patch, repair and
     upstream revision (`anthropic/claude-opus-5-5`), with the trusted
     `publish` job.
@@ -147,11 +147,13 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
 1. **Request.** Add the `upstreaming-request` label to the project's
    *Package build request* issue. The next controller tick creates the
    contribution in `queued` and, unless paused, requests an investigation.
-2. **Investigation.** The dispatcher launches `upstreaming-investigator-v3` in
-   the same native pool, preserving installed profiles and Work history. GitHub
-   MCP stays at approved integrity; read-only web tools cover untrusted history.
-   Its dossier is recorded as evidence and the contribution waits in
-   `investigation` / `waiting_human` (`review_dossier`).
+2. **Investigation.** The dispatcher launches `upstreaming-investigator`.
+   Read-only web tools cover issues, PRs, reviews and other historical sources;
+   the required graph MCP covers dependency evidence. After native delivery,
+   the trusted `record` job validates the exact Result and the dependent
+   `notify` job posts a bounded readable summary to the tracking issue. The
+   controller records the dossier as evidence and waits in `investigation` /
+   `waiting_human` (`review_dossier`).
 3. **Approve the scope.** After reading the dossier:
 
    ```text

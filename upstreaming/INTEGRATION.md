@@ -69,26 +69,26 @@ adoption and a successful remote Result remain unverified. GitHub server-signed
 control commits verified the requested author identity; local SSH signing no
 longer prevents control-code publication.
 
-Current local work has **148 passing pipeline tests** and passing hand-authored
-workflow lint. It adds a trusted workflow-only fork provisioning job, recorded
-`fork_provision` intents, scoped creation/per-fork tokens, source-ID/base binding,
-receipt readback, and initial-patch admission without waiting for base CI. The
-manual fork helper is removed and bare existing-fork verification cannot bypass
-workflow provisioning. These provisioning changes are not yet deployed or tested
-against real fork permissions.
+Workflow-only fork provisioning is deployed but real creation/token/settings
+permissions remain unverified.
 
-The additive, versioned investigator-profile migration in the same native pool
-was deployed as `upstreaming-investigator-v2`. Its live run completed extensive
-research and staged a schema-valid artifact, but strict DIFC rejected the unlabeled
-internal claim-finish tool after GitHub MCP supplied `none` integrity data. The
-trusted completeness gate failed closed: no Completion or Result was accepted.
-The operator approved an additive v3 route. V3 keeps GitHub MCP at `approved`
-integrity and requires the read-only web extension to cover filtered, untrusted
-history. It is implemented locally but not deployed. The v2 cancelled Claim and
-available retry Work remain in native history. The native on-demand `PoolInstall` The native on-demand `PoolInstall` copies installed
-profiles and pool limits before adding the default-revision worker. Existing
-profiles, Work and pending delivery history are preserved; no new queue or ref
-is introduced. Live registration remains unverified.
+Two development investigator attempts completed extensive research and staged
+schema-valid artifacts, but strict DIFC rejected the unlabeled native
+claim-finish tool after a labeled GitHub source guard initialized the session.
+The completeness gate failed closed both times: no Completion or Result was
+accepted, and no research comment was published.
+
+The operator explicitly authorized resetting non-production state and the native
+queue. Current local work consolidates all investigator checkpoints into the
+single canonical `upstreaming-investigator` workflow and removes GitHub MCP from
+that read-only role. The pinned web extension supplies issue, PR, review and web
+research without activating the incompatible cross-server DIFC composition. The
+trusted `record` job still independently resolves and validates the exact native
+Result. A new dependent `notify` job renders that verified dossier into a bounded,
+idempotent tracking-issue comment, verifies readback and uploads a receipt. Agent
+prose, staging and unverified artifacts cannot reach the issue. After this code
+merges, `upstreaming-state/` and the development `work-queue` branch will be reset
+and a clean controller run will bootstrap the canonical contract.
 
 Previously merged implementation:
 
@@ -102,7 +102,9 @@ Previously merged implementation:
   historical CI, reviews, documentation, websites, mailing lists, blogs,
   maintainers and release relationships, with recorded queries, pagination scope,
   source URLs and accepted/rejected decisions.
-- GitHub Issues tools are enabled with public-author research permitted.
+- The read-only web extension provides issue/PR and broader web research. GitHub
+  MCP is intentionally absent because the pinned gateway cannot compose its
+  labeled source guard with the unlabeled native queue-control server.
 - Required project-graph MCP (`:latest`, as requested), with query/result and
   dependency assessment in the dossier. Runtime use is **not yet verified**.
 - Mandatory discovery of a matching ecosystem report; available reports must be
@@ -173,14 +175,14 @@ Result, token, expected-head or operation-receipt checks.
    Inspect the failed original Claim's native receipt checks and use
    supported verification/recovery or an explicitly reviewed compatibility fix.
    Never synthesize a Result, select a generic artifact by name, rerun uncertain
-   effects, reset the queue, or treat reservation release as delivery.
-2. **Deploy the investigator changes safely.** Adding Issues/extensions/MCP tools
-   changes its native worker contract. The installed queue cannot update that
-   authority while existing completed Work has pending delivery barriers.
-   The operator approved an additive versioned profile in the same pool instead
-   of replacing installed authority. Deploy it through supported on-demand
-   `PoolInstall`, verify old profiles/economics remain intact, and retain pending
-   history. Do not reset the queue or claim those old deliveries succeeded.
+   effects, or treat reservation release as delivery. The authorized development
+   reset discards this non-production queue; it does not turn failed deliveries
+   into Results.
+2. **Deploy the canonical investigator and reset development state.** Merge the
+   single-workflow contract and dependent verified-Result notification job, then
+   delete and bootstrap the development queue and clear stale lifecycle state as
+   explicitly authorized. Do not migrate failed artifacts or receipts into the
+   new queue.
 3. **Run the complete investigator through the controller/dispatcher.** Verify
    issue/comments, graph MCP, ecosystem report and historical research; require
    the gate, native verified Result and recorded dossier evidence.
