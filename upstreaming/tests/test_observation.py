@@ -219,6 +219,36 @@ class TestTriggers(unittest.TestCase):
 
 
 class TestTick(unittest.TestCase):
+    def test_removed_intake_label_cancels_only_pre_work_request(self):
+        rec = contribution(phase="queued", activity="idle", fork=None, dossier_evidence_id=None,
+                           admission_class=None)
+        raw = {"id": rec["tracking_issue"]["id"], "number": rec["tracking_issue"]["number"],
+               "body": "request", "labels": []}
+        tick = controller.tick(contributions={"c": rec}, operations={}, consumed={}, projects={},
+                               policy=policy(), inputs=controller.Inputs(now=T,
+                               tracking_issues={raw["number"]: raw}, pressure=capacity.Pressure(ok=True)))
+        final = [value for kind, value in tick.staged if kind == "contributions"][-1]
+        self.assertEqual((final["phase"], final["activity"]), ("abandoned", "idle"))
+        self.assertIn("label removed", final["terminal_reason"])
+        self.assertEqual(tick.requested_effects, [])
+        self.assertEqual(tick.report["intake"][-1]["decision"], "cancelled")
+
+        active = contribution(phase="investigation", activity="agent_running")
+        active["active_work"] = {"dedupe_key": "k", "task": "investigation", "revision": 0,
+                                 "requested_at": NOW, "deadline_at": NOW}
+        tick = controller.tick(contributions={"c": active}, operations={}, consumed={}, projects={},
+                               policy=policy(), inputs=controller.Inputs(now=T,
+                               tracking_issues={raw["number"]: raw}, pressure=capacity.Pressure(ok=True)))
+        self.assertFalse(any(kind == "contributions" and value["phase"] == "abandoned"
+                             for kind, value in tick.staged))
+
+    def test_unlabeled_issue_without_state_is_a_noop(self):
+        tick = controller.tick(contributions={}, operations={}, consumed={}, projects={}, policy=policy(),
+                               inputs=controller.Inputs(now=T, issues=[], tracking_issues={},
+                                                        pressure=capacity.Pressure(ok=True)))
+        self.assertFalse(any(kind == "contributions" for kind, _ in tick.staged))
+        self.assertEqual(tick.requested_effects, [])
+
     def test_idle_tick_selects_nothing(self):
         rec = contribution(activity="waiting_ci")
         res = controller.tick(contributions={"a": rec}, operations={}, consumed={}, projects={},

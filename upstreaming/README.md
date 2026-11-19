@@ -151,6 +151,8 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
 1. **Request.** Add the `upstreaming-request` label to the project's
    *Package build request* issue. The next controller tick creates the
    contribution in `queued` and, unless paused, requests an investigation.
+   Removing the label before any Work is requested durably abandons that intake;
+   removing it after Work starts does not silently stop the contribution.
 2. **Investigation.** The dispatcher launches `upstreaming-investigator`.
    A custom read-only GitHub MCP server uses the job's scoped token for issues,
    PRs, reviews, Actions and code without anonymous rate limits. Read-only web
