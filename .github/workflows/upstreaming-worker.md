@@ -26,7 +26,7 @@ tools:
     require-assignment: true
     worker: true
   github:
-    toolsets: [repos, pull_requests, actions]
+    toolsets: [repos, issues, pull_requests, actions]
   bash:
     - "*"
   edit:
@@ -255,6 +255,31 @@ approved scope and pushes it to `riscv64` itself. Anything outside
 `pull_request_target`, `id-token: write`, new secret, interpolation of untrusted event text
 into scripts or package publication step is rejected.
 
+## Mandatory change-history research
+
+Before modifying any file, extensively research whether that kind of change is
+accepted by this project:
+
+- run `git log --follow -- <path>` and inspect the relevant commits and diffs;
+- use blame where needed to identify the decision and maintainers behind the
+  current form;
+- search and read relevant open and closed upstream issues and pull requests,
+  including reviews and rejected/superseded approaches;
+- read contribution, release and changelog policies plus recent analogous PRs;
+- cross-check the investigation dossier against current repository history.
+
+For release notes, changelogs, news fragments, generated metadata and similar
+policy-sensitive files, include a change only when commit/PR history or explicit
+project documentation shows that contributor PRs should update that exact file.
+For example, `CHANGELOG.md` being in `allowed_paths` is permission, not evidence
+that it should be edited. If convention is unclear or conflicting, omit that file
+and explain the evidence in `diagnosis` and `validation_not_performed`.
+
+Do not begin editing until this history review is complete. If required issue,
+PR, review or commit history is inaccessible, use `operation: "none"`, report the
+blocker and stop rather than guessing. Record the key URLs, commits, decisions
+and analogous changes in the proposal diagnosis.
+
 ## Rules
 
 1. Change only files matching `allowed_paths`. Make the smallest change that
@@ -267,11 +292,20 @@ into scripts or package publication step is rejected.
 3. Temporary fork-only changes that let CI run on the fork (for example
    removing `if: github.repository == 'owner/repo'`) go in a separate commit
    whose subject starts with `{debug}`. Never when `upstream_facing` is true.
-   Debug commits enable validation only, never publication or secrets. The
-   fork's CI must run the riscv64 wheel job on push to `riscv64`: if that
-   workflow does not trigger on pushes to `riscv64`, add the trigger in the
-   same `{debug}` commit. If the project already builds riscv64 wheels
-   upstream, the `{debug}` commit alone can be the whole series.
+   Debug commits enable validation only, never publication or secrets.
+   Development CI runs on the automatically opened same-fork PR from
+   `riscv64` to the frozen base. If the existing workflow already has a
+   `pull_request` trigger covering that base, do not add `push: riscv64` or any
+   other fork-only trigger. Never change unrelated event-dependent behavior,
+   upload conditions, artifact retention or release behavior solely to make fork
+   validation produce extra evidence. In particular, do not broaden conditions
+   such as `inputs.upload`, add `github.event_name == 'push'`, or otherwise alter
+   non-riscv64 behavior. If PR CI builds a wheel but intentionally does not upload
+   it, leave that policy unchanged and record the acceptance limitation for a
+   separate trusted probe. Add a separate `{debug}` trigger/guard adjustment only
+   when no PR-compatible CI trigger exists, and explain the repository history
+   that justifies it. If the project already builds riscv64 wheels upstream, a
+   necessary `{debug}` guard adjustment alone can be the whole series.
 4. Baseline code is `rv64gc`. Optional RVV only behind Linux `riscv_hwprobe`
    (`RISCV_HWPROBE_KEY_IMA_EXT_0` / `RISCV_HWPROBE_IMA_V`) with an `rv64gc`
    fallback. No global `-march=...v...` or `-march=native`.
