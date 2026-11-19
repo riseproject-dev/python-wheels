@@ -53,63 +53,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build google-re2 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "google-re2"
+      version: "${{ matrix.version }}"
+      repository: "google/re2"
+      ref: ''
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        export GOOGLE_RE2_VERSION='${{ matrix.version }}'
+        tag="$(echo "${GOOGLE_RE2_VERSION}" | sed -E 's/^1\.1\.([0-9]{4})([0-9]{2})([0-9]{2})$/\1-\2-\3/')"
+        echo "RE2_TAG=${tag}" >> "$GITHUB_ENV"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        git fetch -q --no-tags origin "${RE2_TAG}"
+        git checkout -q --detach FETCH_HEAD
+      cibw-environment-linux: "LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib ABSEIL_VERSION=20250512.1 PYBIND11_VERSION=3.1.0"
+      cibw-package-dir: "python"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream builds the extension with Bazel, which publishes no riscv64
+      # binary; setup.py's other path links a system RE2, so build RE2 here.
+      # abseil-cpp is static-with-PIC so it ends up inside libre2.so, which
+      # keeps the wheel the size Bazel's static link produces upstream.
+      cibw-before-all-linux: "mkdir -p /tmp/abseil-cpp && curl -sSLf \"https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz\" | tar -xz -C /tmp/abseil-cpp --strip-components=1 && cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_INSTALL_LIBDIR=lib && cmake --build /tmp/abseil-cpp/build --parallel --target install && cmake -S {project} -B /tmp/re2-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib && cmake --build /tmp/re2-build --parallel --target install && ldconfig && cp /tmp/abseil-cpp/LICENSE {package}/LICENSE.abseil-cpp"
+      # setup.py reads pybind11's include path at import time and declares no
+      # build-system table, so the pin has to be visible to the build itself.
+      cibw-before-build: "pip install \"pybind11==${PYBIND11_VERSION}\" setuptools wheel"
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-repair-wheel-command: "auditwheel repair --strip -w {dest_dir} {wheel}"
+      cibw-test-requires: "absl-py"
+      cibw-test-sources: "python/re2_test.py"
+      cibw-test-command: "python python/re2_test.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       GOOGLE_RE2_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Derive the upstream tag from the version
-        run: |
-          tag="$(echo "${GOOGLE_RE2_VERSION}" | sed -E 's/^1\.1\.([0-9]{4})([0-9]{2})([0-9]{2})$/\1-\2-\3/')"
-          echo "RE2_TAG=${tag}" >> "$GITHUB_ENV"
-
-      - name: Checkout re2 ${{ env.RE2_TAG }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: google/re2
-          ref: ${{ env.RE2_TAG }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT_PASS_LINUX: ABSEIL_VERSION PYBIND11_VERSION
-          # Upstream builds the extension with Bazel, which publishes no riscv64
-          # binary; setup.py's other path links a system RE2, so build RE2 here.
-          # abseil-cpp is static-with-PIC so it ends up inside libre2.so, which
-          # keeps the wheel the size Bazel's static link produces upstream.
-          CIBW_BEFORE_ALL_LINUX: >-
-            mkdir -p /tmp/abseil-cpp &&
-            curl -sSLf "https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz"
-            | tar -xz -C /tmp/abseil-cpp --strip-components=1 &&
-            cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_BUILD_TYPE=Release
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17
-            -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_INSTALL_LIBDIR=lib &&
-            cmake --build /tmp/abseil-cpp/build --parallel --target install &&
-            cmake -S {project} -B /tmp/re2-build -DCMAKE_BUILD_TYPE=Release
-            -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib &&
-            cmake --build /tmp/re2-build --parallel --target install &&
-            ldconfig &&
-            cp /tmp/abseil-cpp/LICENSE {package}/LICENSE.abseil-cpp
-          CIBW_ENVIRONMENT: LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib
-          # setup.py reads pybind11's include path at import time and declares no
-          # build-system table, so the pin has to be visible to the build itself.
-          CIBW_BEFORE_BUILD: pip install "pybind11==${PYBIND11_VERSION}" setuptools wheel
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
-          CIBW_TEST_REQUIRES: absl-py
-          CIBW_TEST_SOURCES: python/re2_test.py
-          CIBW_TEST_COMMAND: python python/re2_test.py
+          name: google-re2-${{ env.GOOGLE_RE2_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and the licences made it into the wheel
         run: |
@@ -123,15 +124,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: google-re2-${{ env.GOOGLE_RE2_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish google-re2 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

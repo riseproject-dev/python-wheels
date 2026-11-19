@@ -53,50 +53,56 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pycares ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pycares"
+      version: "${{ matrix.version }}"
+      repository: "saghul/pycares"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "true"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pycares/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # cffi has no riscv64 wheel on public PyPI; ours saves a source build in both phases.
+      cibw-test-extras: "idna"
+      # cibuildwheel runs the tests in an empty directory, so stage upstream's suite there.
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -c \"import importlib.metadata as m; n=sorted(str(p).split('licenses/', 1)[1] for p in m.files('pycares') if 'licenses/' in str(p)); assert n == ['LICENSE', 'deps/c-ares/AUTHORS', 'deps/c-ares/LICENSE.md', 'deps/c-ares/LICENSES/APSL-2.0.txt', 'deps/c-ares/LICENSES/BSD-3-Clause.txt'], n\" && python -m unittest -v"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PYCARES_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pycares v${{ env.PYCARES_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: saghul/pycares
-          ref: v${{ env.PYCARES_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # The extension statically links the bundled c-ares but ships only pycares' own LICENSE.
-      - name: Patch pycares source
-        run: |
-          git apply python-wheels/patches/pycares/${{ env.PYCARES_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cffi has no riscv64 wheel on public PyPI; ours saves a source build in both phases.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_EXTRAS: idna
-          # cibuildwheel runs the tests in an empty directory, so stage upstream's suite there.
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; n=sorted(str(p).split('licenses/', 1)[1] for p in m.files('pycares') if 'licenses/' in str(p)); assert n == ['LICENSE', 'deps/c-ares/AUTHORS', 'deps/c-ares/LICENSE.md', 'deps/c-ares/LICENSES/APSL-2.0.txt', 'deps/c-ares/LICENSES/BSD-3-Clause.txt'], n" &&
-            python -m unittest -v
+          name: pycares-${{ env.PYCARES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the compiled extension made it into the wheel
         run: |
@@ -108,15 +114,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pycares-${{ env.PYCARES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pycares ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

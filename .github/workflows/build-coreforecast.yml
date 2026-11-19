@@ -48,6 +48,47 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build coreforecast ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        # pandas is a hard, unguarded test dependency in most test modules;
+        # pypi.riseproject.dev has no riscv64 cp314t pandas wheel yet (PyPI
+        # itself does), so the tests can't collect there. Build still runs.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "coreforecast"
+      version: "${{ matrix.version }}"
+      repository: "Nixtla/coreforecast"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "recursive"
+      pre-build: |-
+        cp external_libs/skiplist/LICENSE LICENSE.skiplist
+        cp external_libs/stl-cpp/LICENSE-MIT LICENSE.stl-cpp
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,pandas"
+      # The newest numpy/pandas on PyPI have no riscv64 wheel in our registry yet. The
+      # default build[uv] frontend also installs the test requirements with uv, which
+      # ignored UV_NO_BUILD here and source-built numpy and then that pandas sdist (an
+      # xsimd error). pip honours PIP_ONLY_BINARY, so it takes the newest wheels we have.
+      cibw-build-frontend: "build"
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,pandas"
+      cibw-test-skip: "${{ case(endsWith(matrix.python, 't'), '*', '') }}"
+      cibw-test-requires: "pandas pytest"
+      cibw-test-command: "python -m pytest {project}/tests -k \"not efficiency\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     # 60m was too tight: the pybind11/Eigen build runs anywhere from ~50m to
     # over 60m depending on runner load, so this job was intermittently
@@ -61,48 +102,14 @@ jobs:
         # pypi.riseproject.dev has no riscv64 cp314t pandas wheel yet (PyPI
         # itself does), so the tests can't collect there. Build still runs.
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       COREFORECAST_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout coreforecast v${{ env.COREFORECAST_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Nixtla/coreforecast
-          ref: v${{ env.COREFORECAST_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      # external_libs/{skiplist,stl-cpp} are header-only submodules
-      # compiled into the wheel, but upstream's own wheel ships only its own
-      # LICENSE. Stage theirs at the root for scikit-build-core's default
-      # wheel.license-files glob to pick up.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          cp external_libs/skiplist/LICENSE LICENSE.skiplist
-          cp external_libs/stl-cpp/LICENSE-MIT LICENSE.stl-cpp
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,pandas
-          # The newest numpy/pandas on PyPI have no riscv64 wheel in our registry yet. The
-          # default build[uv] frontend also installs the test requirements with uv, which
-          # ignored UV_NO_BUILD here and source-built numpy and then that pandas sdist (an
-          # xsimd error). pip honours PIP_ONLY_BINARY, so it takes the newest wheels we have.
-          CIBW_BUILD_FRONTEND: build
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,pandas
-          CIBW_TEST_SKIP: ${{ case(endsWith(matrix.python, 't'), '*', '') }}
-          CIBW_TEST_REQUIRES: pandas pytest
-          CIBW_TEST_COMMAND: python -m pytest {project}/tests -k "not efficiency"
+          name: coreforecast-${{ env.COREFORECAST_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -117,15 +124,9 @@ jobs:
               print(path, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: coreforecast-${{ env.COREFORECAST_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish coreforecast ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

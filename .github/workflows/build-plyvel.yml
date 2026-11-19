@@ -53,71 +53,58 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build plyvel ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "plyvel"
+      version: "${{ matrix.version }}"
+      repository: "wbolster/plyvel"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib LEVELDB_VERSION=1.22 SNAPPY_VERSION=1.1.9"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py links a system `leveldb`, which upstream's own manylinux Docker
+      # image builds from source via cmake (install-snappy.sh/install-leveldb.sh);
+      # reproduce that here since neither lib ships in the riscv64 image. The sed
+      # matches upstream's 1.1.9-0001-fix-inlining-failure.patch (newer GCC
+      # rejects always_inline across TUs); -DSNAPPY_BUILD_TESTS=OFF skips the
+      # googletest/benchmark submodules that patch's checkout also needs.
+      # CMAKE_POLICY_VERSION_MINIMUM works around snappy 1.1.9's
+      # cmake_minimum_required(3.1), which CMake 4 refuses outright (gotcha 207).
+      cibw-before-all-linux: "curl -sSLf \"https://github.com/google/snappy/archive/refs/tags/${SNAPPY_VERSION}.tar.gz\" | tar -xz -C /tmp && sed -i '/#define SNAPPY_ATTRIBUTE_ALWAYS_INLINE __attribute__((always_inline))/s/.*/#define SNAPPY_ATTRIBUTE_ALWAYS_INLINE/' /tmp/snappy-${SNAPPY_VERSION}/snappy-stubs-internal.h && cmake -S /tmp/snappy-${SNAPPY_VERSION} -B /tmp/snappy-${SNAPPY_VERSION}/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && cmake --build /tmp/snappy-${SNAPPY_VERSION}/build --parallel --target install && curl -sSLf \"https://github.com/google/leveldb/archive/refs/tags/${LEVELDB_VERSION}.tar.gz\" | tar -xz -C /tmp && cmake -S /tmp/leveldb-${LEVELDB_VERSION} -B /tmp/leveldb-${LEVELDB_VERSION}/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLEVELDB_BUILD_TESTS=OFF -DLEVELDB_BUILD_BENCHMARKS=OFF -DCMAKE_INSTALL_LIBDIR=lib && cmake --build /tmp/leveldb-${LEVELDB_VERSION}/build --parallel --target install && ldconfig && cp /tmp/snappy-${SNAPPY_VERSION}/COPYING {project}/LICENSE.snappy && cp /tmp/leveldb-${LEVELDB_VERSION}/LICENSE {project}/LICENSE.leveldb"
+      # setup.py's sources are the .cpp Cython already generated upstream; make
+      # cython (upstream's own cibuildwheel-before-build.sh step) regenerates them.
+      cibw-before-build: "pip install cython && make cython"
+      cibw-repair-wheel-command: "auditwheel repair --strip -w {dest_dir} {wheel}"
+      # test/ is a package (test/__init__.py) sitting next to plyvel/ at the repo
+      # root, so running pytest from {project} would import the source tree
+      # instead of the wheel (gotcha 25); stage just the test suite instead.
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "test setup.cfg"
+      # The test phase runs as root, which never sees the permission error
+      # test_open_read_only_dir asserts (gotcha 39); deselect it.
+      cibw-test-command: "pytest test --deselect test/test_plyvel.py::test_open_read_only_dir"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PLYVEL_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout plyvel ${{ env.PLYVEL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: wbolster/plyvel
-          ref: ${{ env.PLYVEL_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT_PASS_LINUX: LEVELDB_VERSION SNAPPY_VERSION
-          # setup.py links a system `leveldb`, which upstream's own manylinux Docker
-          # image builds from source via cmake (install-snappy.sh/install-leveldb.sh);
-          # reproduce that here since neither lib ships in the riscv64 image. The sed
-          # matches upstream's 1.1.9-0001-fix-inlining-failure.patch (newer GCC
-          # rejects always_inline across TUs); -DSNAPPY_BUILD_TESTS=OFF skips the
-          # googletest/benchmark submodules that patch's checkout also needs.
-          # CMAKE_POLICY_VERSION_MINIMUM works around snappy 1.1.9's
-          # cmake_minimum_required(3.1), which CMake 4 refuses outright (gotcha 207).
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl -sSLf "https://github.com/google/snappy/archive/refs/tags/${SNAPPY_VERSION}.tar.gz"
-            | tar -xz -C /tmp &&
-            sed -i '/#define SNAPPY_ATTRIBUTE_ALWAYS_INLINE __attribute__((always_inline))/s/.*/#define SNAPPY_ATTRIBUTE_ALWAYS_INLINE/'
-            /tmp/snappy-${SNAPPY_VERSION}/snappy-stubs-internal.h &&
-            cmake -S /tmp/snappy-${SNAPPY_VERSION} -B /tmp/snappy-${SNAPPY_VERSION}/build
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF -DCMAKE_INSTALL_LIBDIR=lib
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
-            cmake --build /tmp/snappy-${SNAPPY_VERSION}/build --parallel --target install &&
-            curl -sSLf "https://github.com/google/leveldb/archive/refs/tags/${LEVELDB_VERSION}.tar.gz"
-            | tar -xz -C /tmp &&
-            cmake -S /tmp/leveldb-${LEVELDB_VERSION} -B /tmp/leveldb-${LEVELDB_VERSION}/build
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -DLEVELDB_BUILD_TESTS=OFF -DLEVELDB_BUILD_BENCHMARKS=OFF -DCMAKE_INSTALL_LIBDIR=lib &&
-            cmake --build /tmp/leveldb-${LEVELDB_VERSION}/build --parallel --target install &&
-            ldconfig &&
-            cp /tmp/snappy-${SNAPPY_VERSION}/COPYING {project}/LICENSE.snappy &&
-            cp /tmp/leveldb-${LEVELDB_VERSION}/LICENSE {project}/LICENSE.leveldb
-          CIBW_ENVIRONMENT: LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib
-          # setup.py's sources are the .cpp Cython already generated upstream; make
-          # cython (upstream's own cibuildwheel-before-build.sh step) regenerates them.
-          CIBW_BEFORE_BUILD: pip install cython && make cython
-          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
-          # test/ is a package (test/__init__.py) sitting next to plyvel/ at the repo
-          # root, so running pytest from {project} would import the source tree
-          # instead of the wheel (gotcha 25); stage just the test suite instead.
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: test setup.cfg
-          # The test phase runs as root, which never sees the permission error
-          # test_open_read_only_dir asserts (gotcha 39); deselect it.
-          CIBW_TEST_COMMAND: pytest test --deselect test/test_plyvel.py::test_open_read_only_dir
+          name: plyvel-${{ env.PLYVEL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and licences made it into the wheel
         run: |
@@ -132,15 +119,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: plyvel-${{ env.PLYVEL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish plyvel ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

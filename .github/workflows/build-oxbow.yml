@@ -49,54 +49,59 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build oxbow ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "oxbow"
+      version: "${{ matrix.version }}"
+      repository: "abdenlab/oxbow"
+      ref: "py-oxbow@v${{ matrix.version }}"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        cp LICENSE-MIT LICENSE-APACHE py-oxbow/
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "py-oxbow"
+      # abi3-py39 is fixed in py-oxbow/Cargo.toml, so one build serves
+      # every interpreter; built on cp312 (the oldest in our matrix) and
+      # re-tested on the newer ones via find_compatible_wheel. No
+      # cp314t: pyo3's abi3 feature predates PEP 703 free-threading.
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # oxbow ships no [tool.cibuildwheel], so the Rust toolchain its
+      # maturin backend needs is installed in-container here.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,arro3-core,duckdb"
+      cibw-test-requires: "pytest pytest-manifest cloudpickle debugpy dask[dataframe] duckdb"
+      cibw-test-sources: "py-oxbow/tests fixtures"
+      # tests/data links to ../../fixtures; PYTHONPATH=.. serves `from tests.utils` as upstream's editable install does.
+      cibw-test-command: "cd py-oxbow/tests && PYTHONPATH=.. python -m pytest -v"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       OXBOW_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout oxbow py-oxbow@v${{ env.OXBOW_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: abdenlab/oxbow
-          ref: py-oxbow@v${{ env.OXBOW_VERSION }}
-          persist-credentials: false
-
-      - name: Stage the licences beside oxbow's pyproject.toml
-        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
-        # in this monorepo is py-oxbow/ -- so upstream's published wheels
-        # carry no licence text at all (gotcha 146).
-        run: cp LICENSE-MIT LICENSE-APACHE py-oxbow/
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: py-oxbow
-          output-dir: wheelhouse/
-        env:
-          # abi3-py39 is fixed in py-oxbow/Cargo.toml, so one build serves
-          # every interpreter; built on cp312 (the oldest in our matrix) and
-          # re-tested on the newer ones via find_compatible_wheel. No
-          # cp314t: pyo3's abi3 feature predates PEP 703 free-threading.
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # oxbow ships no [tool.cibuildwheel], so the Rust toolchain its
-          # maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,arro3-core,duckdb
-          CIBW_TEST_REQUIRES: pytest pytest-manifest cloudpickle debugpy dask[dataframe] duckdb
-          CIBW_TEST_SOURCES: py-oxbow/tests fixtures
-          # tests/data links to ../../fixtures; PYTHONPATH=.. serves `from tests.utils` as upstream's editable install does.
-          CIBW_TEST_COMMAND: cd py-oxbow/tests && PYTHONPATH=.. python -m pytest -v
+          name: oxbow-${{ env.OXBOW_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the compiled extension and licences
         run: |
@@ -112,15 +117,9 @@ jobs:
           assert {"LICENSE-MIT", "LICENSE-APACHE"} <= set(lic), lic
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: oxbow-${{ env.OXBOW_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish oxbow ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

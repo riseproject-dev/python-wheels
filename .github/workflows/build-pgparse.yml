@@ -53,54 +53,63 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pgparse ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pgparse"
+      version: "${{ matrix.version }}"
+      repository: "gmr/pgparse"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp311-abi3-manylinux_riscv64"
+      timeout-minutes: 90
+      checkout-submodules: "true"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pgparse/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp libpg_query/LICENSE LICENSE.libpg_query
+        cp libpg_query/src/postgres/COPYRIGHT LICENSE.postgres
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # Py_LIMITED_API is hardcoded to 0x030B0000 in pyproject.toml, so the
+      # wheel must be built on cp311, its floor interpreter (gotcha 96); the
+      # later entries build nothing, they re-test the one wheel.
+      cibw-build: "cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      cibw-before-all: "make -C libpg_query"
+      cibw-config-settings: "--build-option=--py-limited-api=cp311"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -m pytest {project}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PGPARSE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pgparse ${{ env.PGPARSE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: gmr/pgparse
-          ref: ${{ env.PGPARSE_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pgparse source
-        run: git apply python-wheels/patches/pgparse/${{ env.PGPARSE_VERSION }}/00*.patch
-
-      # The extension statically links libpg_query, which bundles the PostgreSQL
-      # parser; upstream ships neither licence in the wheel.
-      - name: Stage the licences of the statically linked sources
-        run: |
-          cp libpg_query/LICENSE LICENSE.libpg_query
-          cp libpg_query/src/postgres/COPYRIGHT LICENSE.postgres
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          # Py_LIMITED_API is hardcoded to 0x030B0000 in pyproject.toml, so the
-          # wheel must be built on cp311, its floor interpreter (gotcha 96); the
-          # later entries build nothing, they re-test the one wheel.
-          CIBW_BUILD: >-
-            cp311-manylinux_riscv64 cp312-manylinux_riscv64
-            cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL: make -C libpg_query
-          CIBW_CONFIG_SETTINGS: --build-option=--py-limited-api=cp311
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: python -m pytest {project}/tests
+          name: pgparse-${{ env.PGPARSE_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension and the licences made it into the wheel
         run: |
@@ -115,15 +124,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pgparse-${{ env.PGPARSE_VERSION }}-cp311-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pgparse ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

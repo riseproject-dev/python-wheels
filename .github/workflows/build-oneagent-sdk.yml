@@ -51,54 +51,55 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build oneagent-sdk ${{ matrix.version }} py2.py3-none-linux_riscv64
-    runs-on: ubuntu-24.04-riscv
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "oneagent-sdk"
+      version: "${{ matrix.version }}"
+      repository: "Dynatrace/OneAgent-SDK-for-Python"
+      ref: ''
+      artifact-tag: "py2.py3-none-linux_riscv64"
+      pre-build: |-
+        base="${ONEAGENT_SDK_VERSION%.*.*}"
+        timestamp="${ONEAGENT_SDK_VERSION#"$base".}"
+        ref="v$base"
+        BUILD_TIMESTAMP="${timestamp/./-}"
+        export BUILD_TIMESTAMP
+        printf '%s\n' "BUILD_TIMESTAMP=$BUILD_TIMESTAMP" >> "$GITHUB_ENV"
 
+        git fetch -q --no-tags origin "$ref"
+        git checkout -q --detach FETCH_HEAD
+      # setup.py forces a universal (py2.py3) tag, so one build serves
+      # every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # DT_PYSDK_CSDK_PATH is intentionally left unset: it would point at
+      # Dynatrace's closed-source OneAgent SDK for C/C++, which has no
+      # riscv64 build. setup.py degrades gracefully without it, shipping
+      # a wheel with no native library; oneagent.initialize() then
+      # returns STATUS_STUB_LOAD_ERROR instead of crashing (its own
+      # documented no-op mode).
+      cibw-environment-linux: "BUILD_TIMESTAMP=$(python -c \"v='${{ matrix.version }}'; b='.'.join(v.split('.')[:-2]); print(v[len(b)+1:].replace('.', '-'))\")"
+      # There is no compiled extension to repair (no .so is bundled);
+      # auditwheel refuses a wheel with no ELF content at all.
+      cibw-repair-wheel-command: ''
+      cibw-test-requires: "pytest mock"
+      cibw-test-command: "python -c \"import oneagent; r = oneagent.initialize(); assert r.status == r.STATUS_STUB_LOAD_ERROR, r.status; oneagent.shutdown()\" && PYTHONPATH={project}/test-util-src:{project}/samples/basic-sdk-sample python -m pytest {project}/test -p testconfig -m \"not dependsnative\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       ONEAGENT_SDK_VERSION: ${{ matrix.version }}
-
     steps:
-      # The wheel version carries Dynatrace's internal BUILD_TIMESTAMP suffix
-      # (setup.py's get_version_from_version_py()); the git tag is just the
-      # base version, so both are derived from matrix.version here.
-      - id: ver
-        run: |
-          base="${ONEAGENT_SDK_VERSION%.*.*}"
-          timestamp="${ONEAGENT_SDK_VERSION#"$base".}"
-          echo "ref=v$base" >> "$GITHUB_OUTPUT"
-          echo "timestamp=${timestamp/./-}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout OneAgent-SDK-for-Python ${{ steps.ver.outputs.ref }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Dynatrace/OneAgent-SDK-for-Python
-          ref: ${{ steps.ver.outputs.ref }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # setup.py forces a universal (py2.py3) tag, so one build serves
-          # every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # DT_PYSDK_CSDK_PATH is intentionally left unset: it would point at
-          # Dynatrace's closed-source OneAgent SDK for C/C++, which has no
-          # riscv64 build. setup.py degrades gracefully without it, shipping
-          # a wheel with no native library; oneagent.initialize() then
-          # returns STATUS_STUB_LOAD_ERROR instead of crashing (its own
-          # documented no-op mode).
-          CIBW_ENVIRONMENT: BUILD_TIMESTAMP=${{ steps.ver.outputs.timestamp }}
-          # There is no compiled extension to repair (no .so is bundled);
-          # auditwheel refuses a wheel with no ELF content at all.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
-          CIBW_TEST_REQUIRES: pytest mock
-          CIBW_TEST_COMMAND: >-
-            python -c "import oneagent; r = oneagent.initialize(); assert r.status
-            == r.STATUS_STUB_LOAD_ERROR, r.status; oneagent.shutdown()" &&
-            PYTHONPATH={project}/test-util-src:{project}/samples/basic-sdk-sample
-            python -m pytest {project}/test -p testconfig -m "not dependsnative"
+          name: oneagent-sdk-${{ env.ONEAGENT_SDK_VERSION }}-py2.py3-none-linux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -110,15 +111,9 @@ jobs:
           assert "oneagent/_impl/native/sdknulliface.py" in names, names
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: oneagent-sdk-${{ env.ONEAGENT_SDK_VERSION }}-py2.py3-none-linux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish oneagent-sdk ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

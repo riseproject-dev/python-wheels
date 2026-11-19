@@ -54,35 +54,37 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     name: Build photutils ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "photutils"
+      version: "${{ matrix.version }}"
+      repository: "astropy/photutils"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PHOTUTILS=${{ matrix.version }}"
+      cibw-test-extras: "test"
+      cibw-test-command: "pytest -p no:warnings --pyargs photutils"
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,scipy,astropy,pyerfa,pyyaml,hypothesis"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PHOTUTILS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout photutils ${{ env.PHOTUTILS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: astropy/photutils
-          ref: ${{ env.PHOTUTILS_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PHOTUTILS=${{ env.PHOTUTILS_VERSION }}
-          CIBW_TEST_EXTRAS: test
-          CIBW_TEST_COMMAND: pytest -p no:warnings --pyargs photutils
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_ONLY_BINARY=numpy,scipy,astropy,pyerfa,pyyaml,hypothesis
+          name: photutils-${{ env.PHOTUTILS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -100,16 +102,9 @@ jobs:
           assert licences == {"LICENSE.rst"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: photutils-${{ env.PHOTUTILS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish photutils ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

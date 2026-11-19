@@ -55,79 +55,67 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build ngt ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "ngt"
+      version: "${{ matrix.version }}"
+      repository: "yahoojapan/NGT"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/ngt/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        mkdir -p python/ngt-src
+        cp -r CMakeLists.txt LICENSE README.md VERSION bin lib samples utils python/ngt-src/
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "python"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all-linux: "dnf -y install cmake blas-devel lapack-devel && cd {package} && cmake -S ngt-src -B build-ci -DCMAKE_BUILD_TYPE=Release -DNGT_AVX_DISABLED=ON -DNGT_MARCH_NATIVE_DISABLED=ON && cmake --build build-ci --parallel $(nproc) && cp build-ci/lib/NGT/libngt.a . && cp build-ci/lib/NGT/defines.h build-ci/lib/NGT/version_defs.h ngt-src/lib/NGT/"
+      cibw-environment-linux: "NGT_STATIC_LIBRARY_PATH=libngt.a NGT_INCLUDE_DIR=ngt-src/lib NGT_BUILD_STATIC=1 PIP_ONLY_BINARY=numpy"
+      # Upstream ships no pytest suite for the Python bindings (only a
+      # demo script with hardcoded relative paths to its sample
+      # dataset); synthesize a round-trip create/insert/search smoke test.
+      cibw-test-command: "python3 -c \"import ngtpy, random; ngtpy.create(path=b'/tmp/ngt-smoke-index', dimension=16, distance_type='L2'); idx = ngtpy.Index(b'/tmp/ngt-smoke-index'); vecs = [[random.random() for _ in range(16)] for _ in range(200)]; idx.batch_insert(vecs); idx.save(); results = idx.search(vecs[0], size=5); assert len(results) == 5, results; assert results[0][0] == 0, results; print('ngt smoke test ok')\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       NGT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout NGT v${{ env.NGT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: yahoojapan/NGT
-          ref: v${{ env.NGT_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/ngt/${{ env.NGT_VERSION }}/*.patch
-
-      # python/pyproject.toml's own [tool.cibuildwheel.linux] before-all
-      # expects an `ngt-src/` checkout staged next to the package (comment:
-      # "ngt-src/ is staged next to the package") - upstream's own tooling
-      # does this outside of what's committed to the repo.
-      - name: Stage the NGT core checkout next to the Python package
-        run: |
-          mkdir -p python/ngt-src
-          cp -r CMakeLists.txt LICENSE README.md VERSION bin lib samples utils python/ngt-src/
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install cmake blas-devel lapack-devel &&
-            cd {package} &&
-            cmake -S ngt-src -B build-ci -DCMAKE_BUILD_TYPE=Release
-            -DNGT_AVX_DISABLED=ON -DNGT_MARCH_NATIVE_DISABLED=ON &&
-            cmake --build build-ci --parallel $(nproc) &&
-            cp build-ci/lib/NGT/libngt.a . &&
-            cp build-ci/lib/NGT/defines.h build-ci/lib/NGT/version_defs.h ngt-src/lib/NGT/
-          CIBW_ENVIRONMENT_LINUX: >-
-            NGT_STATIC_LIBRARY_PATH=libngt.a
-            NGT_INCLUDE_DIR=ngt-src/lib
-            NGT_BUILD_STATIC=1
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # Upstream ships no pytest suite for the Python bindings (only a
-          # demo script with hardcoded relative paths to its sample
-          # dataset); synthesize a round-trip create/insert/search smoke test.
-          CIBW_TEST_COMMAND: >-
-            python3 -c "import ngtpy, random;
-            ngtpy.create(path=b'/tmp/ngt-smoke-index', dimension=16, distance_type='L2');
-            idx = ngtpy.Index(b'/tmp/ngt-smoke-index');
-            vecs = [[random.random() for _ in range(16)] for _ in range(200)];
-            idx.batch_insert(vecs);
-            idx.save();
-            results = idx.search(vecs[0], size=5);
-            assert len(results) == 5, results;
-            assert results[0][0] == 0, results;
-            print('ngt smoke test ok')"
+          name: ngt-${{ env.NGT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -138,12 +126,6 @@ jobs:
               assert any(n.startswith("ngtpy") and n.endswith(".so") for n in names), (path, names)
               print(path, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ngt-${{ env.NGT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -180,7 +162,7 @@ jobs:
 
   publish:
     name: Publish ngt ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

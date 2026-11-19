@@ -63,81 +63,91 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build keystone-engine ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "keystone-engine"
+      version: "${{ matrix.version }}"
+      repository: "keystone-engine/keystone"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "py2.py3-none-manylinux_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/keystone-engine/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "bindings/python"
+      cibw-build: "cp312-manylinux_riscv64"
+      # setup.py shells out to `cmake`/`make` directly (make-share.sh); neither is
+      # a declared build dep. Installed from the image's own package manager rather
+      # than pip: pypi.riseproject.dev lags PyPI's own latest cmake (gotcha 84), and
+      # this gives a cmake < 4, needed below. The vendored llvm/cmake/config.guess is
+      # stamped 2011, predates riscv64, and fails "unable to guess system type"; the
+      # automake package's copy already knows riscv64 (gotcha 138).
+      cibw-before-all-linux: |-
+        set -ex
+        dnf install -y cmake automake
+        cp /usr/share/automake-*/config.guess llvm/cmake/config.guess
+        # The image also carries a newer cmake (>= 4) ahead on PATH by default; that
+        # version hard-rejects CMakeLists.txt's `cmake_policy(SET CMP0051 OLD)` ("no
+        # longer supports it"), where the one just installed above (< 4) still can.
+        # Shadow only `cmake` via a dedicated PATH entry, not all of /usr/bin, so
+        # nothing else (notably `python`) resolves somewhere cibuildwheel doesn't
+        # expect.
+        mkdir -p /tmp/keystone-cmake
+        ln -sf /usr/bin/cmake /tmp/keystone-cmake/cmake
+      # CMAKE_POLICY_VERSION_MINIMUM=3.5 covers cmake_minimum_required(VERSION 2.8.7)
+      # the same way, should PATH resolution ever pick a >= 4 cmake up regardless.
+      cibw-environment-linux: "CMAKE_POLICY_VERSION_MINIMUM=3.5 PATH=/tmp/keystone-cmake:$PATH"
+      # Upstream's CI builds wheels but runs no tests at all. bindings/python/sample.py
+      # is the closest thing to a test upstream ships, but one of its own calls -
+      # b"add eax, 15h" with the default (non-RADIX16) syntax option - raises
+      # KS_ERR_ASM_INVALIDOPERAND independent of any target this build produces (a
+      # numeric-literal parsing quirk in the demo script, not riscv64-specific), so
+      # this inlines the rest of sample.py's calls instead of running it as-is.
+      cibw-test-command: |-
+        python -c "
+        import keystone as ks
+
+        def asm(arch, mode, code):
+        encoding, count = ks.Ks(arch, mode).asm(code)
+        assert count > 0, (arch, mode, code)
+
+        asm(ks.KS_ARCH_X86, ks.KS_MODE_64, b'add rax, rcx')
+        asm(ks.KS_ARCH_ARM, ks.KS_MODE_ARM, b'sub r1, r2, r5')
+        asm(ks.KS_ARCH_ARM64, ks.KS_MODE_LITTLE_ENDIAN, b'ldr w1, [sp, #0x8]')
+        asm(ks.KS_ARCH_HEXAGON, ks.KS_MODE_BIG_ENDIAN, b'v23.w=vavg(v11.w,v2.w):rnd')
+        asm(ks.KS_ARCH_MIPS, ks.KS_MODE_MIPS32, b'and \$9, \$6, \$7')
+        asm(ks.KS_ARCH_PPC, ks.KS_MODE_PPC32 + ks.KS_MODE_BIG_ENDIAN, b'add 1, 2, 3')
+        asm(ks.KS_ARCH_SPARC, ks.KS_MODE_SPARC32 + ks.KS_MODE_LITTLE_ENDIAN, b'add %g1, %g2, %g3')
+        asm(ks.KS_ARCH_SYSTEMZ, ks.KS_MODE_BIG_ENDIAN, b'a %r0, 4095(%r15,%r1)')
+        print('all asm ok')
+        "
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       KEYSTONE_ENGINE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout keystone ${{ env.KEYSTONE_ENGINE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: keystone-engine/keystone
-          ref: ${{ env.KEYSTONE_ENGINE_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch keystone source
-        run: git apply python-wheels/patches/keystone-engine/${{ env.KEYSTONE_ENGINE_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: bindings/python
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py shells out to `cmake`/`make` directly (make-share.sh); neither is
-          # a declared build dep. Installed from the image's own package manager rather
-          # than pip: pypi.riseproject.dev lags PyPI's own latest cmake (gotcha 84), and
-          # this gives a cmake < 4, needed below. The vendored llvm/cmake/config.guess is
-          # stamped 2011, predates riscv64, and fails "unable to guess system type"; the
-          # automake package's copy already knows riscv64 (gotcha 138).
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            dnf install -y cmake automake
-            cp /usr/share/automake-*/config.guess llvm/cmake/config.guess
-            # The image also carries a newer cmake (>= 4) ahead on PATH by default; that
-            # version hard-rejects CMakeLists.txt's `cmake_policy(SET CMP0051 OLD)` ("no
-            # longer supports it"), where the one just installed above (< 4) still can.
-            # Shadow only `cmake` via a dedicated PATH entry, not all of /usr/bin, so
-            # nothing else (notably `python`) resolves somewhere cibuildwheel doesn't
-            # expect.
-            mkdir -p /tmp/keystone-cmake
-            ln -sf /usr/bin/cmake /tmp/keystone-cmake/cmake
-          # CMAKE_POLICY_VERSION_MINIMUM=3.5 covers cmake_minimum_required(VERSION 2.8.7)
-          # the same way, should PATH resolution ever pick a >= 4 cmake up regardless.
-          CIBW_ENVIRONMENT: CMAKE_POLICY_VERSION_MINIMUM=3.5 PATH=/tmp/keystone-cmake:$PATH
-          # Upstream's CI builds wheels but runs no tests at all. bindings/python/sample.py
-          # is the closest thing to a test upstream ships, but one of its own calls -
-          # b"add eax, 15h" with the default (non-RADIX16) syntax option - raises
-          # KS_ERR_ASM_INVALIDOPERAND independent of any target this build produces (a
-          # numeric-literal parsing quirk in the demo script, not riscv64-specific), so
-          # this inlines the rest of sample.py's calls instead of running it as-is.
-          CIBW_TEST_COMMAND: |
-            python -c "
-            import keystone as ks
-
-            def asm(arch, mode, code):
-                encoding, count = ks.Ks(arch, mode).asm(code)
-                assert count > 0, (arch, mode, code)
-
-            asm(ks.KS_ARCH_X86, ks.KS_MODE_64, b'add rax, rcx')
-            asm(ks.KS_ARCH_ARM, ks.KS_MODE_ARM, b'sub r1, r2, r5')
-            asm(ks.KS_ARCH_ARM64, ks.KS_MODE_LITTLE_ENDIAN, b'ldr w1, [sp, #0x8]')
-            asm(ks.KS_ARCH_HEXAGON, ks.KS_MODE_BIG_ENDIAN, b'v23.w=vavg(v11.w,v2.w):rnd')
-            asm(ks.KS_ARCH_MIPS, ks.KS_MODE_MIPS32, b'and \$9, \$6, \$7')
-            asm(ks.KS_ARCH_PPC, ks.KS_MODE_PPC32 + ks.KS_MODE_BIG_ENDIAN, b'add 1, 2, 3')
-            asm(ks.KS_ARCH_SPARC, ks.KS_MODE_SPARC32 + ks.KS_MODE_LITTLE_ENDIAN, b'add %g1, %g2, %g3')
-            asm(ks.KS_ARCH_SYSTEMZ, ks.KS_MODE_BIG_ENDIAN, b'a %r0, 4095(%r15,%r1)')
-            print('all asm ok')
-            "
+          name: keystone-engine-${{ env.KEYSTONE_ENGINE_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries libkeystone and its licence
         run: |
@@ -152,15 +162,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: keystone-engine-${{ env.KEYSTONE_ENGINE_VERSION }}-py2.py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish keystone-engine ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

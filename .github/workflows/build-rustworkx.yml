@@ -49,6 +49,48 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build rustworkx ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # pyo3 carries abi3-py310 unconditionally in Cargo.toml, so every
+          # CPython build is abi3 already and the free-threaded build needs no
+          # extra flag either (pyo3 disables abi3 under Py_GIL_DISABLED).
+          - tag: cp310-abi3
+            build: >-
+              cp310-manylinux_riscv64 cp311-manylinux_riscv64
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "rustworkx"
+      version: "${{ matrix.version }}"
+      repository: "Qiskit/rustworkx"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 360
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # Replaces (not merges into) upstream's own [tool.cibuildwheel.linux]
+      # environment table, so its PATH/CARGO_NET_GIT_FETCH_WITH_CLI are
+      # repeated here alongside our registry.
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" CARGO_NET_GIT_FETCH_WITH_CLI=\"true\""
+      # Upstream's own repair-wheel-command also runs abi3audit via pipx,
+      # which the riscv64 image doesn't carry; cibuildwheel's own default
+      # audit-command already abi3audits every abi3-tagged wheel natively
+      # after this repair step runs, so drop the pipx layer here.
+      cibw-repair-wheel-command-linux: "auditwheel repair -w {dest_dir} {wheel}"
+      # numpy has no riscv64 wheel on public PyPI; without this, before-test's
+      # `pip install numpy<2.5.0` would source-build it in the container.
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
@@ -66,41 +108,14 @@ jobs:
               cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
-
     env:
       RUSTWORKX_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout rustworkx ${{ env.RUSTWORKX_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Qiskit/rustworkx
-          ref: ${{ env.RUSTWORKX_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces (not merges into) upstream's own [tool.cibuildwheel.linux]
-          # environment table, so its PATH/CARGO_NET_GIT_FETCH_WITH_CLI are
-          # repeated here alongside our registry.
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            CARGO_NET_GIT_FETCH_WITH_CLI="true"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's own repair-wheel-command also runs abi3audit via pipx,
-          # which the riscv64 image doesn't carry; cibuildwheel's own default
-          # audit-command already abi3audits every abi3-tagged wheel natively
-          # after this repair step runs, so drop the pipx layer here.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
-          # numpy has no riscv64 wheel on public PyPI; without this, before-test's
-          # `pip install numpy<2.5.0` would source-build it in the container.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          name: rustworkx-${{ env.RUSTWORKX_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contains the compiled extension
         run: |
@@ -110,15 +125,9 @@ jobs:
             unzip -l "$whl" | grep '\.so$'
           done
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: rustworkx-${{ env.RUSTWORKX_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish rustworkx ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

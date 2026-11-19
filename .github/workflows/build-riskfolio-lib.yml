@@ -56,79 +56,79 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build riskfolio-lib ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "riskfolio-lib"
+      version: "${{ matrix.version }}"
+      repository: "dcajasn/Riskfolio-Lib"
+      ref: "9eb32d350095b307bb4a3fef7e35d00c6488b283"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/riskfolio-lib/${{ matrix.version }}/0*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp lib/eigen-3.4.0/COPYING.MPL2 COPYING.eigen
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # matplotlib (already pinned below) transitively pulls in pillow; PyPI's pillow
+      # is newer than our registry's ceiling, so an unbounded test install picks PyPI's
+      # sdist-only release and fails to build it (no libjpeg headers in the manylinux
+      # image). Pin pillow to our registry's wheel for the test install too.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,pandas,matplotlib,pillow,clarabel,scs,scikit-learn,statsmodels,arch,astropy,cvxpy,osqp,highspy,qdldl,sparsediffpy"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      # tests/test_portfolio.py's 6 Classic/HC optimization tests compare live solver
+      # output against frozen CSV snapshots with assert_array_almost_equal(decimal=6);
+      # upstream's own CI has this test file's step commented out on every OS/arch it
+      # builds (see Riskfolio-Lib's .github/workflows/build.yml), so those snapshots are
+      # untested against any live solver version, and HRP/HERC additionally run
+      # hierarchical-clustering tie-breaks that flip under tiny floating-point
+      # differences - not riscv64-specific, just never exercised anywhere, on an
+      # ill-conditioned covariance matrix (CI log shows scipy's LinAlgWarning plus
+      # CVXPY's "solution may be inaccurate" on the same inputs). Separately,
+      # test_hc_nco_optimization fails unconditionally on any platform: it calls
+      # HCPortfolio.optimization(covariance=...), a kwarg the method (method_cov=, not
+      # covariance=) has never accepted in 7.4.0 - verified against the pinned commit's
+      # own source - an upstream test/library mismatch, not a riscv64 issue.
+      cibw-test-command: "python -c \"import riskfolio; print(riskfolio.__version__)\" && python -m pytest tests -v -k \"not test_classic_minrisk_optimization and not test_classic_sharpe_optimization and not test_classic_riskparity_optimization and not test_worst_case_optimization and not test_hc_hrp_optimization and not test_hc_herc_optimization and not test_hc_nco_optimization\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       RISKFOLIO_LIB_VERSION: ${{ matrix.version }}
-
     steps:
-      # dcajasn/Riskfolio-Lib publishes no tags; this is the commit that
-      # released riskfolio-lib 7.4.0 to PyPI (the next commit bumped to 7.4.1).
-      - name: Checkout riskfolio-lib v${{ env.RISKFOLIO_LIB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: dcajasn/Riskfolio-Lib
-          ref: 9eb32d350095b307bb4a3fef7e35d00c6488b283
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch riskfolio-lib source
-        run: git apply python-wheels/patches/riskfolio-lib/${{ env.RISKFOLIO_LIB_VERSION }}/0*.patch
-
-      # riskfolio.external.functions links Eigen 3.4.0, vendored at
-      # lib/eigen-3.4.0 without its own licence reaching the wheel.
-      - name: Stage the vendored dependency's licence
-        run: cp lib/eigen-3.4.0/COPYING.MPL2 COPYING.eigen
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # matplotlib (already pinned below) transitively pulls in pillow; PyPI's pillow
-          # is newer than our registry's ceiling, so an unbounded test install picks PyPI's
-          # sdist-only release and fails to build it (no libjpeg headers in the manylinux
-          # image). Pin pillow to our registry's wheel for the test install too.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas,matplotlib,pillow,clarabel,scs,scikit-learn,statsmodels,arch,astropy,cvxpy,osqp,highspy,qdldl,sparsediffpy
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          # tests/test_portfolio.py's 6 Classic/HC optimization tests compare live solver
-          # output against frozen CSV snapshots with assert_array_almost_equal(decimal=6);
-          # upstream's own CI has this test file's step commented out on every OS/arch it
-          # builds (see Riskfolio-Lib's .github/workflows/build.yml), so those snapshots are
-          # untested against any live solver version, and HRP/HERC additionally run
-          # hierarchical-clustering tie-breaks that flip under tiny floating-point
-          # differences - not riscv64-specific, just never exercised anywhere, on an
-          # ill-conditioned covariance matrix (CI log shows scipy's LinAlgWarning plus
-          # CVXPY's "solution may be inaccurate" on the same inputs). Separately,
-          # test_hc_nco_optimization fails unconditionally on any platform: it calls
-          # HCPortfolio.optimization(covariance=...), a kwarg the method (method_cov=, not
-          # covariance=) has never accepted in 7.4.0 - verified against the pinned commit's
-          # own source - an upstream test/library mismatch, not a riscv64 issue.
-          CIBW_TEST_COMMAND: >-
-            python -c "import riskfolio; print(riskfolio.__version__)" &&
-            python -m pytest tests -v
-            -k "not test_classic_minrisk_optimization
-            and not test_classic_sharpe_optimization
-            and not test_classic_riskparity_optimization
-            and not test_worst_case_optimization
-            and not test_hc_hrp_optimization
-            and not test_hc_herc_optimization
-            and not test_hc_nco_optimization"
+          name: riskfolio-lib-${{ env.RISKFOLIO_LIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension and all licences
         run: |
@@ -143,15 +143,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: riskfolio-lib-${{ env.RISKFOLIO_LIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish riskfolio-lib ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

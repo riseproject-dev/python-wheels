@@ -51,69 +51,73 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mdtraj ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "mdtraj"
+      version: "${{ matrix.version }}"
+      repository: "mdtraj/mdtraj"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-fetch-depth: 0
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/mdtraj/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,pandas,pyarrow,tables,blosc2,numexpr,ndindex,msgpack,pydantic-core,netcdf4,cftime"
+      # Upstream's wheel job only smoke-tests; also run its CI suite against the wheel,
+      # with its conda test env minus openmm (no riscv64 build; those tests skip).
+      cibw-test-extras: "all"
+      # pyparsing 3.3.3 rewrote infix_notation as a shunting-yard parser that takes the
+      # first operator in op_list order without backtracking. mdtraj sorts its operators
+      # alphabetically, so '>' wins over '>=' and test_binary_selection_operator fails on
+      # 'name >= 1' on every arch (x86_64 too, with upstream's PyPI wheel); 3.3.2 passes
+      # (gotchas 355, 583). Upstream leaves pyparsing unpinned.
+      cibw-test-requires: "gsd>=2.8 pyparsing<3.3.3"
+      cibw-test-sources: "tests pyproject.toml"
+      # Deselected for riscv64 rounding at a histogram bin edge (gotcha 304), not a wrong
+      # result: test_compare_rdf_t_master compares to a reference file that matches the
+      # x86 SSE distance kernel bit for bit. riscv64 builds the scalar vectorize_generic.h
+      # kernel, and GCC contracts its float32 multiply-adds to fmadd.s, so a few pair
+      # distances land across a 0.005 nm bin edge: 18/20000 elements off, as 9 adjacent-bin
+      # pairs (e.g. [20,32]/[20,33]). On x86_64,
+      # building with -D__NO_INTRINSICS -mfma -ffp-contract=fast gives the same 18
+      # elements with the same values; without -mfma it passes; and mdtraj's own numpy
+      # path (opt=False) misses this reference file at 10 elements.
+      cibw-test-command: "python -c \"import mdtraj; print(mdtraj.__version__)\" && mdconvert -h && mdinspect -h && pytest -n logical --durations=10 tests/ -r fE --color=yes --deselect tests/test_rdf.py::test_compare_rdf_t_master"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MDTRAJ_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout mdtraj ${{ env.MDTRAJ_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: mdtraj/mdtraj
-          ref: ${{ env.MDTRAJ_VERSION }}
-          fetch-depth: 0  # versioneer derives the version from `git describe`
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/mdtraj/${{ env.MDTRAJ_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas,pyarrow,tables,blosc2,numexpr,ndindex,msgpack,pydantic-core,netcdf4,cftime
-          # Upstream's wheel job only smoke-tests; also run its CI suite against the wheel,
-          # with its conda test env minus openmm (no riscv64 build; those tests skip).
-          CIBW_TEST_EXTRAS: all
-          # pyparsing 3.3.3 rewrote infix_notation as a shunting-yard parser that takes the
-          # first operator in op_list order without backtracking. mdtraj sorts its operators
-          # alphabetically, so '>' wins over '>=' and test_binary_selection_operator fails on
-          # 'name >= 1' on every arch (x86_64 too, with upstream's PyPI wheel); 3.3.2 passes
-          # (gotchas 355, 583). Upstream leaves pyparsing unpinned.
-          CIBW_TEST_REQUIRES: 'gsd>=2.8 pyparsing<3.3.3'
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          # Deselected for riscv64 rounding at a histogram bin edge (gotcha 304), not a wrong
-          # result: test_compare_rdf_t_master compares to a reference file that matches the
-          # x86 SSE distance kernel bit for bit. riscv64 builds the scalar vectorize_generic.h
-          # kernel, and GCC contracts its float32 multiply-adds to fmadd.s, so a few pair
-          # distances land across a 0.005 nm bin edge: 18/20000 elements off, as 9 adjacent-bin
-          # pairs (e.g. [20,32]/[20,33]). On x86_64,
-          # building with -D__NO_INTRINSICS -mfma -ffp-contract=fast gives the same 18
-          # elements with the same values; without -mfma it passes; and mdtraj's own numpy
-          # path (opt=False) misses this reference file at 10 elements.
-          CIBW_TEST_COMMAND: >-
-            python -c "import mdtraj; print(mdtraj.__version__)" &&
-            mdconvert -h &&
-            mdinspect -h &&
-            pytest -n logical --durations=10 tests/ -r fE --color=yes
-            --deselect tests/test_rdf.py::test_compare_rdf_t_master
+          name: mdtraj-${{ env.MDTRAJ_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the licences and the compiled extensions
         run: |
@@ -130,13 +134,6 @@ jobs:
           # -fopenmp makes auditwheel vendor the image's libgomp, hence the gpl_sources job.
           assert any(n.startswith("mdtraj.libs/libgomp") for n in names), [n for n in names if ".libs/" in n]
           EOF
-
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mdtraj-${{ env.MDTRAJ_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -171,7 +168,7 @@ jobs:
 
   publish:
     name: Publish mdtraj ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

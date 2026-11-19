@@ -51,131 +51,124 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build libuuu ${{ matrix.version }} py3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "libuuu"
+      version: "${{ matrix.version }}"
+      repository: "nxp-imx/mfgtools"
+      ref: "uuu_${{ matrix.version }}"
+      artifact-tag: "py3-manylinux_riscv64"
+      checkout-fetch-depth: 0
+      pre-build: |-
+        if ! version=$(git describe --tags --long 2>/dev/null); then
+          echo "Error: No git tags found. Cannot determine version."
+          git tag -l
+          exit 1
+        fi
+        echo "Found version: $version"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, in the package directory, the licence of every shared library
+        # auditwheel vendors out of the build image alongside libuuu.so.
+        # setuptools' default LICENSE* glob copies them into the wheel.
+        set -euo pipefail
+
+        package="${1:?usage: collect-licenses.sh <package-dir> <lib>}"
+        lib="${2:?usage: collect-licenses.sh <package-dir> <lib>}"
+
+        # ldd is transitive, so libuuu.so alone covers its whole closure.
+        mapfile -t libs < <(ldd "$lib" | tr ' ' '\n' | grep '^/' | sort -u)
+
+        # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+        # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist
+        # and are never vendored into the wheel.
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+        )
+
+        for pkg in "${pkgs[@]}"; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+            # Some subpackages leave the licence to a sibling of the same source RPM.
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
+
+            # Others mark it %doc rather than %license, and the image installs no docs.
+            if [ -z "${files[0]:-}" ]; then
+                dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+            fi
+
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$package/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$package/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
+
+        ls -1 "$package"/LICENSE.* | sed "s|$package/||"
+        COLLECT_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-environment-linux: "PIP_CONSTRAINT=/build-constraints.txt PIP_BUILD_CONSTRAINT=/build-constraints.txt TINYXML2_VERSION=10.0.0"
+      cibw-package-dir: "wrapper"
+      cibw-build: "cp39-manylinux_riscv64"
+      # Upstream's build_linux.sh builds the deps with vcpkg, which has no riscv64 binary
+      # cache; take them from the image instead, and build tinyxml2 (not in Rocky 10) static.
+      cibw-before-all-linux: "echo 'setuptools-scm<10.2' > /build-constraints.txt && dnf install -y ninja-build libusb1-devel bzip2-devel libzstd-devel openssl-devel zlib-devel && mkdir -p /tmp/tinyxml2 && curl -sSLf \"https://github.com/leethomason/tinyxml2/archive/refs/tags/${TINYXML2_VERSION}.tar.gz\" | tar -xz -C /tmp/tinyxml2 --strip-components=1 && cmake -S /tmp/tinyxml2 -B /tmp/tinyxml2/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -Dtinyxml2_BUILD_TESTING=OFF -DCMAKE_INSTALL_LIBDIR=lib && cmake --build /tmp/tinyxml2/build --target install && cd {package} && PKG_CONFIG_PATH=/usr/local/lib/pkgconfig cmake -B build -G Ninja && cmake --build build && mkdir -p libuuu/lib/linux/riscv64 && cp build/libuuu.so libuuu/lib/linux/riscv64/ && cp {project}/LICENSE LICENSE.mfgtools && cp /tmp/tinyxml2/LICENSE.txt LICENSE.tinyxml2 && bash {project}/collect-licenses.sh {package} build/libuuu.so"
+      # setuptools-scm 10.2.0 creates the egg-info before setuptools preloads the
+      # egg_info.writers entry points (pypa/pyproject-hooks#206). With the in-tree
+      # backend's backend-path = ["."], cp39's stdlib importlib.metadata then sees a
+      # nameless libuuu.egg-info and egg_info crashes. 1.5.243 was released with 9.2.2.
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "wrapper/tests"
+      # test_get_platform_info asserts the architecture is one of upstream's four.
+      cibw-test-command: "pytest wrapper/tests -k \"not test_get_platform_info\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       LIBUUU_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout mfgtools uuu_${{ env.LIBUUU_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: nxp-imx/mfgtools
-          ref: uuu_${{ env.LIBUUU_VERSION }}
-          fetch-depth: 0
-          submodules: false
-          persist-credentials: false
-
-      - name: Validate git versioning
-        run: |
-          if ! version=$(git describe --tags --long 2>/dev/null); then
-            echo "Error: No git tags found. Cannot determine version."
-            git tag -l
-            exit 1
-          fi
-          echo "Found version: $version"
-
-      - name: Stage the licence-collection script
-        run: |
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, in the package directory, the licence of every shared library
-          # auditwheel vendors out of the build image alongside libuuu.so.
-          # setuptools' default LICENSE* glob copies them into the wheel.
-          set -euo pipefail
-
-          package="${1:?usage: collect-licenses.sh <package-dir> <lib>}"
-          lib="${2:?usage: collect-licenses.sh <package-dir> <lib>}"
-
-          # ldd is transitive, so libuuu.so alone covers its whole closure.
-          mapfile -t libs < <(ldd "$lib" | tr ' ' '\n' | grep '^/' | sort -u)
-
-          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
-          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist
-          # and are never vendored into the wheel.
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
-          )
-
-          for pkg in "${pkgs[@]}"; do
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
-
-              # Some subpackages leave the licence to a sibling of the same source RPM.
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
-
-              # Others mark it %doc rather than %license, and the image installs no docs.
-              if [ -z "${files[0]:-}" ]; then
-                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
-                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
-              fi
-
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$package/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$package/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-
-          ls -1 "$package"/LICENSE.* | sed "s|$package/||"
-          COLLECT_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: wrapper
-          output-dir: wheelhouse/
-          only: cp39-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT_PASS_LINUX: TINYXML2_VERSION
-          # Upstream's build_linux.sh builds the deps with vcpkg, which has no riscv64 binary
-          # cache; take them from the image instead, and build tinyxml2 (not in Rocky 10) static.
-          CIBW_BEFORE_ALL_LINUX: >-
-            echo 'setuptools-scm<10.2' > /build-constraints.txt &&
-            dnf install -y ninja-build libusb1-devel bzip2-devel libzstd-devel openssl-devel zlib-devel &&
-            mkdir -p /tmp/tinyxml2 &&
-            curl -sSLf "https://github.com/leethomason/tinyxml2/archive/refs/tags/${TINYXML2_VERSION}.tar.gz"
-            | tar -xz -C /tmp/tinyxml2 --strip-components=1 &&
-            cmake -S /tmp/tinyxml2 -B /tmp/tinyxml2/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-            -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -Dtinyxml2_BUILD_TESTING=OFF -DCMAKE_INSTALL_LIBDIR=lib &&
-            cmake --build /tmp/tinyxml2/build --target install &&
-            cd {package} &&
-            PKG_CONFIG_PATH=/usr/local/lib/pkgconfig cmake -B build -G Ninja &&
-            cmake --build build &&
-            mkdir -p libuuu/lib/linux/riscv64 &&
-            cp build/libuuu.so libuuu/lib/linux/riscv64/ &&
-            cp {project}/LICENSE LICENSE.mfgtools &&
-            cp /tmp/tinyxml2/LICENSE.txt LICENSE.tinyxml2 &&
-            bash {project}/collect-licenses.sh {package} build/libuuu.so
-          # setuptools-scm 10.2.0 creates the egg-info before setuptools preloads the
-          # egg_info.writers entry points (pypa/pyproject-hooks#206). With the in-tree
-          # backend's backend-path = ["."], cp39's stdlib importlib.metadata then sees a
-          # nameless libuuu.egg-info and egg_info crashes. 1.5.243 was released with 9.2.2.
-          CIBW_ENVIRONMENT: >-
-            PIP_CONSTRAINT=/build-constraints.txt
-            PIP_BUILD_CONSTRAINT=/build-constraints.txt
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: wrapper/tests
-          # test_get_platform_info asserts the architecture is one of upstream's four.
-          CIBW_TEST_COMMAND: pytest wrapper/tests -k "not test_get_platform_info"
+          name: libuuu-${{ env.LIBUUU_VERSION }}-py3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel bundles libuuu.so and the licences
         run: |
@@ -212,12 +205,6 @@ jobs:
           done
           SCRIPT
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: libuuu-${{ env.LIBUUU_VERSION }}-py3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   gpl_sources:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
@@ -253,7 +240,7 @@ jobs:
 
   publish:
     name: Publish libuuu ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

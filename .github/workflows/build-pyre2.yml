@@ -53,6 +53,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyre2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyre2"
+      version: "${{ matrix.version }}"
+      repository: "andreasvc/pyre2"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      timeout-minutes: 300
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pyre2/${{ matrix.version }}/0001-pyproject-widen-license-files-to-cover-re2-and-abseil.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-environment-linux: "LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYRE2=${{ matrix.version }} ABSEIL_VERSION=20250512.1 RE2_TAG=2025-11-05"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # Upstream's before-all installs EPEL's re2-devel, unavailable on
+      # riscv64 (gotcha 51 - no EPEL there); build abseil-cpp + re2 from
+      # source instead, installed so CMakeLists.txt's own
+      # find_package(re2 CONFIG) picks them up unmodified.
+      #
+      # No riscv64 cmake wheel exists, so CIBW_BEFORE_BUILD's pip install
+      # builds it from source as a build dependency; its own CMake
+      # bootstrap needs OpenSSL's dev headers to find libcrypto for
+      # Utilities/cmcurl (gotcha 608).
+      cibw-before-all: "dnf -y install openssl-devel && mkdir -p /tmp/abseil-cpp && curl -sSLf \"https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz\" | tar -xz -C /tmp/abseil-cpp --strip-components=1 && cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_INSTALL_LIBDIR=lib && cmake --build /tmp/abseil-cpp/build --parallel --target install && mkdir -p /tmp/re2 && curl -sSLf \"https://github.com/google/re2/archive/refs/tags/${RE2_TAG}.tar.gz\" | tar -xz -C /tmp/re2 --strip-components=1 && cmake -S /tmp/re2 -B /tmp/re2/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib && cmake --build /tmp/re2/build --parallel --target install && ldconfig && cp /tmp/re2/LICENSE {project}/LICENSE.re2 && cp /tmp/abseil-cpp/LICENSE {project}/LICENSE.abseil-cpp"
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-before-build: "pip install setuptools \"setuptools_scm>=8\" \"Cython>=0.20\" \"pybind11>=2.12\" ninja \"cmake>=3.18,<4.0.0\""
+      cibw-repair-wheel-command: "auditwheel repair --strip -w {dest_dir} {wheel}"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-command: "pytest -v ."
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     # riscv64 builds run several times slower than x86_64; raised from 90 after jobs were killed mid-build by the timeout, not a dead runner.
     timeout-minutes: 300
@@ -62,73 +109,12 @@ jobs:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PYRE2_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyre2 v${{ env.PYRE2_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: andreasvc/pyre2
-          ref: v${{ env.PYRE2_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # CLAUDE.md gotcha 31: git apply leaves the checkout dirty, and
-      # setuptools_scm reads a dirty tree at a tag as post-release
-      # (X.Y.(Z+1).dev0+g<sha>.d<date>) instead of the tagged version;
-      # SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYRE2 below pins it back.
-      - name: Patch pyre2 source
-        run: git apply python-wheels/patches/pyre2/${{ env.PYRE2_VERSION }}/0001-pyproject-widen-license-files-to-cover-re2-and-abseil.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT_PASS_LINUX: ABSEIL_VERSION RE2_TAG
-          # Upstream's before-all installs EPEL's re2-devel, unavailable on
-          # riscv64 (gotcha 51 - no EPEL there); build abseil-cpp + re2 from
-          # source instead, installed so CMakeLists.txt's own
-          # find_package(re2 CONFIG) picks them up unmodified.
-          #
-          # No riscv64 cmake wheel exists, so CIBW_BEFORE_BUILD's pip install
-          # builds it from source as a build dependency; its own CMake
-          # bootstrap needs OpenSSL's dev headers to find libcrypto for
-          # Utilities/cmcurl (gotcha 608).
-          CIBW_BEFORE_ALL: >-
-            dnf -y install openssl-devel &&
-            mkdir -p /tmp/abseil-cpp &&
-            curl -sSLf "https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz"
-            | tar -xz -C /tmp/abseil-cpp --strip-components=1 &&
-            cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_BUILD_TYPE=Release
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17
-            -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_INSTALL_LIBDIR=lib &&
-            cmake --build /tmp/abseil-cpp/build --parallel --target install &&
-            mkdir -p /tmp/re2 &&
-            curl -sSLf "https://github.com/google/re2/archive/refs/tags/${RE2_TAG}.tar.gz"
-            | tar -xz -C /tmp/re2 --strip-components=1 &&
-            cmake -S /tmp/re2 -B /tmp/re2/build -DCMAKE_BUILD_TYPE=Release
-            -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib &&
-            cmake --build /tmp/re2/build --parallel --target install &&
-            ldconfig &&
-            cp /tmp/re2/LICENSE {project}/LICENSE.re2 &&
-            cp /tmp/abseil-cpp/LICENSE {project}/LICENSE.abseil-cpp
-          CIBW_ENVIRONMENT: >-
-            LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYRE2=${{ env.PYRE2_VERSION }}
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_BEFORE_BUILD: >-
-            pip install setuptools "setuptools_scm>=8" "Cython>=0.20" "pybind11>=2.12" ninja "cmake>=3.18,<4.0.0"
-          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: pytest -v .
+          name: pyre2-${{ env.PYRE2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension and licences made it into the wheel
         run: |
@@ -143,15 +129,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyre2-${{ env.PYRE2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyre2 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

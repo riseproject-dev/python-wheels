@@ -51,6 +51,56 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fastparquet ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # pandas, a hard runtime requirement, publishes no free-threaded wheel on
+          # any architecture, so the suite cannot run under cp314t.
+          - python: "cp314t"
+            test_skip: "*"
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "fastparquet"
+      version: "${{ matrix.version }}"
+      repository: "dask/fastparquet"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/fastparquet/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # A patch dirties the checkout, so setuptools_scm would derive
+      # 2026.5.1.dev0 from `git describe` instead of the tag.
+      cibw-environment-linux: "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FASTPARQUET=${{ matrix.version }}"
+      # pandas and cramjam are newer on PyPI than the riscv64 wheels we ship;
+      # refusing sdists makes pip resolve back to the versions we have.
+      cibw-test-environment: "PIP_ONLY_BINARY=:all:"
+      cibw-test-skip: "${{ matrix.test_skip }}"
+      cibw-test-requires: "pytest \"pandas<3\""
+      cibw-test-sources: "fastparquet/test test-data pyproject.toml"
+      # test/util.py resolves test-data relative to the working directory, and
+      # upstream's test_wheel.yaml renames the source package out of the way so
+      # `import fastparquet` picks up the installed wheel.
+      cibw-test-command: "mv fastparquet fastparquet-src && python -m pytest fastparquet-src/test"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
@@ -63,50 +113,14 @@ jobs:
           # any architecture, so the suite cannot run under cp314t.
           - python: "cp314t"
             test_skip: "*"
-
     env:
       FASTPARQUET_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout fastparquet ${{ env.FASTPARQUET_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: dask/fastparquet
-          ref: ${{ env.FASTPARQUET_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # 2026.5.0 needs the numpy 2.5 compat backport; 2026.9.0 ships it, so
-      # later versions may have no patches/ directory at all.
-      - name: Patch fastparquet source
-        if: hashFiles(format('python-wheels/patches/fastparquet/{0}/*.patch', env.FASTPARQUET_VERSION)) != ''
-        run: git apply python-wheels/patches/fastparquet/${{ env.FASTPARQUET_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # A patch dirties the checkout, so setuptools_scm would derive
-          # 2026.5.1.dev0 from `git describe` instead of the tag.
-          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FASTPARQUET=${{ env.FASTPARQUET_VERSION }} PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # pandas and cramjam are newer on PyPI than the riscv64 wheels we ship;
-          # refusing sdists makes pip resolve back to the versions we have.
-          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
-          CIBW_TEST_REQUIRES: pytest "pandas<3"
-          CIBW_TEST_SOURCES: fastparquet/test test-data pyproject.toml
-          # test/util.py resolves test-data relative to the working directory, and
-          # upstream's test_wheel.yaml renames the source package out of the way so
-          # `import fastparquet` picks up the installed wheel.
-          CIBW_TEST_COMMAND: mv fastparquet fastparquet-src && python -m pytest fastparquet-src/test
+          name: fastparquet-${{ env.FASTPARQUET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the Cython extensions made it into the wheel
         run: |
@@ -120,15 +134,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fastparquet-${{ env.FASTPARQUET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish fastparquet ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

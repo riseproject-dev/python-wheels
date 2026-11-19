@@ -48,56 +48,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build eigenpy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "eigenpy"
+      version: "${{ matrix.version }}"
+      repository: "cmake-wheel/eigenpy"
+      ref: "v${{ matrix.version }}.c0"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 480
+      checkout-submodules: "true"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/eigenpy/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy's newest release has no riscv64 wheel; the registry's must win over its sdist.
+      cibw-environment-linux: "CMEEL_LOG_LEVEL=\"DEBUG\" CMEEL_JOBS=\"1\" CMEEL_TEST_JOBS=\"1\" CMEEL_CMAKE_ARGS=\"-DBUILD_TESTING_SCIPY=OFF\" PIP_ONLY_BINARY=numpy,scipy"
+      # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+      cibw-repair-wheel-command: ''
+      cibw-test-command: "cd {project}/unittest/python && for t in BDCSVD ComplexEigenSolver ComplexSchur EigenSolver FullPivLU GeneralizedEigenSolver GeneralizedSelfAdjointEigenSolver HessenbergDecomposition JacobiSVD LDLT LLT MINRES PartialPivLU QR RealQZ RealSchur SelfAdjointEigenSolver Tridiagonalization dimensions id version; do echo \"test_$t.py\" && python \"test_$t.py\" || exit 1; done"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       EIGENPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout eigenpy v${{ env.EIGENPY_VERSION }}.c0
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cmake-wheel/eigenpy
-          ref: v${{ env.EIGENPY_VERSION }}.c0
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch eigenpy source
-        run: git apply python-wheels/patches/eigenpy/${{ env.EIGENPY_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy's newest release has no riscv64 wheel; the registry's must win over its sdist.
-          CIBW_ENVIRONMENT: >-
-            CMEEL_LOG_LEVEL="DEBUG" CMEEL_JOBS="1" CMEEL_TEST_JOBS="1"
-            CMEEL_CMAKE_ARGS="-DBUILD_TESTING_SCIPY=OFF"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy
-          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
-          CIBW_TEST_COMMAND: >-
-            cd {project}/unittest/python &&
-            for t in BDCSVD ComplexEigenSolver ComplexSchur EigenSolver FullPivLU
-            GeneralizedEigenSolver GeneralizedSelfAdjointEigenSolver HessenbergDecomposition
-            JacobiSVD LDLT LLT MINRES PartialPivLU QR RealQZ RealSchur
-            SelfAdjointEigenSolver Tridiagonalization dimensions id version;
-            do echo "test_$t.py" && python "test_$t.py" || exit 1; done
+          name: eigenpy-${{ env.EIGENPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -108,15 +109,9 @@ jobs:
           assert any("/site-packages/eigenpy/eigenpy_pywrap" in n and n.endswith(".so") for n in names), names
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: eigenpy-${{ env.EIGENPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish eigenpy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

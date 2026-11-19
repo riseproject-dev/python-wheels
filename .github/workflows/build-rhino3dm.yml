@@ -54,64 +54,71 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build rhino3dm ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "rhino3dm"
+      version: "${{ matrix.version }}"
+      repository: "mcneel/rhino3dm"
+      ref: "56daf09ab774cc02b69a1de2e17a1c8746550778"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "recursive"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/rhino3dm/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp src/lib/opennurbs/LICENSE LICENSE.opennurbs
+        cp src/lib/draco/LICENSE LICENSE.draco
+        cp src/lib/pybind11/LICENSE LICENSE.pybind11
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py shells out to `cmake` directly; it is not a declared
+      # build requirement anywhere upstream, so it has to be on PATH
+      # before setup.py runs.
+      cibw-before-build: "pip install \"cmake>=3.16\""
+      # cmake's riscv64 wheel on our registry lags PyPI's latest, which
+      # has none; PIP_ONLY_BINARY keeps pip from trying to build the
+      # newer sdist from source.
+      cibw-environment-linux: "PIP_ONLY_BINARY=cmake"
+      cibw-test-command: "cd {project}/tests/python && python -m unittest discover ."
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       RHINO3DM_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout rhino3dm ${{ env.RHINO3DM_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: mcneel/rhino3dm
-          ref: ${{ env.RHINO3DM_REF }}
-          # opennurbs, draco and pybind11 are submodules, statically linked
-          # into the _rhino3dm extension.
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # GCC's riscv64 LTO codegen overflows a relocation linking the
-      # merged opennurbs+draco+bindings translation unit; see the patch.
-      - name: Patch rhino3dm source
-        run: git apply python-wheels/patches/rhino3dm/${{ env.RHINO3DM_VERSION }}/00*.patch
-
-      # opennurbs, draco and pybind11 are compiled into the wheel, but
-      # upstream's own MANIFEST.in only ships rhino3dm's own LICENSE.
-      # setuptools' default license_files glob (LICEN[CS]E*) picks up files
-      # named this way at the root with no setup.py change.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          cp src/lib/opennurbs/LICENSE LICENSE.opennurbs
-          cp src/lib/draco/LICENSE LICENSE.draco
-          cp src/lib/pybind11/LICENSE LICENSE.pybind11
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py shells out to `cmake` directly; it is not a declared
-          # build requirement anywhere upstream, so it has to be on PATH
-          # before setup.py runs.
-          CIBW_BEFORE_BUILD: pip install "cmake>=3.16"
-          # cmake's riscv64 wheel on our registry lags PyPI's latest, which
-          # has none; PIP_ONLY_BINARY keeps pip from trying to build the
-          # newer sdist from source.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=cmake
-          CIBW_TEST_COMMAND: cd {project}/tests/python && python -m unittest discover .
+          name: rhino3dm-${{ env.RHINO3DM_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -127,15 +134,9 @@ jobs:
               print(path, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: rhino3dm-${{ env.RHINO3DM_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish rhino3dm ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

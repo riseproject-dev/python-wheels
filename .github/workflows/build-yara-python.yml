@@ -52,53 +52,63 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build yara-python ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "yara-python"
+      version: "${{ matrix.version }}"
+      repository: "VirusTotal/yara-python"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "true"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/yara-python/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # Rocky 10 and Alpine both carry a current openssl-dev(el); skip upstream's
+      # from-source OpenSSL 1.1.1w build, which the images don't need.
+      cibw-before-all-linux: |-
+        if command -v dnf > /dev/null; then
+        dnf install -y openssl-devel
+        elif command -v apk > /dev/null; then
+        apk add openssl-dev
+        fi
+      cibw-build-frontend: "build; args: --config-setting=--enable-openssl"
+      cibw-test-command: "python {package}/tests.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       YARA_PYTHON_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout yara-python v${{ env.YARA_PYTHON_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: VirusTotal/yara-python
-          ref: v${{ env.YARA_PYTHON_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # The extension compiles the vendored yara/ submodule straight into the .so and
-      # dynamically links libcrypto for the hash module, but ships only its own LICENSE.
-      - name: Patch yara-python source
-        run: |
-          git apply python-wheels/patches/yara-python/${{ env.YARA_PYTHON_VERSION }}/00*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # Rocky 10 and Alpine both carry a current openssl-dev(el); skip upstream's
-          # from-source OpenSSL 1.1.1w build, which the images don't need.
-          CIBW_BEFORE_ALL_LINUX: |
-            if command -v dnf > /dev/null; then
-              dnf install -y openssl-devel
-            elif command -v apk > /dev/null; then
-              apk add openssl-dev
-            fi
-          CIBW_BUILD_FRONTEND: "build; args: --config-setting=--enable-openssl"
-          CIBW_TEST_COMMAND: python {package}/tests.py
+          name: yara-python-${{ env.YARA_PYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the compiled extension made it into the wheel
         run: |
@@ -110,15 +120,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: yara-python-${{ env.YARA_PYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish yara-python ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

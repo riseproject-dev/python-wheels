@@ -49,73 +49,74 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build uamqp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "uamqp"
+      version: "${{ matrix.version }}"
+      repository: "Azure/azure-uamqp-python"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py's build_ext runs `cmake` against the vendored
+      # src/vendor/azure-uamqp-c tree itself (not scikit-build-core), and
+      # links the result against system OpenSSL; upstream's own
+      # pyproject.toml sets [tool.cibuildwheel.linux] before-build to
+      # build OpenSSL 3.0.15 from source for manylinux2014's ancient one
+      # (and that build fails here anyway: the image's perl has no
+      # FindBin, gotcha 46). CIBW_BEFORE_ALL_LINUX would not have
+      # replaced it -- before-all and before-build are separate hooks
+      # (gotcha 225); CIBW_BEFORE_BUILD_LINUX replaces that list wholesale;
+      # the riscv64 image is Rocky 10 with a current openssl-devel, so
+      # use that instead (mirrors build-aioquic.yml). The vendored C
+      # tree's own LICENSE (Azure IoT SDKs, MIT) differs textually from
+      # uamqp's own and lives under src/vendor/, so setuptools'
+      # root-only glob won't pick it up on its own (gotcha 44); stage a
+      # copy at the root.
+      cibw-before-build-linux: "dnf -y install openssl-devel && cp /usr/share/licenses/openssl-libs/LICENSE.txt {project}/LICENSE.openssl && cp src/vendor/azure-uamqp-c/LICENSE {project}/LICENSE.azure-uamqp-c"
+      # Cython has a riscv64 wheel only on our registry.
+      # deps/azure-macro-utils-c declares cmake_minimum_required(2.8.11),
+      # which CMake 4 (the pip-resolved cmake build dependency) refuses
+      # outright; CMAKE_POLICY_VERSION_MINIMUM is a no-op for the
+      # already-3.5+ top-level project and unblocks that vendored one
+      # (gotcha 207). CIBW_ENVIRONMENT replaces upstream's own
+      # [tool.cibuildwheel.linux] environment table wholesale (gotcha
+      # 107), so restore its CFLAGS: GCC 14 turns
+      # -Wincompatible-pointer-types into a hard error by default, and
+      # the generated c_uamqp.c hits it (upstream already carries this
+      # same fix for its own CI, gotcha 226).
+      cibw-environment-linux: "CMAKE_POLICY_VERSION_MINIMUM=3.5 CFLAGS=\"-Wno-error=incompatible-pointer-types -Wunused-function\""
+      # Mirror the non-live half of upstream's own suite (tests/, not
+      # samples/): the ManyLinux job's `samples` doctest run needs live
+      # Event Hub/Service Bus credentials and only executes on Microsoft's
+      # internal pipeline (`condition: ne(...TeamProject..., 'public')`).
+      # tests/ exercises the built c_uamqp extension directly.
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -m pytest {project}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       UAMQP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout azure-uamqp-python v${{ env.UAMQP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Azure/azure-uamqp-python
-          ref: v${{ env.UAMQP_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py's build_ext runs `cmake` against the vendored
-          # src/vendor/azure-uamqp-c tree itself (not scikit-build-core), and
-          # links the result against system OpenSSL; upstream's own
-          # pyproject.toml sets [tool.cibuildwheel.linux] before-build to
-          # build OpenSSL 3.0.15 from source for manylinux2014's ancient one
-          # (and that build fails here anyway: the image's perl has no
-          # FindBin, gotcha 46). CIBW_BEFORE_ALL_LINUX would not have
-          # replaced it -- before-all and before-build are separate hooks
-          # (gotcha 225); CIBW_BEFORE_BUILD_LINUX replaces that list wholesale;
-          # the riscv64 image is Rocky 10 with a current openssl-devel, so
-          # use that instead (mirrors build-aioquic.yml). The vendored C
-          # tree's own LICENSE (Azure IoT SDKs, MIT) differs textually from
-          # uamqp's own and lives under src/vendor/, so setuptools'
-          # root-only glob won't pick it up on its own (gotcha 44); stage a
-          # copy at the root.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            dnf -y install openssl-devel &&
-            cp /usr/share/licenses/openssl-libs/LICENSE.txt {project}/LICENSE.openssl &&
-            cp src/vendor/azure-uamqp-c/LICENSE {project}/LICENSE.azure-uamqp-c
-          # Cython has a riscv64 wheel only on our registry.
-          # deps/azure-macro-utils-c declares cmake_minimum_required(2.8.11),
-          # which CMake 4 (the pip-resolved cmake build dependency) refuses
-          # outright; CMAKE_POLICY_VERSION_MINIMUM is a no-op for the
-          # already-3.5+ top-level project and unblocks that vendored one
-          # (gotcha 207). CIBW_ENVIRONMENT replaces upstream's own
-          # [tool.cibuildwheel.linux] environment table wholesale (gotcha
-          # 107), so restore its CFLAGS: GCC 14 turns
-          # -Wincompatible-pointer-types into a hard error by default, and
-          # the generated c_uamqp.c hits it (upstream already carries this
-          # same fix for its own CI, gotcha 226).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            CMAKE_POLICY_VERSION_MINIMUM=3.5
-            CFLAGS="-Wno-error=incompatible-pointer-types -Wunused-function"
-          # Mirror the non-live half of upstream's own suite (tests/, not
-          # samples/): the ManyLinux job's `samples` doctest run needs live
-          # Event Hub/Service Bus credentials and only executes on Microsoft's
-          # internal pipeline (`condition: ne(...TeamProject..., 'public')`).
-          # tests/ exercises the built c_uamqp extension directly.
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: python -m pytest {project}/tests
+          name: uamqp-${{ env.UAMQP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and licences made it into the wheel
         run: |
@@ -130,15 +131,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: uamqp-${{ env.UAMQP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish uamqp ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

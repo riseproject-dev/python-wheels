@@ -48,46 +48,42 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pycryptosat ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pycryptosat"
+      version: "${{ matrix.version }}"
+      repository: "msoos/cryptominisat"
+      ref: "release/v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "true"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # No EPEL (hence no ccache) on riscv64. CaDiCaL/CadiBack are cloned here, from the
+      # branches upstream's FetchContent tracks, so the bundled licences match what is built.
+      cibw-before-all-linux: "dnf -y install gmp-devel && git clone --depth 1 --branch master https://github.com/meelgroup/cadical /tmp/cadical && git clone --depth 1 --branch main https://github.com/meelgroup/cadiback /tmp/cadiback && cp /tmp/cadical/LICENSE /project/LICENSE.cadical && cp /tmp/cadiback/LICENSE /project/LICENSE.cadiback && cp /usr/share/licenses/gmp/COPYING.LESSERv3 /project/LICENSE.gmp && cp /usr/share/licenses/gmp/COPYINGv3 /project/LICENSE.gmp.GPL"
+      cibw-environment-linux: "PIP_ONLY_BINARY=cmake,ninja CMAKE_ARGS=\"-DFETCHCONTENT_SOURCE_DIR_CADICAL=/tmp/cadical -DFETCHCONTENT_SOURCE_DIR_CADIBACK=/tmp/cadiback\""
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYCRYPTOSAT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cryptominisat release/v${{ env.PYCRYPTOSAT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: msoos/cryptominisat
-          ref: release/v${{ env.PYCRYPTOSAT_VERSION }}
-          submodules: 'true'
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # No EPEL (hence no ccache) on riscv64. CaDiCaL/CadiBack are cloned here, from the
-          # branches upstream's FetchContent tracks, so the bundled licences match what is built.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install gmp-devel &&
-            git clone --depth 1 --branch master https://github.com/meelgroup/cadical /tmp/cadical &&
-            git clone --depth 1 --branch main https://github.com/meelgroup/cadiback /tmp/cadiback &&
-            cp /tmp/cadical/LICENSE /project/LICENSE.cadical &&
-            cp /tmp/cadiback/LICENSE /project/LICENSE.cadiback &&
-            cp /usr/share/licenses/gmp/COPYING.LESSERv3 /project/LICENSE.gmp &&
-            cp /usr/share/licenses/gmp/COPYINGv3 /project/LICENSE.gmp.GPL
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=cmake,ninja
-            CMAKE_ARGS="-DFETCHCONTENT_SOURCE_DIR_CADICAL=/tmp/cadical -DFETCHCONTENT_SOURCE_DIR_CADIBACK=/tmp/cadiback"
+          name: pycryptosat-${{ env.PYCRYPTOSAT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension, vendored libraries and licences made it into the wheel
         run: |
@@ -102,12 +98,6 @@ jobs:
               assert {"LICENSE.txt", "LICENSE.cadical", "LICENSE.cadiback", "LICENSE.gmp", "LICENSE.gmp.GPL"} <= lic, lic
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pycryptosat-${{ env.PYCRYPTOSAT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -142,7 +132,7 @@ jobs:
 
   publish:
     name: Publish pycryptosat ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

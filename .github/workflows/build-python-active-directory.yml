@@ -49,112 +49,124 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build python-active-directory ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "python-active-directory"
+      version: "${{ matrix.version }}"
+      repository: "theatlantic/python-active-directory"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/python-active-directory/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, at the project root, the licence of every shared library
+        # auditwheel vendors out of the build image alongside the krb5.c
+        # extension (the MIT Kerberos stack). setuptools' default
+        # LICEN[CS]E* glob copies them into the wheel.
+        set -euo pipefail
+
+        project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+        mapfile -t libs < <(
+            ldd /usr/lib64/libkrb5.so | tr ' ' '\n' | grep '^/'
+            readlink -f /usr/lib64/libkrb5.so
+        )
+        mapfile -t libs < <(printf '%s\n' "${libs[@]}" | sort -u)
+
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+        )
+
+        for pkg in "${pkgs[@]}"; do
+            rpm -q --qf '%{NAME}: %{LICENSE}\n' "$pkg"
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
+
+            if [ -z "${files[0]:-}" ]; then
+                dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+            fi
+
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
+
+        ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+        COLLECT_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # krb5-devel builds our own extension; openldap-devel/cyrus-sasl-devel
+      # are for python-ldap (install_requires, no riscv64 wheel anywhere -
+      # it builds from its sdist whenever pip resolves it, here and for
+      # every consumer on this registry).
+      cibw-before-all-linux: "dnf -y install krb5-devel openldap-devel cyrus-sasl-devel && bash {project}/collect-licenses.sh {project}"
+      cibw-test-requires: "pytest pexpect"
+      # tests/ is a package whose sibling lib/ source dir would shadow the
+      # installed wheel (gotcha 25).
+      cibw-test-sources: "tests"
+      # Default tests/test.conf.example disables readonly/intrusive AD
+      # tests (conf.require() skips them), so the suite needs no real
+      # Active Directory server - matches upstream's own tox.ini.
+      cibw-test-command: "python -m pytest -q -ra tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYTHON_ACTIVE_DIRECTORY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout python-active-directory v${{ env.PYTHON_ACTIVE_DIRECTORY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: theatlantic/python-active-directory
-          ref: v${{ env.PYTHON_ACTIVE_DIRECTORY_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/python-active-directory/${{ env.PYTHON_ACTIVE_DIRECTORY_VERSION }}/*.patch
-
-      - name: Stage the licence-collection script
-        run: |
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, at the project root, the licence of every shared library
-          # auditwheel vendors out of the build image alongside the krb5.c
-          # extension (the MIT Kerberos stack). setuptools' default
-          # LICEN[CS]E* glob copies them into the wheel.
-          set -euo pipefail
-
-          project="${1:?usage: collect-licenses.sh <project-dir>}"
-
-          mapfile -t libs < <(
-              ldd /usr/lib64/libkrb5.so | tr ' ' '\n' | grep '^/'
-              readlink -f /usr/lib64/libkrb5.so
-          )
-          mapfile -t libs < <(printf '%s\n' "${libs[@]}" | sort -u)
-
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
-          )
-
-          for pkg in "${pkgs[@]}"; do
-              rpm -q --qf '%{NAME}: %{LICENSE}\n' "$pkg"
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
-
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
-
-              if [ -z "${files[0]:-}" ]; then
-                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
-                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
-              fi
-
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-
-          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-          COLLECT_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # krb5-devel builds our own extension; openldap-devel/cyrus-sasl-devel
-          # are for python-ldap (install_requires, no riscv64 wheel anywhere -
-          # it builds from its sdist whenever pip resolves it, here and for
-          # every consumer on this registry).
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install krb5-devel openldap-devel cyrus-sasl-devel &&
-            bash {project}/collect-licenses.sh {project}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest pexpect
-          # tests/ is a package whose sibling lib/ source dir would shadow the
-          # installed wheel (gotcha 25).
-          CIBW_TEST_SOURCES: tests
-          # Default tests/test.conf.example disables readonly/intrusive AD
-          # tests (conf.require() skips them), so the suite needs no real
-          # Active Directory server - matches upstream's own tox.ini.
-          CIBW_TEST_COMMAND: python -m pytest -q -ra tests
+          name: python-active-directory-${{ env.PYTHON_ACTIVE_DIRECTORY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension and the licences
         run: |
@@ -169,12 +181,6 @@ jobs:
               pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.") and f.count(".") >= 2}
               assert "krb5-libs" in pkgs, pkgs
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: python-active-directory-${{ env.PYTHON_ACTIVE_DIRECTORY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -211,7 +217,7 @@ jobs:
 
   publish:
     name: Publish python-active-directory ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

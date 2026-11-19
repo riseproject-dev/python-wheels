@@ -60,49 +60,64 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     name: Build redislite ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "redislite"
+      version: "${{ matrix.version }}"
+      repository: "yahoo/redislite"
+      ref: "802f8a09fa23470942f8358dee1aa32dc975ea7a"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        export REDIS_VERSION=6.2.14
+        export REDIS_SHA256=34e74856cbd66fdb3a684fb349d93961d8c7aa668b06f81fd93ff267d09bc277
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply --verbose python-wheels/patches/redislite/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        set -eux
+        curl -sSfL -o redis.tar.gz "https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz"
+        echo "${REDIS_SHA256}  redis.tar.gz" | sha256sum -c -
+        mkdir redis.submodule
+        tar xzf redis.tar.gz --strip-components=1 -C redis.submodule
+        rm redis.tar.gz
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests pytest.ini"
+      cibw-test-command: "pytest tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       REDISLITE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout redislite ${{ env.REDISLITE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: yahoo/redislite
-          ref: ${{ env.REDISLITE_REF }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply --verbose python-wheels/patches/redislite/${{ env.REDISLITE_VERSION }}/*.patch
-
-      # build_scripts/update_redis_server.py, with curl: download.redis.io answers 403 to Python-urllib.
-      - name: Download the Redis ${{ env.REDIS_VERSION }} sources into redis.submodule
-        run: |
-          set -eux
-          curl -sSfL -o redis.tar.gz "https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz"
-          echo "${REDIS_SHA256}  redis.tar.gz" | sha256sum -c -
-          mkdir redis.submodule
-          tar xzf redis.tar.gz --strip-components=1 -C redis.submodule
-          rm redis.tar.gz
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests pytest.ini
-          CIBW_TEST_COMMAND: pytest tests
+          name: redislite-${{ env.REDISLITE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the Redis binaries and licences made it into the wheel
         run: |
@@ -118,15 +133,9 @@ jobs:
           print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: redislite-${{ env.REDISLITE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish redislite ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

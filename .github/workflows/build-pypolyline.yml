@@ -49,53 +49,52 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pypolyline ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pypolyline"
+      version: "${{ matrix.version }}"
+      repository: "urschrei/pypolyline"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp311-abi3-manylinux_riscv64"
+      timeout-minutes: 120
+      cibw-build: "cp312-manylinux_riscv64"
+      # manylinux images ship no Rust toolchain (upstream's before-all, minus
+      # its macOS-only parts). Without cargo on PATH maturin falls back to
+      # puccinialin, which has no riscv64 toolchain to install.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+      cibw-environment-linux: "PATH=\"$HOME/.cargo/bin:$PATH\""
+      # cibuildwheel's build[uv] frontend (upstream's pyproject.toml default)
+      # crashes the audit step: it asserts a host `uv`, which the self-hosted
+      # riscv64 runner doesn't have (gotcha 13).
+      cibw-build-frontend: "build"
+      # numpy has riscv64 wheels only on our registry; tests that need it
+      # importorskip it, so it is installed to run them rather than skip them.
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy"
+      cibw-test-requires: "pytest numpy"
+      cibw-test-command: "pytest {package}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       PYPOLYLINE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pypolyline v${{ env.PYPOLYLINE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: urschrei/pypolyline
-          ref: v${{ env.PYPOLYLINE_VERSION }}
-          persist-credentials: false
-
-      # 1.0.0 is a rewrite as a pure Rust/PyO3 extension built by maturin (the
-      # earlier releases were Cython over a prebuilt libpolylineffi), with
-      # pyo3's abi3-py311 feature on: one wheel serves every CPython >= 3.11.
-      # It is built on cp312, the oldest interpreter this repo's image has.
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # manylinux images ship no Rust toolchain (upstream's before-all, minus
-          # its macOS-only parts). Without cargo on PATH maturin falls back to
-          # puccinialin, which has no riscv64 toolchain to install.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --profile minimal
-          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
-          # cibuildwheel's build[uv] frontend (upstream's pyproject.toml default)
-          # crashes the audit step: it asserts a host `uv`, which the self-hosted
-          # riscv64 runner doesn't have (gotcha 13).
-          CIBW_BUILD_FRONTEND: build
-          # numpy has riscv64 wheels only on our registry; tests that need it
-          # importorskip it, so it is installed to run them rather than skip them.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: pytest numpy
-          CIBW_TEST_COMMAND: pytest {package}
+          name: pypolyline-${{ env.PYPOLYLINE_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension and the licence made it into the wheel
         run: |
@@ -110,15 +109,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pypolyline-${{ env.PYPOLYLINE_VERSION }}-cp311-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pypolyline ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

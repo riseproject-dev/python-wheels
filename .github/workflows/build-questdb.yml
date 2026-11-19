@@ -49,54 +49,59 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build questdb ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "questdb"
+      version: "${{ matrix.version }}"
+      repository: "questdb/py-questdb-client"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      checkout-submodules: "true"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" sparse-checkout init --cone
+        git -C "python-wheels" sparse-checkout set "patches/questdb"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v python-wheels/patches/questdb/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Replaces upstream's [tool.cibuildwheel.linux.environment], so its two keys are repeated.
+      cibw-environment-linux: "SETUP_DO_GIT_SUBMODULE_INIT=1 CARGO_TARGET_DIR=/tmp/qdb-cargo-target PIP_ONLY_BINARY=numpy"
+      # The registry has no cp314t pandas, which ci/pip_install_deps.py asserts. test.py
+      # self-skips without pandas and pyarrow, but not with pyarrow alone.
+      cibw-before-test: "${{ matrix.python == 'cp314t' && 'python -m pip install --only-binary :all: psutil' || 'python {project}/ci/pip_install_deps.py' }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       QUESTDB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout py-questdb-client v${{ env.QUESTDB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: questdb/py-questdb-client
-          ref: v${{ env.QUESTDB_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          sparse-checkout: patches/questdb
-          persist-credentials: false
-
-      - name: Apply questdb patches
-        run: git apply -v python-wheels/patches/questdb/${{ env.QUESTDB_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces upstream's [tool.cibuildwheel.linux.environment], so its two keys are repeated.
-          CIBW_ENVIRONMENT: >-
-            SETUP_DO_GIT_SUBMODULE_INIT=1
-            CARGO_TARGET_DIR=/tmp/qdb-cargo-target
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # The registry has no cp314t pandas, which ci/pip_install_deps.py asserts. test.py
-          # self-skips without pandas and pyarrow, but not with pyarrow alone.
-          CIBW_BEFORE_TEST: >-
-            ${{ matrix.python == 'cp314t'
-            && 'python -m pip install --only-binary :all: psutil'
-            || 'python {project}/ci/pip_install_deps.py' }}
+          name: questdb-${{ env.QUESTDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension made it into the wheel
         run: |
@@ -110,15 +115,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: questdb-${{ env.QUESTDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish questdb ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

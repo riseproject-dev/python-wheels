@@ -52,91 +52,90 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pygrib ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pygrib"
+      version: "${{ matrix.version }}"
+      repository: "jswhit/pygrib"
+      ref: "v${{ matrix.version }}rel"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 600
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # libpng comes from the distro; upstream only builds it because its manylinux2014 base lacks it.
+      cibw-before-all-linux: |-
+        set -ex
+        dnf -y install libpng-devel zlib-devel
+        mkdir -p /tmp/libaec /tmp/openjpeg
+
+        curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libaec
+        cmake -S /tmp/libaec -B /tmp/libaec/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D BUILD_STATIC_LIBS=OFF \
+        -D BUILD_TESTING=OFF
+        cmake --build /tmp/libaec/build -j "$(nproc)"
+        cmake --install /tmp/libaec/build
+
+        curl -fsSL "https://github.com/uclouvain/openjpeg/archive/refs/tags/v$OPENJPEG_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/openjpeg
+        cmake -S /tmp/openjpeg -B /tmp/openjpeg/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D BUILD_CODEC=OFF
+        cmake --build /tmp/openjpeg/build -j "$(nproc)"
+        cmake --install /tmp/openjpeg/build
+        ldconfig
+
+        curl -fsSL "https://confluence.ecmwf.int/download/attachments/45757960/eccodes-$ECCODES_VERSION-Source.tar.gz" | tar xz -C /tmp
+        cp -r "/tmp/eccodes-$ECCODES_VERSION-Source/definitions" "{project}/src/pygrib/share/eccodes"
+        mv "{project}/src/pygrib/share/eccodes/template.3.32769.def" "{project}/src/pygrib/share/eccodes/definitions/grib2"
+        cmake -S "/tmp/eccodes-$ECCODES_VERSION-Source" -B /tmp/eccodes-build \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D CMAKE_INSTALL_LIBDIR=lib \
+        -D ENABLE_FORTRAN=OFF \
+        -D ENABLE_NETCDF=OFF \
+        -D ENABLE_TESTS=OFF \
+        -D ENABLE_JPG_LIBJASPER=OFF \
+        -D ENABLE_JPG_LIBOPENJPEG=ON \
+        -D ENABLE_PNG=ON \
+        -D ENABLE_AEC=ON
+        cmake --build /tmp/eccodes-build -j "$(nproc)"
+        cmake --install /tmp/eccodes-build
+        ldconfig
+
+        cp "/tmp/eccodes-$ECCODES_VERSION-Source/LICENSE" "{project}/LICENSE.eccodes"
+        cp "/tmp/eccodes-$ECCODES_VERSION-Source/NOTICE" "{project}/NOTICE.eccodes"
+        cp /tmp/openjpeg/LICENSE "{project}/LICENSE.openjpeg"
+        cp /tmp/libaec/LICENSE.txt "{project}/LICENSE.libaec"
+        cp /usr/share/licenses/libpng/LICENSE "{project}/LICENSE.libpng"
+      cibw-environment-linux: "PYGRIB_WHEEL=true ECCODES_VERSION=2.44.0 OPENJPEG_VERSION=2.5.4 LIBAEC_VERSION=1.1.4 PIP_ONLY_BINARY=numpy,pyproj"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "test sampledata utils"
+      cibw-test-command: "cd test && pytest -vv test.py test_latlons.py && cd .. && python utils/grib_list sampledata/rap.wrfnat.grib2 -s"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYGRIB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pygrib ${{ env.PYGRIB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: jswhit/pygrib
-          ref: v${{ env.PYGRIB_VERSION }}rel
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # libpng comes from the distro; upstream only builds it because its manylinux2014 base lacks it.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            dnf -y install libpng-devel zlib-devel
-            mkdir -p /tmp/libaec /tmp/openjpeg
-
-            curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libaec
-            cmake -S /tmp/libaec -B /tmp/libaec/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D BUILD_STATIC_LIBS=OFF \
-              -D BUILD_TESTING=OFF
-            cmake --build /tmp/libaec/build -j "$(nproc)"
-            cmake --install /tmp/libaec/build
-
-            curl -fsSL "https://github.com/uclouvain/openjpeg/archive/refs/tags/v$OPENJPEG_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/openjpeg
-            cmake -S /tmp/openjpeg -B /tmp/openjpeg/build \
-              -D CMAKE_BUILD_TYPE=Release \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D BUILD_CODEC=OFF
-            cmake --build /tmp/openjpeg/build -j "$(nproc)"
-            cmake --install /tmp/openjpeg/build
-            ldconfig
-
-            curl -fsSL "https://confluence.ecmwf.int/download/attachments/45757960/eccodes-$ECCODES_VERSION-Source.tar.gz" | tar xz -C /tmp
-            cp -r "/tmp/eccodes-$ECCODES_VERSION-Source/definitions" "{project}/src/pygrib/share/eccodes"
-            mv "{project}/src/pygrib/share/eccodes/template.3.32769.def" "{project}/src/pygrib/share/eccodes/definitions/grib2"
-            cmake -S "/tmp/eccodes-$ECCODES_VERSION-Source" -B /tmp/eccodes-build \
-              -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D CMAKE_INSTALL_LIBDIR=lib \
-              -D ENABLE_FORTRAN=OFF \
-              -D ENABLE_NETCDF=OFF \
-              -D ENABLE_TESTS=OFF \
-              -D ENABLE_JPG_LIBJASPER=OFF \
-              -D ENABLE_JPG_LIBOPENJPEG=ON \
-              -D ENABLE_PNG=ON \
-              -D ENABLE_AEC=ON
-            cmake --build /tmp/eccodes-build -j "$(nproc)"
-            cmake --install /tmp/eccodes-build
-            ldconfig
-
-            cp "/tmp/eccodes-$ECCODES_VERSION-Source/LICENSE" "{project}/LICENSE.eccodes"
-            cp "/tmp/eccodes-$ECCODES_VERSION-Source/NOTICE" "{project}/NOTICE.eccodes"
-            cp /tmp/openjpeg/LICENSE "{project}/LICENSE.openjpeg"
-            cp /tmp/libaec/LICENSE.txt "{project}/LICENSE.libaec"
-            cp /usr/share/licenses/libpng/LICENSE "{project}/LICENSE.libpng"
-          CIBW_ENVIRONMENT: >-
-            PYGRIB_WHEEL=true
-            ECCODES_VERSION=${{ env.ECCODES_VERSION }}
-            OPENJPEG_VERSION=${{ env.OPENJPEG_VERSION }}
-            LIBAEC_VERSION=${{ env.LIBAEC_VERSION }}
-            PIP_ONLY_BINARY=numpy,pyproj
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: test sampledata utils
-          CIBW_TEST_COMMAND: >-
-            cd test && pytest -vv test.py test_latlons.py && cd .. &&
-            python utils/grib_list sampledata/rap.wrfnat.grib2 -s
+          name: pygrib-${{ env.PYGRIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension, the definitions and the licences
         run: |
@@ -165,15 +164,9 @@ jobs:
           }, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pygrib-${{ env.PYGRIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pygrib ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

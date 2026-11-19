@@ -63,78 +63,85 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build pyrnnoise ${{ matrix.version }} py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pyrnnoise"
+      version: "${{ matrix.version }}"
+      repository: "pengzhendong/pyrnnoise"
+      ref: |-
+        ${{ fromJSON('{"0.4.3": "a4edc697a2f475dcdac14c453d7c06eebbd06b33",
+         "0.4.4": "56c437f32cfa10136fdf766321d5570d9368d0a6",
+         "0.4.5": "fe603b252ccc7d3bacadb77d6ab766c48acc6fce"}')[matrix.version] }}
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 90
+      checkout-submodules: "true"
+      pre-build: |-
+        expected='${{ fromJSON('{"0.4.3": "a4edc697a2f475dcdac14c453d7c06eebbd06b33",
+         "0.4.4": "56c437f32cfa10136fdf766321d5570d9368d0a6",
+         "0.4.5": "fe603b252ccc7d3bacadb77d6ab766c48acc6fce"}')[matrix.version] }}'
+        test -n "$expected"
+        test "$(git rev-parse HEAD)" = "$expected"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/pyrnnoise/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        echo "${{ matrix.version }}" > VERSION
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # setup.py ships no ext_modules and forces root_is_pure = False
+      # (the C library is loaded via ctypes), so setuptools tags the
+      # wheel py3-none and one build serves every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # Mirrors release.yml's own `cmake --build ... --target install`
+      # step, run here instead since setup.py does not invoke cmake
+      # itself. The image ships no cmake or wget (gotcha 289); the
+      # CMakeLists.txt wget call fetches the pretrained model weights
+      # that rnnoise_data.c/.h are generated from.
+      cibw-before-all-linux: "dnf install -y cmake wget && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target install --parallel"
+      # matplotlib, an unconditional runtime dependency, has no
+      # musllinux_riscv64 wheel on this registry, so musllinux is
+      # dropped (same outcome as build-keystone-engine.yml).
+      # pillow (a matplotlib dependency) has no riscv64 wheel on public
+      # PyPI's newest release and its sdist needs libjpeg headers.
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,matplotlib,av,soundfile,soxr,pillow"
+      cibw-test-command: "python -c \"import numpy as np; from pyrnnoise.rnnoise import create, destroy, process_frame, FRAME_SIZE; state = create(); frame = np.zeros(FRAME_SIZE, dtype=np.int16); out, prob = process_frame(state, frame); assert out.shape == (FRAME_SIZE,), out.shape; destroy(state); print('pyrnnoise OK')\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       PYRNNOISE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pyrnnoise ${{ env.PYRNNOISE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pengzhendong/pyrnnoise
-          ref: ${{ fromJSON(env.PYRNNOISE_REFS)[env.PYRNNOISE_VERSION] }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Check the checkout is the requested version
-        run: |
-          expected='${{ fromJSON(env.PYRNNOISE_REFS)[env.PYRNNOISE_VERSION] }}'
-          test -n "$expected"
-          test "$(git rev-parse HEAD)" = "$expected"
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pyrnnoise source
-        run: git apply python-wheels/patches/pyrnnoise/${{ env.PYRNNOISE_VERSION }}/*.patch
-
-      # Matches release.yml's own `echo "$RELEASE_VERSION" > VERSION` step;
-      # setup.py reads VERSION verbatim and the checkout above carries
-      # whatever placeholder was last committed to it.
-      - name: Stamp VERSION
-        run: echo "${{ env.PYRNNOISE_VERSION }}" > VERSION
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # setup.py ships no ext_modules and forces root_is_pure = False
-          # (the C library is loaded via ctypes), so setuptools tags the
-          # wheel py3-none and one build serves every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors release.yml's own `cmake --build ... --target install`
-          # step, run here instead since setup.py does not invoke cmake
-          # itself. The image ships no cmake or wget (gotcha 289); the
-          # CMakeLists.txt wget call fetches the pretrained model weights
-          # that rnnoise_data.c/.h are generated from.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y cmake wget &&
-            cmake -B build -DCMAKE_BUILD_TYPE=Release &&
-            cmake --build build --target install --parallel
-          # matplotlib, an unconditional runtime dependency, has no
-          # musllinux_riscv64 wheel on this registry, so musllinux is
-          # dropped (same outcome as build-keystone-engine.yml).
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # pillow (a matplotlib dependency) has no riscv64 wheel on public
-          # PyPI's newest release and its sdist needs libjpeg headers.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,matplotlib,av,soundfile,soxr,pillow
-          CIBW_TEST_COMMAND: >-
-            python -c "import numpy as np;
-            from pyrnnoise.rnnoise import create, destroy, process_frame, FRAME_SIZE;
-            state = create();
-            frame = np.zeros(FRAME_SIZE, dtype=np.int16);
-            out, prob = process_frame(state, frame);
-            assert out.shape == (FRAME_SIZE,), out.shape;
-            destroy(state);
-            print('pyrnnoise OK')"
+          name: pyrnnoise-${{ env.PYRNNOISE_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries librnnoise and RNNoise's licence
         run: |
@@ -149,15 +156,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyrnnoise-${{ env.PYRNNOISE_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pyrnnoise ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

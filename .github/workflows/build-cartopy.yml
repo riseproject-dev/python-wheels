@@ -49,58 +49,60 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cartopy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cartopy"
+      version: "${{ matrix.version }}"
+      repository: "SciTools/cartopy"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy is a build dependency; matplotlib/shapely/pyproj are runtime
+      # dependencies and scipy a test-only one, all pulled in for the test install.
+      # Only our registry has riscv64 wheels for them, and PIP_ONLY_BINARY keeps a
+      # newer PyPI release from winning the resolution and then compiling from sdist.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,matplotlib,shapely,pyproj,scipy"
+      # Building from a checkout (no PKG-INFO) makes setup.py cythonize trace.pyx
+      # fresh, unlike a PyPI sdist build which ships a pre-cythonized trace.cpp and
+      # skips this entirely. Cython 3.3.0 (unbounded in pyproject.toml's
+      # build-system requires) regressed its own generated std::list-to-Python-list
+      # conversion for trace.pyx's C++ iteration, so build isolation must not be
+      # allowed to pick it.
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-before-build: "pip install \"cython<3.3\" numpy setuptools setuptools_scm wheel"
+      cibw-test-requires: "pytest pytest-mpl pytest-xdist scipy"
+      # Mirrors upstream's own hermetic job (ci-testing.yml's "No Network Tests"
+      # step: `pytest ... -m "not natural_earth and not network"`), which also
+      # runs without --mpl; image-comparison baselines are font-rendering
+      # sensitive and not something upstream itself trusts cross-platform. Tests
+      # are excluded from the wheel (packages.find excludes cartopy.tests), so
+      # copy them out of the checkout first, as pyproj's workflow does.
+      cibw-test-command: "python -c \"import cartopy; import cartopy.crs as ccrs; import shapely.geometry as sgeom; r = ccrs.Robinson().project_geometry(sgeom.LineString([(-10, 10), (10, 50)]), ccrs.PlateCarree()); assert not r.is_empty; print('cartopy.trace OK')\" && cp -r {package}/lib/cartopy/tests cartopy_tests && python -m pytest cartopy_tests -rfEsX -n 4 -m \"not natural_earth and not network\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CARTOPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cartopy v${{ env.CARTOPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: SciTools/cartopy
-          ref: v${{ env.CARTOPY_VERSION }}
-          fetch-depth: 0  # setuptools_scm derives the version from the tag history
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a build dependency; matplotlib/shapely/pyproj are runtime
-          # dependencies and scipy a test-only one, all pulled in for the test install.
-          # Only our registry has riscv64 wheels for them, and PIP_ONLY_BINARY keeps a
-          # newer PyPI release from winning the resolution and then compiling from sdist.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,matplotlib,shapely,pyproj,scipy
-          # Building from a checkout (no PKG-INFO) makes setup.py cythonize trace.pyx
-          # fresh, unlike a PyPI sdist build which ships a pre-cythonized trace.cpp and
-          # skips this entirely. Cython 3.3.0 (unbounded in pyproject.toml's
-          # build-system requires) regressed its own generated std::list-to-Python-list
-          # conversion for trace.pyx's C++ iteration, so build isolation must not be
-          # allowed to pick it.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_BEFORE_BUILD: pip install "cython<3.3" numpy setuptools setuptools_scm wheel
-          CIBW_TEST_REQUIRES: pytest pytest-mpl pytest-xdist scipy
-          # Mirrors upstream's own hermetic job (ci-testing.yml's "No Network Tests"
-          # step: `pytest ... -m "not natural_earth and not network"`), which also
-          # runs without --mpl; image-comparison baselines are font-rendering
-          # sensitive and not something upstream itself trusts cross-platform. Tests
-          # are excluded from the wheel (packages.find excludes cartopy.tests), so
-          # copy them out of the checkout first, as pyproj's workflow does.
-          CIBW_TEST_COMMAND: >-
-            python -c "import cartopy; import cartopy.crs as ccrs; import shapely.geometry as sgeom; r = ccrs.Robinson().project_geometry(sgeom.LineString([(-10, 10), (10, 50)]), ccrs.PlateCarree()); assert not r.is_empty; print('cartopy.trace OK')" &&
-            cp -r {package}/lib/cartopy/tests cartopy_tests &&
-            python -m pytest cartopy_tests -rfEsX -n 4 -m "not natural_earth and not network"
+          name: cartopy-${{ env.CARTOPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the licence and the compiled extension
         run: |
@@ -112,15 +114,9 @@ jobs:
           assert any(n.startswith("cartopy/trace.") and n.endswith(".so") for n in names), names
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cartopy-${{ env.CARTOPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cartopy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

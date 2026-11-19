@@ -49,49 +49,52 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build qoi ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "qoi"
+      version: "${{ matrix.version }}"
+      repository: "kodonnell/qoi"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # 0.8.0 rewrote the extension in Rust (PyO3 via maturin), replacing
+      # the setup.py+Cython build 0.7.2 still needs. maturin's own Rust
+      # auto-install (puccinialin) computes the wrong rustup target triple
+      # for riscv64 ("riscv64-unknown-linux-gnu" instead of
+      # "riscv64gc-unknown-linux-gnu") and fails, so a working toolchain
+      # has to be on PATH before it gets the chance to try, same as
+      # build-minijinja.yml.
+      cibw-before-all-linux: "${{ matrix.version != '0.7.2' && 'curl --proto ''=https'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' || 'true' }}"
+      # USE_CYTHON=1 matches upstream's own [tool.cibuildwheel] table for
+      # 0.7.2 (re-cythonize rather than build from the checked-in qoi.c).
+      # numpy is both a build-time header dependency (0.7.2's setup.py
+      # np.get_include(), 0.8.0's pyo3-numpy) and a runtime one
+      # (install_requires); only our registry has it for riscv64, and
+      # only-binary keeps a newer PyPI release from winning the
+      # resolution and compiling from sdist.
+      cibw-environment-linux: "${{ matrix.version == '0.7.2' && 'USE_CYTHON=1' || 'PATH=\"$PATH:$HOME/.cargo/bin\"' }} PIP_ONLY_BINARY=numpy,pillow"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       QOI_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout qoi v${{ env.QOI_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: kodonnell/qoi
-          ref: v${{ env.QOI_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # 0.8.0 rewrote the extension in Rust (PyO3 via maturin), replacing
-          # the setup.py+Cython build 0.7.2 still needs. maturin's own Rust
-          # auto-install (puccinialin) computes the wrong rustup target triple
-          # for riscv64 ("riscv64-unknown-linux-gnu" instead of
-          # "riscv64gc-unknown-linux-gnu") and fails, so a working toolchain
-          # has to be on PATH before it gets the chance to try, same as
-          # build-minijinja.yml.
-          CIBW_BEFORE_ALL_LINUX: ${{ matrix.version != '0.7.2' && 'curl --proto ''=https'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' || 'true' }}
-          # USE_CYTHON=1 matches upstream's own [tool.cibuildwheel] table for
-          # 0.7.2 (re-cythonize rather than build from the checked-in qoi.c).
-          # numpy is both a build-time header dependency (0.7.2's setup.py
-          # np.get_include(), 0.8.0's pyo3-numpy) and a runtime one
-          # (install_requires); only our registry has it for riscv64, and
-          # only-binary keeps a newer PyPI release from winning the
-          # resolution and compiling from sdist.
-          CIBW_ENVIRONMENT_LINUX: >-
-            ${{ matrix.version == '0.7.2' && 'USE_CYTHON=1' || 'PATH="$PATH:$HOME/.cargo/bin"' }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,pillow
+          name: qoi-${{ env.QOI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -108,16 +111,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: qoi-${{ env.QOI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish qoi ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

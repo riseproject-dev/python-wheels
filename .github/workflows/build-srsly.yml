@@ -52,60 +52,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build srsly ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "srsly"
+      version: "${{ matrix.version }}"
+      repository: "explosion/srsly"
+      ref: "release-v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/srsly/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # The extensions do not declare free-threading support, so importing them under
+      # cp314t re-enables the GIL with a RuntimeWarning that -Werror turns fatal;
+      # asking for the GIL up front is the same outcome without the warning. Ignored
+      # on the GIL builds.
+      cibw-test-environment: "PYTHON_GIL=1"
+      # The suite ships in the wheel, so upstream runs it with --pyargs. From
+      # requirements.txt, psutil is only used by the skipped cloudpickle tests and
+      # nothing left has a pytest-timeout marker.
+      cibw-test-requires: "pytest>=4.6.5 mock>=2.0.0,<3.0.0 numpy>=1.15.0"
+      # srsly/tests/cloudpickle was left behind by the cloudpickle 3.1.2 bump in the
+      # release commit and no longer imports (srsly.cloudpickle.compat and
+      # cloudpickle.cell_set are both gone); it fails the same way on every
+      # architecture. The licence check guards the patch above.
+      cibw-test-command: "python -c \"import importlib.metadata as m; f = sorted(p.name for p in m.files('srsly') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.ruamel_yaml'], f\" && python -m pytest --pyargs srsly -Werror --ignore=\"$(python -c 'import srsly, os; print(os.path.join(os.path.dirname(srsly.__file__), \"tests\", \"cloudpickle\"))')\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       SRSLY_VERSION: ${{ matrix.version }}
-
     steps:
-      # Releases are tagged release-v*; the plain v* tag is only created afterwards.
-      - name: Checkout srsly ${{ env.SRSLY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: explosion/srsly
-          ref: release-v${{ env.SRSLY_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # The wheel ships the vendored ruamel.yaml but not its licence.
-      - name: Patch srsly source
-        run: |
-          git apply python-wheels/patches/srsly/${{ env.SRSLY_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The extensions do not declare free-threading support, so importing them under
-          # cp314t re-enables the GIL with a RuntimeWarning that -Werror turns fatal;
-          # asking for the GIL up front is the same outcome without the warning. Ignored
-          # on the GIL builds.
-          CIBW_TEST_ENVIRONMENT: PYTHON_GIL=1
-          # The suite ships in the wheel, so upstream runs it with --pyargs. From
-          # requirements.txt, psutil is only used by the skipped cloudpickle tests and
-          # nothing left has a pytest-timeout marker.
-          CIBW_TEST_REQUIRES: pytest>=4.6.5 mock>=2.0.0,<3.0.0 numpy>=1.15.0
-          # srsly/tests/cloudpickle was left behind by the cloudpickle 3.1.2 bump in the
-          # release commit and no longer imports (srsly.cloudpickle.compat and
-          # cloudpickle.cell_set are both gone); it fails the same way on every
-          # architecture. The licence check guards the patch above.
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('srsly') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.ruamel_yaml'], f" &&
-            python -m pytest --pyargs srsly -Werror
-            --ignore="$(python -c 'import srsly, os; print(os.path.join(os.path.dirname(srsly.__file__), "tests", "cloudpickle"))')"
+          name: srsly-${{ env.SRSLY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension modules made it into the wheel
         run: |
@@ -120,15 +124,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: srsly-${{ env.SRSLY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish srsly ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

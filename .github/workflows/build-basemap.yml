@@ -50,55 +50,55 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build basemap ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "basemap"
+      version: "${{ matrix.version }}"
+      repository: "matplotlib/basemap"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all: "python {project}/.github/workflows/run_before_all.py"
+      # build-backend is setuptools.build_meta (pyproject.toml); with
+      # --no-build-isolation pip never creates an isolated env to pull it, so it
+      # must be preinstalled here, same as cython/numpy (CLAUDE.md gotcha 23's
+      # preinstall shape) -- otherwise: BackendUnavailable: Cannot import
+      # 'setuptools.build_meta'.
+      cibw-before-build: "pip install cython setuptools wheel \"numpy>=2.0,<2.4\""
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # GEOS 3.6.5's cmake_minimum_required is below the image's CMake 4 floor, and
+      # run_before_all.py's cmake call takes no extra flags (gotcha 257).
+      cibw-environment-linux: "CMAKE_POLICY_VERSION_MINIMUM=3.5 GEOS_VERSION=3.6.5 GEOS_DIR=/project/extern GEOS_NJOBS=4 LD_LIBRARY_PATH=/project/extern/lib PIP_PREFER_BINARY=1 PYTHONUNBUFFERED=1"
+      cibw-test-extras: "test"
+      # basemap_data_hires (~90MB) is only needed for the "h"/"f" resolutions, which
+      # no test in test/ exercises; skip it to save download time on every job.
+      cibw-before-test: "pip install basemap_data"
+      cibw-test-environment: "PIP_ONLY_BINARY=matplotlib,pyproj"
+      cibw-test-command: "python -m pytest {project}/test"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       BASEMAP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout basemap v${{ env.BASEMAP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: matplotlib/basemap
-          ref: v${{ env.BASEMAP_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL: python {project}/.github/workflows/run_before_all.py
-          # build-backend is setuptools.build_meta (pyproject.toml); with
-          # --no-build-isolation pip never creates an isolated env to pull it, so it
-          # must be preinstalled here, same as cython/numpy (CLAUDE.md gotcha 23's
-          # preinstall shape) -- otherwise: BackendUnavailable: Cannot import
-          # 'setuptools.build_meta'.
-          CIBW_BEFORE_BUILD: pip install cython setuptools wheel "numpy>=2.0,<2.4"
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # GEOS 3.6.5's cmake_minimum_required is below the image's CMake 4 floor, and
-          # run_before_all.py's cmake call takes no extra flags (gotcha 257).
-          CIBW_ENVIRONMENT: >-
-            CMAKE_POLICY_VERSION_MINIMUM=3.5
-            GEOS_VERSION=${{ env.GEOS_VERSION }}
-            GEOS_DIR=/project/extern
-            GEOS_NJOBS=4
-            LD_LIBRARY_PATH=/project/extern/lib
-            PIP_PREFER_BINARY=1
-            PYTHONUNBUFFERED=1
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_EXTRAS: test
-          # basemap_data_hires (~90MB) is only needed for the "h"/"f" resolutions, which
-          # no test in test/ exercises; skip it to save download time on every job.
-          CIBW_BEFORE_TEST: pip install basemap_data
-          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=matplotlib,pyproj'
-          CIBW_TEST_COMMAND: python -m pytest {project}/test
+          name: basemap-${{ env.BASEMAP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the GEOS licence and the compiled extension made it into the wheel
         run: |
@@ -111,15 +111,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: basemap-${{ env.BASEMAP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish basemap ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -48,59 +48,68 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cmeel-cddlib ${{ matrix.version }} py3-none-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cmeel-cddlib"
+      version: "${{ matrix.version }}"
+      repository: "cmake-wheel/cmeel-cddlib"
+      ref: "v${{ matrix.version }}.c2"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "true"
+      pre-build: |-
+        # The real published wheel (cmeel_cddlib-0.94.13-2-py3-none-manylinux_2_28_x86_64.whl,
+        # confirmed via unzip -l) ships no LICENSE/COPYING file at all - the same gap
+        # already found and fixed for cmeel-m4/cmeel-glpk, present in the upstream
+        # cmake-wheel/cmeel-cddlib wrapper itself on every platform, not riscv64-specific.
+        # cddlib's own release tarball (cddlib-0.94m.tar.gz, the ORIGINAL_VERSION this
+        # tag's CMakeLists.txt pins, confirmed by reading it at this exact tag rather
+        # than the "cmeel" dev branch's newer 0.94n) ships COPYING at its top level
+        # (confirmed: tar -tzf cddlib-0.94m.tar.gz). This wrapper's
+        # ExternalProject_Add(cddlib ...) uses BUILD_IN_SOURCE ON with no explicit
+        # SOURCE_DIR, so CMake's own documented default applies (confirmed against the
+        # real ExternalProject.cmake module source and its extractfile.cmake.in
+        # single-top-level-directory-rename logic, not guessed): SOURCE_DIR =
+        # <CMAKE_CURRENT_BINARY_DIR>/cddlib-prefix/src/cddlib, so COPYING lands there
+        # once the build step runs, before the top-level install() rules execute. Add
+        # a second install(FILES ...) rule beside the wrapper's existing "dummy
+        # README.md" one, pointing at that path.
+        sed -i '/^install(FILES README.md DESTINATION share\/cmeel-\${NAME}\/)$/a install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${NAME}-prefix/src/${NAME}/COPYING" DESTINATION share/cmeel-${NAME}/)' CMakeLists.txt
+        grep -n COPYING CMakeLists.txt
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "cp312-manylinux_riscv64"
+      cibw-environment-linux: "CMEEL_LOG_LEVEL=DEBUG"
+      # cddlib is a leaf dependency (requires_dist: cmeel only), no cross-package
+      # library linking here to repair; cmeel installs into a shared prefix.
+      cibw-repair-wheel-command: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       CMEEL_CDDLIB_VERSION: ${{ matrix.version }}
-
     steps:
-      # has-sitelib = false: the wheel holds no Python extension, so one
-      # py3-none wheel covers every interpreter.
-      - name: Checkout cmeel-cddlib v${{ env.CMEEL_CDDLIB_VERSION }}.c2
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cmake-wheel/cmeel-cddlib
-          ref: v${{ env.CMEEL_CDDLIB_VERSION }}.c2
-          submodules: true
-          persist-credentials: false
-
-      - name: Install upstream's COPYING into the wheel
-        run: |
-          # The real published wheel (cmeel_cddlib-0.94.13-2-py3-none-manylinux_2_28_x86_64.whl,
-          # confirmed via unzip -l) ships no LICENSE/COPYING file at all - the same gap
-          # already found and fixed for cmeel-m4/cmeel-glpk, present in the upstream
-          # cmake-wheel/cmeel-cddlib wrapper itself on every platform, not riscv64-specific.
-          # cddlib's own release tarball (cddlib-0.94m.tar.gz, the ORIGINAL_VERSION this
-          # tag's CMakeLists.txt pins, confirmed by reading it at this exact tag rather
-          # than the "cmeel" dev branch's newer 0.94n) ships COPYING at its top level
-          # (confirmed: tar -tzf cddlib-0.94m.tar.gz). This wrapper's
-          # ExternalProject_Add(cddlib ...) uses BUILD_IN_SOURCE ON with no explicit
-          # SOURCE_DIR, so CMake's own documented default applies (confirmed against the
-          # real ExternalProject.cmake module source and its extractfile.cmake.in
-          # single-top-level-directory-rename logic, not guessed): SOURCE_DIR =
-          # <CMAKE_CURRENT_BINARY_DIR>/cddlib-prefix/src/cddlib, so COPYING lands there
-          # once the build step runs, before the top-level install() rules execute. Add
-          # a second install(FILES ...) rule beside the wrapper's existing "dummy
-          # README.md" one, pointing at that path.
-          sed -i '/^install(FILES README.md DESTINATION share\/cmeel-\${NAME}\/)$/a install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${NAME}-prefix/src/${NAME}/COPYING" DESTINATION share/cmeel-${NAME}/)' CMakeLists.txt
-          grep -n COPYING CMakeLists.txt
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG
-          # cddlib is a leaf dependency (requires_dist: cmeel only), no cross-package
-          # library linking here to repair; cmeel installs into a shared prefix.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
+          name: cmeel-cddlib-${{ env.CMEEL_CDDLIB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -130,15 +139,9 @@ jobs:
           print(lib)
           "
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cmeel-cddlib-${{ env.CMEEL_CDDLIB_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cmeel-cddlib ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

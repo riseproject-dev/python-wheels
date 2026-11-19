@@ -49,47 +49,50 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build faust-streaming ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "faust-streaming"
+      version: "${{ matrix.version }}"
+      repository: "faust-streaming/faust"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # The repo-root faust/ would otherwise shadow the installed wheel's extensions.
+      cibw-test-sources: "tests pyproject.toml"
+      # Upstream's test.txt minus its lint/publish tools, which is what freethreading.txt is.
+      # That file only caps hypothesis (<6.130, before it grew a native extension) on 3.13t
+      # and expects 3.14t to take the latest, but hypothesis publishes no free-threaded
+      # riscv64 wheel (its riscv64 wheels are abi3, which a free-threaded build cannot use),
+      # so pip builds the sdist, whose Rust bootstrap fails on riscv64. Take the same pure
+      # Python release on cp314t first; the suite only uses hypothesis' pure-Python API.
+      cibw-before-test: "${{ matrix.python == 'cp314t' && 'pip install \"hypothesis<6.130\" && ' || '' }}pip install -r {project}/requirements/freethreading.txt"
+      cibw-test-environment: "FAUST_REQUIRE_CYTHON=1 ${{ matrix.python == 'cp314t' && 'PYTHON_GIL=0' || '' }}"
+      cibw-test-command: "python -m pytest --no-cov tests/unit tests/functional ${{ matrix.python != 'cp314t' && 'tests/integration tests/meticulous tests/regression' || '' }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       FAUST_STREAMING_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout faust v${{ env.FAUST_STREAMING_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: faust-streaming/faust
-          ref: v${{ env.FAUST_STREAMING_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Build and test wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The repo-root faust/ would otherwise shadow the installed wheel's extensions.
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          # Upstream's test.txt minus its lint/publish tools, which is what freethreading.txt is.
-          # That file only caps hypothesis (<6.130, before it grew a native extension) on 3.13t
-          # and expects 3.14t to take the latest, but hypothesis publishes no free-threaded
-          # riscv64 wheel (its riscv64 wheels are abi3, which a free-threaded build cannot use),
-          # so pip builds the sdist, whose Rust bootstrap fails on riscv64. Take the same pure
-          # Python release on cp314t first; the suite only uses hypothesis' pure-Python API.
-          CIBW_BEFORE_TEST: ${{ matrix.python == 'cp314t' && 'pip install "hypothesis<6.130" && ' || '' }}pip install -r {project}/requirements/freethreading.txt
-          CIBW_TEST_ENVIRONMENT: >-
-            FAUST_REQUIRE_CYTHON=1
-            ${{ matrix.python == 'cp314t' && 'PYTHON_GIL=0' || '' }}
-          CIBW_TEST_COMMAND: >-
-            python -m pytest --no-cov tests/unit tests/functional
-            ${{ matrix.python != 'cp314t' && 'tests/integration tests/meticulous tests/regression' || '' }}
+          name: faust-streaming-${{ env.FAUST_STREAMING_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the compiled extensions and licence
         run: |
@@ -104,15 +107,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: faust-streaming-${{ env.FAUST_STREAMING_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish faust-streaming ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

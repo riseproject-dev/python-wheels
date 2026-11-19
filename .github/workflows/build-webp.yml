@@ -48,54 +48,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build webp ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "webp"
+      version: "${{ matrix.version }}"
+      repository: "anibali/pywebp"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp39-abi3-manylinux_riscv64"
+      timeout-minutes: 90
+      # abi3 (py_limited_api=cp38 in setup.py): cp39 is the riscv64 image's
+      # oldest interpreter, but the output wheel is still tagged cp38-abi3.
+      cibw-build: "cp39-manylinux_riscv64"
+      cibw-build-frontend: "build"
+      cibw-project-requires-python: ">=3.8"
+      # libwebp's Conan recipe tool_requires cmake/[>=3.17], and conancenter's
+      # cmake/4.x recipe is Invalid on riscv64 (binaries for x86_64/armv8
+      # only), so declare the image's own CMake as a platform tool. builder.py
+      # regenerates the default profile with `conan profile detect -f`, so this
+      # goes in a separate profile that includes it, selected via
+      # CONAN_DEFAULT_PROFILE (Conan reads [platform_tool_requires] from the
+      # host profile here; the build profile alone is not enough).
+      cibw-before-all: "mkdir -p ~/.conan2/profiles && printf 'include(default)\\n\\n[platform_tool_requires]\\ncmake/%s\\n' \"$(cmake --version | head -n1 | cut -d' ' -f3)\" > ~/.conan2/profiles/riscv64"
+      cibw-environment-linux: "CONAN_DEFAULT_PROFILE=riscv64 PYWEBP_COMPILE_TARGET=riscv64 PIP_ONLY_BINARY=numpy,Pillow,cffi"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest --import-mode=importlib {package}/tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       WEBP_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout webp v${{ env.WEBP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: anibali/pywebp
-          ref: v${{ env.WEBP_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # abi3 (py_limited_api=cp38 in setup.py): cp39 is the riscv64 image's
-          # oldest interpreter, but the output wheel is still tagged cp38-abi3.
-          only: cp39-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: build
-          CIBW_PROJECT_REQUIRES_PYTHON: '>=3.8'
-          # libwebp's Conan recipe tool_requires cmake/[>=3.17], and conancenter's
-          # cmake/4.x recipe is Invalid on riscv64 (binaries for x86_64/armv8
-          # only), so declare the image's own CMake as a platform tool. builder.py
-          # regenerates the default profile with `conan profile detect -f`, so this
-          # goes in a separate profile that includes it, selected via
-          # CONAN_DEFAULT_PROFILE (Conan reads [platform_tool_requires] from the
-          # host profile here; the build profile alone is not enough).
-          CIBW_BEFORE_ALL: >-
-            mkdir -p ~/.conan2/profiles &&
-            printf 'include(default)\n\n[platform_tool_requires]\ncmake/%s\n'
-            "$(cmake --version | head -n1 | cut -d' ' -f3)"
-            > ~/.conan2/profiles/riscv64
-          CIBW_ENVIRONMENT: >-
-            CONAN_DEFAULT_PROFILE=riscv64
-            PYWEBP_COMPILE_TARGET=riscv64
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,Pillow,cffi
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest --import-mode=importlib {package}/tests
+          name: webp-${{ env.WEBP_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -108,16 +107,9 @@ jobs:
           assert licences == {"LICENSE"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: webp-${{ env.WEBP_VERSION }}-cp39-abi3-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish webp ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -51,59 +51,64 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build spiceypy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "spiceypy"
+      version: "${{ matrix.version }}"
+      repository: "AndrewAnnex/SpiceyPy"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        export MIRROR_BASE=https://raw.githubusercontent.com/AndrewAnnex/cspice-release-mirror/refs/heads/main/artifacts
+        export CSPICE_ARCHIVE=N67_lin_x64_cspice.tar.gz
+        set -euo pipefail
+        curl -fsSL "${MIRROR_BASE}/${CSPICE_ARCHIVE}" -o "${CSPICE_ARCHIVE}"
+        curl -fsSL "${MIRROR_BASE}/${CSPICE_ARCHIVE}.sha256" -o "${CSPICE_ARCHIVE}.sha256"
+        expected="$(tr -d '[:space:]' < "${CSPICE_ARCHIVE}.sha256")"
+        actual="$(sha256sum "${CSPICE_ARCHIVE}" | awk '{print $1}')"
+        test "$expected" = "$actual"
+        mkdir -p cspice-src-cache
+        tar xzf "${CSPICE_ARCHIVE}" -C cspice-src-cache
+        test -d cspice-src-cache/cspice/src/cspice
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-extras: "uv"
+      cibw-environment-linux: "CSPICE_SRC=/project/cspice-src-cache/cspice SPICEYPY_CSPICE_PREFIX=/project/cspice-prefix CMAKE_BUILD_PARALLEL_LEVEL=\"$(nproc)\""
+      # dependency-groups=dev also pulls in black/twine/build/scikit-build-core,
+      # packaging/lint tools the test command never calls; black has no riscv64
+      # wheel for cp310/cp311 on PyPI or our registry and would otherwise have to
+      # mypyc-compile from source on every job.
+      cibw-test-groups: ''
+      cibw-test-requires: "numpy>=1.23.5 pandas>=2.2.2 pytest>=7.0.0 pytest-benchmark coverage>=7.0.0"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       SPICEYPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout SpiceyPy v${{ env.SPICEYPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: AndrewAnnex/SpiceyPy
-          ref: v${{ env.SPICEYPY_VERSION }}
-          persist-credentials: false
-
-      # Upstream's own CI provisions CSPICE the same way for its Linux wheels
-      # (aarch64 included): the C source is architecture-independent, so the
-      # x86_64 mirror archive is reused here too. The mirror exists because
-      # NAIF's own server has had TLS/reliability issues in upstream's CI.
-      - name: Provision CSPICE source from mirror
-        run: |
-          set -euo pipefail
-          curl -fsSL "${MIRROR_BASE}/${CSPICE_ARCHIVE}" -o "${CSPICE_ARCHIVE}"
-          curl -fsSL "${MIRROR_BASE}/${CSPICE_ARCHIVE}.sha256" -o "${CSPICE_ARCHIVE}.sha256"
-          expected="$(tr -d '[:space:]' < "${CSPICE_ARCHIVE}.sha256")"
-          actual="$(sha256sum "${CSPICE_ARCHIVE}" | awk '{print $1}')"
-          test "$expected" = "$actual"
-          mkdir -p cspice-src-cache
-          tar xzf "${CSPICE_ARCHIVE}" -C cspice-src-cache
-          test -d cspice-src-cache/cspice/src/cspice
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          extras: "uv"
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT_LINUX: >-
-            CSPICE_SRC=/project/cspice-src-cache/cspice
-            SPICEYPY_CSPICE_PREFIX=/project/cspice-prefix
-            CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # dependency-groups=dev also pulls in black/twine/build/scikit-build-core,
-          # packaging/lint tools the test command never calls; black has no riscv64
-          # wheel for cp310/cp311 on PyPI or our registry and would otherwise have to
-          # mypyc-compile from source on every job.
-          CIBW_TEST_GROUPS: ""
-          CIBW_TEST_REQUIRES: "numpy>=1.23.5 pandas>=2.2.2 pytest>=7.0.0 pytest-benchmark coverage>=7.0.0"
+          name: spiceypy-${{ env.SPICEYPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the compiled extension and CSPICE
         run: |
@@ -116,15 +121,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: spiceypy-${{ env.SPICEYPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish spiceypy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

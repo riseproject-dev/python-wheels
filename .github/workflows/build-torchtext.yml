@@ -54,87 +54,87 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build torchtext ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "torchtext"
+      version: "${{ matrix.version }}"
+      repository: "pytorch/text"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "recursive"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/torchtext/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cp third_party/re2/LICENSE LICENSE.re2
+        cp third_party/double-conversion/LICENSE LICENSE.double-conversion
+        cp third_party/utf8proc/LICENSE.md LICENSE.utf8proc.md
+        cp third_party/sentencepiece/LICENSE LICENSE.sentencepiece
+        for dep in absl darts_clone esaxx protobuf-lite; do
+          cp "third_party/sentencepiece/third_party/$dep/LICENSE" "LICENSE.sentencepiece-$dep"
+        done
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py imports torch at module scope and declares no [build-system], so torch is
+      # preinstalled from our registry and isolation is off; setup.py also runs
+      # `git submodule update` on the root-owned copy of the checkout.
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-before-build: "git config --global --add safe.directory '*' && pip install --only-binary=:all: torch==2.14.0 setuptools wheel ninja"
+      # PYTORCH_VERSION is appended to setup.py's `torch>=`, so the upper bound keeps
+      # pip off a torch whose C++ ABI the extension was not built against.
+      # The vendored re2/sentencepiece/utf8proc/double-conversion predate CMake 3.5.
+      cibw-environment-linux: "BUILD_VERSION=${{ matrix.version }} PYTORCH_VERSION=\"2.14.0,<2.15\" CMAKE_POLICY_VERSION_MINIMUM=3.5"
+      # libtorch/libc10 come from the torch wheel, and libtorchtext.so is loaded by
+      # torchtext itself before _torchtext is imported.
+      cibw-repair-wheel-command: "auditwheel repair -w {dest_dir} {wheel} --exclude libtorchtext.so --exclude 'libtorch*' --exclude 'libc10*' --exclude libgomp.so.1"
+      cibw-test-requires: "torch==2.14.0 numpy pytest parameterized expecttest regex"
+      cibw-test-sources: "test"
+      # The save/load tests call a bare torch.load() on pickled torchtext objects, written
+      # for torch 2.3; torch>=2.6 defaults it to weights_only=True, which rejects them.
+      cibw-test-environment: "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1"
+      # Upstream's wheel job runs only the smoke test; the unit tests that exercise the
+      # C++ vocab/tokenizer ops run too. datasets/models/data need network downloads or
+      # spacy/nltk, which upstream's conda-based unit-test job installs.
+      cibw-test-command: "python test/smoke_tests/smoke_tests.py && pytest test/torchtext_unittest/test_vocab.py test/torchtext_unittest/test_functional.py test/torchtext_unittest/test_transforms.py test/torchtext_unittest/csrc"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       TORCHTEXT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout torchtext v${{ env.TORCHTEXT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pytorch/text
-          ref: v${{ env.TORCHTEXT_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch torchtext source
-        run: git apply python-wheels/patches/torchtext/${{ env.TORCHTEXT_VERSION }}/00*.patch
-
-      # The wheel statically links these vendored libraries; setuptools' default
-      # license_files glob picks up LICENSE.* at the project root.
-      - name: Stage the vendored libraries' licences
-        run: |
-          cp third_party/re2/LICENSE LICENSE.re2
-          cp third_party/double-conversion/LICENSE LICENSE.double-conversion
-          cp third_party/utf8proc/LICENSE.md LICENSE.utf8proc.md
-          cp third_party/sentencepiece/LICENSE LICENSE.sentencepiece
-          for dep in absl darts_clone esaxx protobuf-lite; do
-            cp "third_party/sentencepiece/third_party/$dep/LICENSE" "LICENSE.sentencepiece-$dep"
-          done
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          # setup.py imports torch at module scope and declares no [build-system], so torch is
-          # preinstalled from our registry and isolation is off; setup.py also runs
-          # `git submodule update` on the root-owned copy of the checkout.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_BEFORE_BUILD: >-
-            git config --global --add safe.directory '*' &&
-            pip install --only-binary=:all: torch==${{ env.TORCH_VERSION }} setuptools wheel ninja
-          # PYTORCH_VERSION is appended to setup.py's `torch>=`, so the upper bound keeps
-          # pip off a torch whose C++ ABI the extension was not built against.
-          # The vendored re2/sentencepiece/utf8proc/double-conversion predate CMake 3.5.
-          CIBW_ENVIRONMENT: >-
-            BUILD_VERSION=${{ env.TORCHTEXT_VERSION }}
-            PYTORCH_VERSION="${{ env.TORCH_VERSION }},<2.15"
-            CMAKE_POLICY_VERSION_MINIMUM=3.5
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # libtorch/libc10 come from the torch wheel, and libtorchtext.so is loaded by
-          # torchtext itself before _torchtext is imported.
-          CIBW_REPAIR_WHEEL_COMMAND: >-
-            auditwheel repair -w {dest_dir} {wheel}
-            --exclude libtorchtext.so
-            --exclude 'libtorch*'
-            --exclude 'libc10*'
-            --exclude libgomp.so.1
-          CIBW_TEST_REQUIRES: torch==${{ env.TORCH_VERSION }} numpy pytest parameterized expecttest regex
-          CIBW_TEST_SOURCES: test
-          # The save/load tests call a bare torch.load() on pickled torchtext objects, written
-          # for torch 2.3; torch>=2.6 defaults it to weights_only=True, which rejects them.
-          CIBW_TEST_ENVIRONMENT: TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
-          # Upstream's wheel job runs only the smoke test; the unit tests that exercise the
-          # C++ vocab/tokenizer ops run too. datasets/models/data need network downloads or
-          # spacy/nltk, which upstream's conda-based unit-test job installs.
-          CIBW_TEST_COMMAND: >-
-            python test/smoke_tests/smoke_tests.py &&
-            pytest test/torchtext_unittest/test_vocab.py
-            test/torchtext_unittest/test_functional.py
-            test/torchtext_unittest/test_transforms.py
-            test/torchtext_unittest/csrc
+          name: torchtext-${{ env.TORCHTEXT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries the vendored licences and no libtorch
         run: |
@@ -151,15 +151,9 @@ jobs:
                   raise SystemExit(f"error: {unwanted} must not be bundled in {sys.argv[1]}")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: torchtext-${{ env.TORCHTEXT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish torchtext ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

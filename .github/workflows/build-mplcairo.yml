@@ -49,62 +49,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mplcairo ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "mplcairo"
+      version: "${{ matrix.version }}"
+      repository: "anntzer/mplcairo"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # MPLCAIRO_NO_PYCAIRO stays unset: upstream's manylinux script only sets it
+      # after copying Arch's py3cairo.h into /usr/include by hand, and nothing here
+      # ships that header. pycairo (no Linux wheel on any arch) is a posix build
+      # requirement in pyproject.toml, so the isolated build env builds it from its
+      # sdist against cairo-devel and setup.py takes the header from
+      # cairo.get_include(). freetype-devel/fontconfig-devel ship in Rocky's own
+      # repos (no EPEL/CRB needed); Raqm's header is auto-downloaded by setup.py when
+      # no raqm.pc is found, matching upstream's non-manylinux-script fallback path.
+      cibw-before-build-linux: "dnf install -y cairo-devel freetype-devel fontconfig-devel"
+      # PyPI can be a release ahead of the riscv64 wheels on pypi.riseproject.dev
+      # with an sdist only (matplotlib 3.11.2 vs 3.11.1), so the compiled test
+      # dependencies are held to wheels; pycairo has no wheel and stays buildable.
+      cibw-environment-linux: "PIP_ONLY_BINARY=matplotlib,numpy,pillow,contourpy,kiwisolver,fonttools"
+      cibw-test-requires: "pillow"
+      # gotcha 247: the opening quote must share a line with the first statement -
+      # on its own line, the folded ">-" scalar joins it with a leading space before
+      # "import", which cp3.9-3.13 reject with IndentationError (cp3.14+ tolerates it).
+      cibw-test-command: "python -c \"import matplotlib; matplotlib.use('module://mplcairo.base'); import matplotlib.pyplot as plt; plt.plot([1, 2, 3]); plt.savefig('test.png'); import os; assert os.path.getsize('test.png') > 0; import mplcairo; print(mplcairo.get_versions())\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MPLCAIRO_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout mplcairo v${{ env.MPLCAIRO_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: anntzer/mplcairo
-          ref: v${{ env.MPLCAIRO_VERSION }}
-          persist-credentials: false
+          name: mplcairo-${{ env.MPLCAIRO_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # MPLCAIRO_NO_PYCAIRO stays unset: upstream's manylinux script only sets it
-          # after copying Arch's py3cairo.h into /usr/include by hand, and nothing here
-          # ships that header. pycairo (no Linux wheel on any arch) is a posix build
-          # requirement in pyproject.toml, so the isolated build env builds it from its
-          # sdist against cairo-devel and setup.py takes the header from
-          # cairo.get_include(). freetype-devel/fontconfig-devel ship in Rocky's own
-          # repos (no EPEL/CRB needed); Raqm's header is auto-downloaded by setup.py when
-          # no raqm.pc is found, matching upstream's non-manylinux-script fallback path.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            dnf install -y cairo-devel freetype-devel fontconfig-devel
-          # PyPI can be a release ahead of the riscv64 wheels on pypi.riseproject.dev
-          # with an sdist only (matplotlib 3.11.2 vs 3.11.1), so the compiled test
-          # dependencies are held to wheels; pycairo has no wheel and stays buildable.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=matplotlib,numpy,pillow,contourpy,kiwisolver,fonttools
-          CIBW_TEST_REQUIRES: pillow
-          # gotcha 247: the opening quote must share a line with the first statement -
-          # on its own line, the folded ">-" scalar joins it with a leading space before
-          # "import", which cp3.9-3.13 reject with IndentationError (cp3.14+ tolerates it).
-          CIBW_TEST_COMMAND: >-
-            python -c "import matplotlib; matplotlib.use('module://mplcairo.base');
-            import matplotlib.pyplot as plt;
-            plt.plot([1, 2, 3]);
-            plt.savefig('test.png');
-            import os; assert os.path.getsize('test.png') > 0;
-            import mplcairo; print(mplcairo.get_versions())"
-
-      # _mplcairo links only libc/libm/libstdc++/libgcc_s: its cairo and FreeType
-      # symbols are resolved at runtime from pycairo's extension and the libcairo it
-      # links (mplcairo/__init__.py loads it RTLD_GLOBAL), so auditwheel grafts
-      # nothing and there are no third-party licence texts to ship.
       - name: Check the wheel ships the extension and vendors no libraries
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
@@ -116,15 +111,9 @@ jobs:
           assert any(n.endswith(".dist-info/licenses/LICENSE.txt") for n in names), names
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mplcairo-${{ env.MPLCAIRO_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish mplcairo ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

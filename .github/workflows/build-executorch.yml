@@ -55,170 +55,162 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     name: Build executorch ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "executorch"
+      version: "${{ matrix.version }}"
+      repository: "pytorch/executorch"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 720
+      checkout-submodules: "recursive"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/executorch/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        set -euo pipefail
+        cp backends/xnnpack/third-party/FP16/LICENSE LICENSE.FP16
+        cp backends/xnnpack/third-party/FXdiv/LICENSE LICENSE.FXdiv
+        cp backends/xnnpack/third-party/XNNPACK/LICENSE LICENSE.XNNPACK
+        cp backends/xnnpack/third-party/cpuinfo/LICENSE LICENSE.cpuinfo
+        cp backends/xnnpack/third-party/pthreadpool/LICENSE LICENSE.pthreadpool
+        cp third-party/flatbuffers/LICENSE LICENSE.flatbuffers
+        cp third-party/flatcc/LICENSE LICENSE.flatcc
+        cp kernels/optimized/third-party/eigen/LICENSE LICENSE.eigen
+        cp third-party/pocketfft/LICENSE.md LICENSE.pocketfft
+        cp third-party/json/LICENSE.MIT LICENSE.json
+        cp third-party/pybind11/LICENSE LICENSE.pybind11
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > riscv64_smoke_test.py <<'EOF'
+        import platform
+
+        import torch
+        from torch.export import export
+
+        from executorch.backends.xnnpack.partition.xnnpack_partitioner import (
+            XnnpackPartitioner,
+        )
+        from executorch.exir import to_edge, to_edge_transform_and_lower
+        from executorch.extension.pybindings.portable_lib import (
+            _get_registered_backend_names,
+            _load_for_executorch_from_buffer,
+        )
+
+        registered = _get_registered_backend_names()
+        assert "XnnpackBackend" in registered, registered
+        assert "OpenvinoBackend" in registered, registered
+        if platform.machine() in ("x86_64", "amd64"):
+            assert "QnnBackend" in registered, registered
+
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.linear(x).relu()
+
+
+        model = Model().eval()
+        example_inputs = (torch.randn(2, 4),)
+        expected = model(*example_inputs)
+
+        portable_prog = to_edge(export(model, example_inputs, strict=True)).to_executorch()
+        portable_module = _load_for_executorch_from_buffer(portable_prog.buffer)
+        portable_out = portable_module.forward(example_inputs)[0]
+        assert torch.allclose(portable_out, expected, atol=1e-4), (portable_out, expected)
+        print("portable (non-delegated) execution OK")
+
+        xnnpack_prog = to_edge_transform_and_lower(
+            export(model, example_inputs, strict=True),
+            partitioner=[XnnpackPartitioner()],
+        ).to_executorch()
+        xnnpack_module = _load_for_executorch_from_buffer(xnnpack_prog.buffer)
+        xnnpack_out = xnnpack_module.forward(example_inputs)[0]
+        assert torch.allclose(xnnpack_out, expected, atol=1e-4), (xnnpack_out, expected)
+        print("XNNPACK-delegated execution OK")
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # No riscv64 cmake wheel exists, so pip builds it from source as a
+      # build dependency; its own CMake bootstrap needs OpenSSL's dev
+      # headers to find libcrypto.
+      cibw-before-all-linux: "dnf -y install openssl-devel"
+      # get_torch_base_path (tools/cmake/Utils.cmake) runs `import torch` in
+      # the same interpreter as the build backend to add it to
+      # CMAKE_PREFIX_PATH, but torch is only a runtime dependency
+      # (setup.py), not a build-system.requires entry, so PEP 517 isolation
+      # hides it from that interpreter. Preinstall build-system.requires
+      # plus torch and turn isolation off (mirrors build-torchaudio.yml /
+      # build-torchcodec.yml).
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # torch_pin.py pins TORCH_VERSION="2.13.0": this CMake build compiles
+      # against the installed torch's real headers alongside executorch's own
+      # vendored, 2.13.0-frozen copy of them (runtime/core/portable_type/c10),
+      # so an unbounded floor (setup.py's own unpinned "torch>=2.13.0a0") lets
+      # pip resolve a newer registry release whose headers conflict with the
+      # vendored ones in the same translation unit (gotcha 615).
+      cibw-before-build: "pip install \"cmake>=3.24,<4.0.0\" \"packaging>=24.2\" pyyaml \"setuptools>=77.0.3\" wheel zstd certifi && pip install --only-binary=:all: \"torch==2.13.0\""
+      # Without BUILD_VERSION, setup.py appends +<gitsha> to version.txt
+      # (mirrors build-torchaudio.yml / build-torchcodec.yml).
+      # XNNPACK's rvvfp16arith microkernels are assembled with -march=..._zvfh, which
+      # the image's binutils 2.41 rejects (zvfh landed in 2.42; gotcha 420), so the
+      # fp16 vector family is switched off; plain RVV stays enabled. The XNNPACK
+      # pinned by 1.5.x has these kernels, 1.4.1's does not and ignores the option.
+      cibw-environment-linux: "BUILD_VERSION=${{ matrix.version }} CMAKE_BUILD_PARALLEL_LEVEL=8 CMAKE_ARGS=\"-DXNNPACK_ENABLE_RISCV_FP16_VECTOR=OFF\""
+      # The torch wheel already carries these and loads them RTLD_GLOBAL (gotcha 17).
+      cibw-repair-wheel-command: "auditwheel repair -w {dest_dir} {wheel} --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so --exclude libtorch_global_deps.so --exclude libc10.so --exclude libgomp.so.1 --exclude libgfortran.so.5 --exclude libopenblas.so.0"
+      # The test install of the executorch wheel pulls pandas as a dependency;
+      # PyPI's newest pandas has no riscv64 wheel and its sdist fails to build
+      # (meson/xsimd), so install pandas wheel-only, with the registry's
+      # riscv64 wheels visible, and let pip back off to a release that has one.
+      cibw-test-environment: "PIP_ONLY_BINARY=pandas"
+      # Match the build-time pin (gotcha 615): the wheel's own metadata still
+      # says "torch>=2.13.0a0", so without this the test install would resolve
+      # a newer torch than the extension was actually compiled against.
+      cibw-test-requires: "torch==2.13.0"
+      cibw-test-sources: "riscv64_smoke_test.py"
+      cibw-test-command: "python -X faulthandler riscv64_smoke_test.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       EXECUTORCH_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout executorch v${{ env.EXECUTORCH_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pytorch/executorch
-          ref: v${{ env.EXECUTORCH_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/executorch/${{ env.EXECUTORCH_VERSION }}/*.patch
-
-      # Every library below is statically linked into the compiled extensions, and
-      # setuptools' license-files (widened by the patch above) only reaches the
-      # project root.
-      - name: Stage the vendored licences
-        run: |
-          set -euo pipefail
-          cp backends/xnnpack/third-party/FP16/LICENSE LICENSE.FP16
-          cp backends/xnnpack/third-party/FXdiv/LICENSE LICENSE.FXdiv
-          cp backends/xnnpack/third-party/XNNPACK/LICENSE LICENSE.XNNPACK
-          cp backends/xnnpack/third-party/cpuinfo/LICENSE LICENSE.cpuinfo
-          cp backends/xnnpack/third-party/pthreadpool/LICENSE LICENSE.pthreadpool
-          cp third-party/flatbuffers/LICENSE LICENSE.flatbuffers
-          cp third-party/flatcc/LICENSE LICENSE.flatcc
-          cp kernels/optimized/third-party/eigen/LICENSE LICENSE.eigen
-          cp third-party/pocketfft/LICENSE.md LICENSE.pocketfft
-          cp third-party/json/LICENSE.MIT LICENSE.json
-          cp third-party/pybind11/LICENSE LICENSE.pybind11
-
-      # Upstream's own smoke test (.ci/scripts/wheel/test_linux.py) exercises the
-      # examples/ tree, which needs torchvision for its MobileNetV3 model;
-      # torchvision has no riscv64 wheel. This test keeps upstream's own
-      # assertions (registered backend names) and replaces the model with a small
-      # hand-built one, run through both the portable (non-delegated) path and a
-      # real XNNPACK-delegated export, so the compiled extension, the portable
-      # kernels and the XNNPACK backend are all genuinely exercised end to end.
-      - name: Write the riscv64 smoke test
-        run: |
-          cat > riscv64_smoke_test.py <<'EOF'
-          import platform
-
-          import torch
-          from torch.export import export
-
-          from executorch.backends.xnnpack.partition.xnnpack_partitioner import (
-              XnnpackPartitioner,
-          )
-          from executorch.exir import to_edge, to_edge_transform_and_lower
-          from executorch.extension.pybindings.portable_lib import (
-              _get_registered_backend_names,
-              _load_for_executorch_from_buffer,
-          )
-
-          registered = _get_registered_backend_names()
-          assert "XnnpackBackend" in registered, registered
-          assert "OpenvinoBackend" in registered, registered
-          if platform.machine() in ("x86_64", "amd64"):
-              assert "QnnBackend" in registered, registered
-
-
-          class Model(torch.nn.Module):
-              def __init__(self):
-                  super().__init__()
-                  self.linear = torch.nn.Linear(4, 4)
-
-              def forward(self, x):
-                  return self.linear(x).relu()
-
-
-          model = Model().eval()
-          example_inputs = (torch.randn(2, 4),)
-          expected = model(*example_inputs)
-
-          portable_prog = to_edge(export(model, example_inputs, strict=True)).to_executorch()
-          portable_module = _load_for_executorch_from_buffer(portable_prog.buffer)
-          portable_out = portable_module.forward(example_inputs)[0]
-          assert torch.allclose(portable_out, expected, atol=1e-4), (portable_out, expected)
-          print("portable (non-delegated) execution OK")
-
-          xnnpack_prog = to_edge_transform_and_lower(
-              export(model, example_inputs, strict=True),
-              partitioner=[XnnpackPartitioner()],
-          ).to_executorch()
-          xnnpack_module = _load_for_executorch_from_buffer(xnnpack_prog.buffer)
-          xnnpack_out = xnnpack_module.forward(example_inputs)[0]
-          assert torch.allclose(xnnpack_out, expected, atol=1e-4), (xnnpack_out, expected)
-          print("XNNPACK-delegated execution OK")
-          EOF
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # No riscv64 cmake wheel exists, so pip builds it from source as a
-          # build dependency; its own CMake bootstrap needs OpenSSL's dev
-          # headers to find libcrypto.
-          CIBW_BEFORE_ALL_LINUX: dnf -y install openssl-devel
-          # get_torch_base_path (tools/cmake/Utils.cmake) runs `import torch` in
-          # the same interpreter as the build backend to add it to
-          # CMAKE_PREFIX_PATH, but torch is only a runtime dependency
-          # (setup.py), not a build-system.requires entry, so PEP 517 isolation
-          # hides it from that interpreter. Preinstall build-system.requires
-          # plus torch and turn isolation off (mirrors build-torchaudio.yml /
-          # build-torchcodec.yml).
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # torch_pin.py pins TORCH_VERSION="2.13.0": this CMake build compiles
-          # against the installed torch's real headers alongside executorch's own
-          # vendored, 2.13.0-frozen copy of them (runtime/core/portable_type/c10),
-          # so an unbounded floor (setup.py's own unpinned "torch>=2.13.0a0") lets
-          # pip resolve a newer registry release whose headers conflict with the
-          # vendored ones in the same translation unit (gotcha 615).
-          CIBW_BEFORE_BUILD: >-
-            pip install "cmake>=3.24,<4.0.0" "packaging>=24.2" pyyaml
-            "setuptools>=77.0.3" wheel zstd certifi &&
-            pip install --only-binary=:all: "torch==2.13.0"
-          # Without BUILD_VERSION, setup.py appends +<gitsha> to version.txt
-          # (mirrors build-torchaudio.yml / build-torchcodec.yml).
-          # XNNPACK's rvvfp16arith microkernels are assembled with -march=..._zvfh, which
-          # the image's binutils 2.41 rejects (zvfh landed in 2.42; gotcha 420), so the
-          # fp16 vector family is switched off; plain RVV stays enabled. The XNNPACK
-          # pinned by 1.5.x has these kernels, 1.4.1's does not and ignores the option.
-          CIBW_ENVIRONMENT: >-
-            BUILD_VERSION=${{ env.EXECUTORCH_VERSION }}
-            CMAKE_BUILD_PARALLEL_LEVEL=8
-            CMAKE_ARGS="-DXNNPACK_ENABLE_RISCV_FP16_VECTOR=OFF"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The torch wheel already carries these and loads them RTLD_GLOBAL (gotcha 17).
-          CIBW_REPAIR_WHEEL_COMMAND: >-
-            auditwheel repair -w {dest_dir} {wheel}
-            --exclude libtorch.so
-            --exclude libtorch_cpu.so
-            --exclude libtorch_python.so
-            --exclude libtorch_global_deps.so
-            --exclude libc10.so
-            --exclude libgomp.so.1
-            --exclude libgfortran.so.5
-            --exclude libopenblas.so.0
-          # The test install of the executorch wheel pulls pandas as a dependency;
-          # PyPI's newest pandas has no riscv64 wheel and its sdist fails to build
-          # (meson/xsimd), so install pandas wheel-only, with the registry's
-          # riscv64 wheels visible, and let pip back off to a release that has one.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=pandas
-          # Match the build-time pin (gotcha 615): the wheel's own metadata still
-          # says "torch>=2.13.0a0", so without this the test install would resolve
-          # a newer torch than the extension was actually compiled against.
-          CIBW_TEST_REQUIRES: torch==2.13.0
-          CIBW_TEST_SOURCES: riscv64_smoke_test.py
-          CIBW_TEST_COMMAND: python -X faulthandler riscv64_smoke_test.py
+          name: executorch-${{ env.EXECUTORCH_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extensions and the vendored licences made it into the wheel
         run: |
@@ -241,15 +233,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: executorch-${{ env.EXECUTORCH_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish executorch ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

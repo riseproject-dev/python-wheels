@@ -53,74 +53,77 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build robust-laplacian ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "robust-laplacian"
+      version: "${{ matrix.version }}"
+      repository: "nmwsharp/robust-laplacians-py"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "recursive"
+      pre-build: |-
+        set -euo pipefail
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/45fab4087eaaff234227a10cf7845e8b07f28a98/LICENSE" -o LICENSE.pybind11
+        {
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/81bdde705cc69776fd63c870581ee0c793d48873/COPYING.README"
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/81bdde705cc69776fd63c870581ee0c793d48873/COPYING.MPL2"
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/81bdde705cc69776fd63c870581ee0c793d48873/COPYING.BSD"
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/81bdde705cc69776fd63c870581ee0c793d48873/COPYING.LGPL"
+        } > LICENSE.eigen
+        cp deps/geometry-central/LICENSE LICENSE.geometry-central
+        cp deps/geometry-central/deps/happly/LICENSE LICENSE.happly
+        # nanoflann (BSD) and nanort (MIT) are vendored straight into
+        # geometry-central (no submodule of their own); jc_voronoi (MIT) is
+        # vendored straight into this repo. All three carry their licence
+        # as a header comment instead of a LICENSE file.
+        sed -n '1,30p' deps/geometry-central/deps/nanoflann/include/nanoflann.hpp > LICENSE.nanoflann
+        sed -n '5,28p' deps/geometry-central/deps/nanort/include/nanort/nanort.h > LICENSE.nanort
+        sed -n '1479,1500p' deps/jc_voronoi/include/jc_voronoi/jc_voronoi.h > LICENSE.jc_voronoi
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-config-file: ".github/workflows/cibuildwheel_config.toml"
+      # scikit-build-core's own pip-installed cmake/ninja (which upstream's
+      # before-all forces by removing the image's cmake) both have riscv64
+      # wheels on our registry already, so upstream's config needs no
+      # riscv64-specific override here.
+      # The upstream build's default Release config (scikit-build-core's
+      # own default) crashes the in-wheel test with a SIGSEGV and no
+      # Python traceback on every interpreter leg; RelWithDebInfo (-O2
+      # instead of -O3) does not. No further root cause was found after
+      # a native gdb backtrace came back clean under it too (nothing to
+      # see because nothing crashed) - see gotcha 662.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,cmake,ninja SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo"
+      cibw-test-requires: "scipy"
+      cibw-test-command: "python {project}/test/robust_laplacian_test.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ROBUST_LAPLACIAN_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout robust-laplacians-py v${{ env.ROBUST_LAPLACIAN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: nmwsharp/robust-laplacians-py
-          ref: v${{ env.ROBUST_LAPLACIAN_VERSION }}
-          submodules: 'recursive'
-          persist-credentials: false
-
-      # CMakeLists.txt compiles deps/{pybind11,eigen,geometry-central} and
-      # geometry-central's own deps/{happly,nanoflann,nanort} into the
-      # extension; upstream's own wheel ships only its own LICENSE (MIT).
-      # Stage each one's licence at the root for scikit-build-core's default
-      # wheel.license-files glob (gotcha 32/44, same as build-libigl.yml).
-      - name: Stage the vendored dependencies' licences
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${{ env.PYBIND11_SHA }}/LICENSE" -o LICENSE.pybind11
-          {
-            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.README"
-            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.MPL2"
-            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.BSD"
-            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.LGPL"
-          } > LICENSE.eigen
-          cp deps/geometry-central/LICENSE LICENSE.geometry-central
-          cp deps/geometry-central/deps/happly/LICENSE LICENSE.happly
-          # nanoflann (BSD) and nanort (MIT) are vendored straight into
-          # geometry-central (no submodule of their own); jc_voronoi (MIT) is
-          # vendored straight into this repo. All three carry their licence
-          # as a header comment instead of a LICENSE file.
-          sed -n '1,30p' deps/geometry-central/deps/nanoflann/include/nanoflann.hpp > LICENSE.nanoflann
-          sed -n '5,28p' deps/geometry-central/deps/nanort/include/nanort/nanort.h > LICENSE.nanort
-          sed -n '1479,1500p' deps/jc_voronoi/include/jc_voronoi/jc_voronoi.h > LICENSE.jc_voronoi
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          config-file: '.github/workflows/cibuildwheel_config.toml'
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # scikit-build-core's own pip-installed cmake/ninja (which upstream's
-          # before-all forces by removing the image's cmake) both have riscv64
-          # wheels on our registry already, so upstream's config needs no
-          # riscv64-specific override here.
-          # The upstream build's default Release config (scikit-build-core's
-          # own default) crashes the in-wheel test with a SIGSEGV and no
-          # Python traceback on every interpreter leg; RelWithDebInfo (-O2
-          # instead of -O3) does not. No further root cause was found after
-          # a native gdb backtrace came back clean under it too (nothing to
-          # see because nothing crashed) - see gotcha 662.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,cmake,ninja
-            SKBUILD_CMAKE_BUILD_TYPE=RelWithDebInfo
-          CIBW_TEST_REQUIRES: scipy
-          CIBW_TEST_COMMAND: python {project}/test/robust_laplacian_test.py
+          name: robust-laplacian-${{ env.ROBUST_LAPLACIAN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -138,15 +141,9 @@ jobs:
           assert licences == expected, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: robust-laplacian-${{ env.ROBUST_LAPLACIAN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish robust-laplacian ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

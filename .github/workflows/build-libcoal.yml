@@ -48,41 +48,45 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build libcoal ${{ matrix.version }} manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "libcoal"
+      version: "${{ matrix.version }}"
+      repository: "cmake-wheel/libcoal"
+      ref: "v${{ matrix.version }}.c0"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 720
+      checkout-submodules: "true"
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # numpy's newest release has no riscv64 wheel; the registry's must win over its sdist.
+      cibw-environment-linux: "CMEEL_LOG_LEVEL=\"DEBUG\" CMEEL_JOBS=\"1\" CMEEL_TEST_JOBS=\"1\" CMEEL_RUN_TESTS=\"ON\" PIP_ONLY_BINARY=numpy"
+      # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+      cibw-repair-wheel-command: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       LIBCOAL_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout libcoal v${{ env.LIBCOAL_VERSION }}.c0
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cmake-wheel/libcoal
-          ref: v${{ env.LIBCOAL_VERSION }}.c0
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # has-sitelib = false: the wheel holds no Python extension, so one
-          # py3-none wheel covers every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy's newest release has no riscv64 wheel; the registry's must win over its sdist.
-          CIBW_ENVIRONMENT: >-
-            CMEEL_LOG_LEVEL="DEBUG" CMEEL_JOBS="1" CMEEL_TEST_JOBS="1" CMEEL_RUN_TESTS="ON"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
+          name: libcoal-${{ env.LIBCOAL_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -111,15 +115,9 @@ jobs:
           prefix=$(python3 -c "import pathlib, sysconfig; print(pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix')")
           python3 -c "import ctypes; ctypes.CDLL('$prefix/lib/libcoal.so')"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: libcoal-${{ env.LIBCOAL_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish libcoal ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

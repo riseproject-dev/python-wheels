@@ -50,72 +50,77 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pillow-avif-plugin ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pillow-avif-plugin"
+      version: "${{ matrix.version }}"
+      repository: "fdintino/pillow-avif-plugin"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream's own before-all builds libavif through multi-build/multibuild,
+      # whose ccache/sccache/nasm helpers all fetch architecture-specific prebuilt
+      # binaries with no riscv64 release. This replicates the CMake invocation from
+      # wheelbuild/config.sh's build_libavif directly instead. rav1e is dropped: it's
+      # one of two interchangeable AV1 encoders (aom, kept, is the other), so pulling
+      # in a whole Rust toolchain to duplicate encode support isn't worth it -- the
+      # test suite already skips rav1e-specific cases via skip_unless_avif_encoder.
+      # ENABLE_RVV=0: aom's av1.cmake unconditionally adds the highbd RVV convolve
+      # sources to the RVV object library (unlike its x86/NEON equivalents, which
+      # gate their highbd files on CONFIG_AV1_HIGHBITDEPTH); with highbitdepth off
+      # those files call undeclared _c fallbacks. Upstream bug, still present on aom
+      # main; see gotcha 271.
+      cibw-before-all-linux: |-
+        set -e
+        python3 -m pip install ninja meson
+        mkdir -p libavif-1.4.2
+        curl -sL https://github.com/AOMediaCodec/libavif/archive/v1.4.2.tar.gz \
+        | tar --strip-components=1 -C libavif-1.4.2 -xzf -
+        cmake -S libavif-1.4.2 -B libavif-1.4.2/build -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_C_VISIBILITY_PRESET=hidden \
+        -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
+        -DCMAKE_SHARED_LINKER_FLAGS_INIT="-Wl,--strip-all,-z,relro,-z,now" \
+        -DAVIF_LIBSHARPYUV=LOCAL \
+        -DAVIF_LIBYUV=LOCAL \
+        -DAVIF_CODEC_AOM=LOCAL \
+        -DAVIF_CODEC_AOM_DECODE=OFF \
+        -DAVIF_CODEC_DAV1D=LOCAL \
+        -DCONFIG_AV1_HIGHBITDEPTH=0 \
+        -DENABLE_RVV=0
+        cmake --build libavif-1.4.2/build
+        cmake --install libavif-1.4.2/build --strip
+        for f in {package}/wheelbuild/dependency_licenses/*.txt; do
+        { printf '\n\n----\n\n%s\n\n' "$(basename "$f" .txt)"; cat "$f"; } >> {package}/LICENSE
+        done
+        printf '\n\n' >> {package}/LICENSE
+        cat {package}/wheelbuild/dependency_licenses/PATENTS >> {package}/LICENSE
+      # Pillow ships no riscv64 wheel on public PyPI; ours is what the test env installs.
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PILLOW_AVIF_PLUGIN_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pillow-avif-plugin v${{ env.PILLOW_AVIF_PLUGIN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: fdintino/pillow-avif-plugin
-          ref: v${{ env.PILLOW_AVIF_PLUGIN_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's own before-all builds libavif through multi-build/multibuild,
-          # whose ccache/sccache/nasm helpers all fetch architecture-specific prebuilt
-          # binaries with no riscv64 release. This replicates the CMake invocation from
-          # wheelbuild/config.sh's build_libavif directly instead. rav1e is dropped: it's
-          # one of two interchangeable AV1 encoders (aom, kept, is the other), so pulling
-          # in a whole Rust toolchain to duplicate encode support isn't worth it -- the
-          # test suite already skips rav1e-specific cases via skip_unless_avif_encoder.
-          # ENABLE_RVV=0: aom's av1.cmake unconditionally adds the highbd RVV convolve
-          # sources to the RVV object library (unlike its x86/NEON equivalents, which
-          # gate their highbd files on CONFIG_AV1_HIGHBITDEPTH); with highbitdepth off
-          # those files call undeclared _c fallbacks. Upstream bug, still present on aom
-          # main; see gotcha 271.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -e
-            python3 -m pip install ninja meson
-            mkdir -p libavif-${{ env.LIBAVIF_VERSION }}
-            curl -sL https://github.com/AOMediaCodec/libavif/archive/v${{ env.LIBAVIF_VERSION }}.tar.gz \
-              | tar --strip-components=1 -C libavif-${{ env.LIBAVIF_VERSION }} -xzf -
-            cmake -S libavif-${{ env.LIBAVIF_VERSION }} -B libavif-${{ env.LIBAVIF_VERSION }}/build -G Ninja \
-              -DCMAKE_INSTALL_PREFIX=/usr \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_SHARED_LIBS=ON \
-              -DCMAKE_C_VISIBILITY_PRESET=hidden \
-              -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
-              -DCMAKE_SHARED_LINKER_FLAGS_INIT="-Wl,--strip-all,-z,relro,-z,now" \
-              -DAVIF_LIBSHARPYUV=LOCAL \
-              -DAVIF_LIBYUV=LOCAL \
-              -DAVIF_CODEC_AOM=LOCAL \
-              -DAVIF_CODEC_AOM_DECODE=OFF \
-              -DAVIF_CODEC_DAV1D=LOCAL \
-              -DCONFIG_AV1_HIGHBITDEPTH=0 \
-              -DENABLE_RVV=0
-            cmake --build libavif-${{ env.LIBAVIF_VERSION }}/build
-            cmake --install libavif-${{ env.LIBAVIF_VERSION }}/build --strip
-            for f in {package}/wheelbuild/dependency_licenses/*.txt; do
-              { printf '\n\n----\n\n%s\n\n' "$(basename "$f" .txt)"; cat "$f"; } >> {package}/LICENSE
-            done
-            printf '\n\n' >> {package}/LICENSE
-            cat {package}/wheelbuild/dependency_licenses/PATENTS >> {package}/LICENSE
-          # Pillow ships no riscv64 wheel on public PyPI; ours is what the test env installs.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          name: pillow-avif-plugin-${{ env.PILLOW_AVIF_PLUGIN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel contents
         run: |
@@ -131,15 +136,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pillow-avif-plugin-${{ env.PILLOW_AVIF_PLUGIN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pillow-avif-plugin ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

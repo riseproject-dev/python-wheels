@@ -52,53 +52,47 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cvxopt ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cvxopt"
+      version: "${{ matrix.version }}"
+      repository: "cvxopt/cvxopt"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Replaces upstream's before_all_linux.sh, which exits on any
+      # architecture other than x86_64/i686/aarch64.
+      cibw-before-all-linux: "dnf -y install openblas-devel fftw-devel && curl -fsSL -o /tmp/suitesparse.tar.gz https://github.com/DrTimothyAldenDavis/SuiteSparse/archive/v7.11.0.tar.gz && echo \"93ed4c4e546a49fc75884c3a8b807d5af4a91e39d191fbbc60a07380b12a35d1 /tmp/suitesparse.tar.gz\" | sha256sum -c - && tar xzf /tmp/suitesparse.tar.gz -C {project} && cp {project}/SuiteSparse-7.11.0/LICENSE.txt {project}/LICENSE.suitesparse && cp /usr/share/licenses/openblas/LICENSE {project}/LICENSE.openblas && cp /usr/share/licenses/fftw-libs-double/COPYING {project}/LICENSE.fftw"
+      # Upstream's own linux environment table, minus the gsl, glpk and dsdp
+      # extensions (no riscv64 packages, and no EPEL for it either). The
+      # *_LIB_DIR overrides are needed because setup.py only guesses
+      # /usr/lib64 when it finds SuiteSparse installed there.
+      cibw-environment-linux: "CVXOPT_BLAS_LIB=openblas CVXOPT_LAPACK_LIB=openblas CVXOPT_BLAS_LIB_DIR=/usr/lib64 CVXOPT_BUILD_FFTW=1 CVXOPT_FFTW_LIB_DIR=/usr/lib64 CVXOPT_SUITESPARSE_SRC_DIR=SuiteSparse-7.11.0"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CVXOPT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cvxopt ${{ env.CVXOPT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cvxopt/cvxopt
-          ref: ${{ env.CVXOPT_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces upstream's before_all_linux.sh, which exits on any
-          # architecture other than x86_64/i686/aarch64.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install openblas-devel fftw-devel &&
-            curl -fsSL -o /tmp/suitesparse.tar.gz https://github.com/DrTimothyAldenDavis/SuiteSparse/archive/v${{ env.SUITESPARSE_VERSION }}.tar.gz &&
-            echo "${{ env.SUITESPARSE_SHA256 }}  /tmp/suitesparse.tar.gz" | sha256sum -c - &&
-            tar xzf /tmp/suitesparse.tar.gz -C {project} &&
-            cp {project}/SuiteSparse-${{ env.SUITESPARSE_VERSION }}/LICENSE.txt {project}/LICENSE.suitesparse &&
-            cp /usr/share/licenses/openblas/LICENSE {project}/LICENSE.openblas &&
-            cp /usr/share/licenses/fftw-libs-double/COPYING {project}/LICENSE.fftw
-          # Upstream's own linux environment table, minus the gsl, glpk and dsdp
-          # extensions (no riscv64 packages, and no EPEL for it either). The
-          # *_LIB_DIR overrides are needed because setup.py only guesses
-          # /usr/lib64 when it finds SuiteSparse installed there.
-          CIBW_ENVIRONMENT: >-
-            CVXOPT_BLAS_LIB=openblas
-            CVXOPT_LAPACK_LIB=openblas
-            CVXOPT_BLAS_LIB_DIR=/usr/lib64
-            CVXOPT_BUILD_FFTW=1
-            CVXOPT_FFTW_LIB_DIR=/usr/lib64
-            CVXOPT_SUITESPARSE_SRC_DIR=SuiteSparse-${{ env.SUITESPARSE_VERSION }}
+          name: cvxopt-${{ env.CVXOPT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extensions and all licences
         run: |
@@ -116,12 +110,6 @@ jobs:
                                   "LICENSE.fftw"}, (whl, licences)
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cvxopt-${{ env.CVXOPT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -175,7 +163,7 @@ jobs:
 
   publish:
     name: Publish cvxopt ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

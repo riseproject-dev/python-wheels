@@ -51,6 +51,87 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build snowflake-connector-python ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        # execnet's receiver thread segfaults intermittently under the
+        # free-threaded interpreter, so run this one in-process.
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "snowflake-connector-python"
+      version: "${{ matrix.version }}"
+      repository: "snowflakedb/snowflake-connector-python"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        export WIREMOCK_VERSION=3.11.0
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        # ci/build_linux.sh keeps only the host platform's prebuilt minicore blob;
+        # there is none for riscv64, and a foreign-arch .so breaks auditwheel repair
+        # (a missing one is non-fatal - _utils._CoreLoader._load swallows it).
+        rm -rf src/snowflake/connector/minicore/*/
+        # cibuildwheel 4 dropped the cpython-freethreading enable group and errors
+        # out on the stale name; free-threaded builds are always selectable now.
+        sed -i '/^enable = \["cpython-freethreading"\]$/d' pyproject.toml
+        curl -fsSL --retry 5 --retry-all-errors \
+          "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/${WIREMOCK_VERSION}/wiremock-standalone-${WIREMOCK_VERSION}.jar" \
+          --output .wiremock/wiremock-standalone.jar
+        git apply python-wheels/patches/snowflake-connector-python/${{ matrix.version }}/00*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Replaces upstream's AUDITWHEEL_PLAT=manylinux2014_$(uname -m); there is no
+      # manylinux2014 policy for riscv64, so keep the image's manylinux_2_39_riscv64.
+      # Upstream disables cibuildwheel's repair because ci/build_linux.sh runs
+      # auditwheel itself; restore the default so the wheel gets a manylinux tag.
+      cibw-repair-wheel-command: "auditwheel repair -w {dest_dir} {wheel}"
+      # Upstream sets test-skip = "*" (wheels are tested in a separate CI job).
+      cibw-test-skip: ''
+      # Test phase only (gotcha 12): wheels-only, so installing the built wheel
+      # backtracks cryptography to the newest riscv64 wheel on our registry
+      # instead of source-building the latest sdist (which needs a rustup
+      # target triple that does not exist for riscv64).
+      cibw-test-environment: "PIP_ONLY_BINARY=:all:"
+      # A JRE for the Wiremock server the auth/oauth/proxy unit tests spin up.
+      cibw-before-all: "dnf install -y java-21-openjdk-headless"
+      # The [development] extra minus mitmproxy, whose aioquic/pylsqpack deps
+      # have no riscv64 wheels (its fixtures skip when mitmdump is absent).
+      cibw-test-requires: "pytest<7.5.0 pytest-asyncio pytest-timeout pytest-rerunfailures<16.0 pytest-xdist more-itertools numpy responses azure-identity"
+      # Mirrors tox's py3XX-unit-parallel-ci env, minus coverage. Dropped:
+      #   aio/            - aiohttp+aioboto extras have no riscv64 wheels
+      #   test_ocsp       - live OCSP responders, incl. an unreachable preprod
+      #                     host, so it stalls on TCP timeouts
+      #   test_proxies    - 2-3 Wiremock JVMs per test streaming large results;
+      #                     tens of minutes even on x86
+      #   ssl_..._handshake - real TLS handshake against an external host
+      # The first three -k names need a native minicore blob, which upstream
+      # ships for eight platforms but not riscv64; the last five chmod a path
+      # and expect the EACCES that root - which cibuildwheel runs the tests
+      # as - never gets. test_auth_keypair_ecdsa_unsupported_curve generates a
+      # SECP192R1 key as test setup; our riscv64 cryptography wheel's OpenSSL
+      # build has no legacy provider, so cryptography itself raises
+      # UnsupportedAlgorithm before the connector's own curve check runs.
+      # test_retry_connection_reset_error resets a loopback connection and expects the
+      # connector's RetryRequest; on this riscv64 runner the reset surfaces as
+      # OSError EINVAL from the test's own socket setup instead (failed twice in a
+      # row on cp313 while the other 1777 unit tests pass).
+      cibw-test-command: "python -c \"from snowflake.connector.nanoarrow_arrow_iterator import PyArrowRowIterator\" && pytest -m \"unit and not sso and not pandas and not lambda and not aio\" -k \"not (TestCoreLoader and test_e2e) and not test_get_present_binaries_contains_expected_paths and not test_pruner_agrees_with_runtime_loader and not test_warn_config_file_owner and not test_log_debug_config_file_parent_dir_permissions and not test_read_only and not test_config_file_inaccessible_path and not test_put_error and not test_auth_keypair_ecdsa_unsupported_curve and not test_retry_connection_reset_error\" ${{ case(matrix.python == 'cp312', '-n auto --dist loadfile', matrix.python == 'cp313', '-n auto --dist loadfile', matrix.python == 'cp314', '-n auto --dist loadfile', endsWith(matrix.python, 't'), '-n 0', '') }} --ignore {package}/test/unit/aio --ignore {package}/test/unit/test_ocsp.py --ignore {package}/test/unit/test_proxies.py --ignore {package}/test/unit/test_ssl_partial_chain_handshake.py {package}/test/unit"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
@@ -59,102 +140,14 @@ jobs:
         # execnet's receiver thread segfaults intermittently under the
         # free-threaded interpreter, so run this one in-process.
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       SNOWFLAKE_CONNECTOR_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout snowflake-connector-python v${{ env.SNOWFLAKE_CONNECTOR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: snowflakedb/snowflake-connector-python
-          ref: v${{ env.SNOWFLAKE_CONNECTOR_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Prepare the checkout
-        run: |
-          # ci/build_linux.sh keeps only the host platform's prebuilt minicore blob;
-          # there is none for riscv64, and a foreign-arch .so breaks auditwheel repair
-          # (a missing one is non-fatal — _utils._CoreLoader._load swallows it).
-          rm -rf src/snowflake/connector/minicore/*/
-          # cibuildwheel 4 dropped the cpython-freethreading enable group and errors
-          # out on the stale name; free-threaded builds are always selectable now.
-          sed -i '/^enable = \["cpython-freethreading"\]$/d' pyproject.toml
-          curl -fsSL --retry 5 --retry-all-errors \
-            "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/${WIREMOCK_VERSION}/wiremock-standalone-${WIREMOCK_VERSION}.jar" \
-            --output .wiremock/wiremock-standalone.jar
-          git apply python-wheels/patches/snowflake-connector-python/${{ env.SNOWFLAKE_CONNECTOR_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces upstream's AUDITWHEEL_PLAT=manylinux2014_$(uname -m); there is no
-          # manylinux2014 policy for riscv64, so keep the image's manylinux_2_39_riscv64.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream disables cibuildwheel's repair because ci/build_linux.sh runs
-          # auditwheel itself; restore the default so the wheel gets a manylinux tag.
-          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel}
-          # Upstream sets test-skip = "*" (wheels are tested in a separate CI job).
-          CIBW_TEST_SKIP: ''
-          # Test phase only (gotcha 12): wheels-only, so installing the built wheel
-          # backtracks cryptography to the newest riscv64 wheel on our registry
-          # instead of source-building the latest sdist (which needs a rustup
-          # target triple that does not exist for riscv64).
-          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
-          # A JRE for the Wiremock server the auth/oauth/proxy unit tests spin up.
-          CIBW_BEFORE_ALL: dnf install -y java-21-openjdk-headless
-          # The [development] extra minus mitmproxy, whose aioquic/pylsqpack deps
-          # have no riscv64 wheels (its fixtures skip when mitmdump is absent).
-          CIBW_TEST_REQUIRES: >-
-            pytest<7.5.0 pytest-asyncio pytest-timeout pytest-rerunfailures<16.0
-            pytest-xdist more-itertools numpy responses azure-identity
-          # Mirrors tox's py3XX-unit-parallel-ci env, minus coverage. Dropped:
-          #   aio/            - aiohttp+aioboto extras have no riscv64 wheels
-          #   test_ocsp       - live OCSP responders, incl. an unreachable preprod
-          #                     host, so it stalls on TCP timeouts
-          #   test_proxies    - 2-3 Wiremock JVMs per test streaming large results;
-          #                     tens of minutes even on x86
-          #   ssl_..._handshake - real TLS handshake against an external host
-          # The first three -k names need a native minicore blob, which upstream
-          # ships for eight platforms but not riscv64; the last five chmod a path
-          # and expect the EACCES that root - which cibuildwheel runs the tests
-          # as - never gets. test_auth_keypair_ecdsa_unsupported_curve generates a
-          # SECP192R1 key as test setup; our riscv64 cryptography wheel's OpenSSL
-          # build has no legacy provider, so cryptography itself raises
-          # UnsupportedAlgorithm before the connector's own curve check runs.
-          # test_retry_connection_reset_error resets a loopback connection and expects the
-          # connector's RetryRequest; on this riscv64 runner the reset surfaces as
-          # OSError EINVAL from the test's own socket setup instead (failed twice in a
-          # row on cp313 while the other 1777 unit tests pass).
-          CIBW_TEST_COMMAND: >-
-            python -c "from snowflake.connector.nanoarrow_arrow_iterator import PyArrowRowIterator" &&
-            pytest -m "unit and not sso and not pandas and not lambda and not aio"
-            -k "not (TestCoreLoader and test_e2e)
-            and not test_get_present_binaries_contains_expected_paths
-            and not test_pruner_agrees_with_runtime_loader
-            and not test_warn_config_file_owner
-            and not test_log_debug_config_file_parent_dir_permissions
-            and not test_read_only
-            and not test_config_file_inaccessible_path
-            and not test_put_error
-            and not test_auth_keypair_ecdsa_unsupported_curve
-            and not test_retry_connection_reset_error"
-            ${{ case(matrix.python == 'cp312', '-n auto --dist loadfile', matrix.python == 'cp313', '-n auto --dist loadfile', matrix.python == 'cp314', '-n auto --dist loadfile', endsWith(matrix.python, 't'), '-n 0', '') }}
-            --ignore {package}/test/unit/aio
-            --ignore {package}/test/unit/test_ocsp.py
-            --ignore {package}/test/unit/test_proxies.py
-            --ignore {package}/test/unit/test_ssl_partial_chain_handshake.py
-            {package}/test/unit
+          name: snowflake-connector-python-${{ env.SNOWFLAKE_CONNECTOR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the Cython extension made it into the wheel
         run: |
@@ -166,15 +159,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: snowflake-connector-python-${{ env.SNOWFLAKE_CONNECTOR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish snowflake-connector-python ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -53,69 +53,68 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build vmprof ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "vmprof"
+      version: "${{ matrix.version }}"
+      repository: "vmprof/vmprof-python"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/vmprof/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream's before-build is a plain `dnf install -y libunwind-devel`, which
+      # works on their manylinux_2_28 (AlmaLinux 8) images. RHEL 10 (what
+      # manylinux_2_39 riscv64 is built on) dropped libunwind to EPEL, and manylinux
+      # enables no EPEL on riscv64, so the package simply doesn't exist here
+      # (CLAUDE.md gotcha 140). Build it from source instead: 1.8.3 has riscv64
+      # support since 1.7.0 and `--libdir=/usr/lib64` is load-bearing since
+      # autotools otherwise installs to /usr/lib, off the riscv64 linker/pkg-config
+      # path.
+      cibw-before-build-linux: "cd /tmp && curl -fsSLO https://github.com/libunwind/libunwind/releases/download/v1.8.3/libunwind-1.8.3.tar.gz && tar xf libunwind-1.8.3.tar.gz && cd libunwind-1.8.3 && ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo && make -j\"$(nproc)\" install"
+      cibw-test-groups: "test"
+      # Native (C-stack) profiling is compiled in only for x86/x86_64/ppc64
+      # (VMP_SUPPORTS_NATIVE_PROFILING in src/vmprof.h); on riscv64, as on
+      # aarch64, `native=True` is a silent no-op, so test_gzip_call never sees
+      # its native frame. Upstream already skips the other native-only tests
+      # with `skipif("not hasattr(_vmprof, 'resolve_addr')")` (they SKIP here
+      # too); this one lacks that guard, and upstream never runs the suite on
+      # aarch64 (CIBW_TEST_SKIP).
+      cibw-test-command: "cd {package} && pytest vmprof jitlog -vv --deselect vmprof/test/test_run.py::TestNative::test_gzip_call"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       VMPROF_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout vmprof ${{ env.VMPROF_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: vmprof/vmprof-python
-          ref: ${{ env.VMPROF_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # vmprof_eval's per-arch callee-saved register stash ends in
-      # `#error "platform not supported"` and has no riscv64 branch.
-      - name: Patch vmprof source
-        run: git apply python-wheels/patches/vmprof/${{ env.VMPROF_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's before-build is a plain `dnf install -y libunwind-devel`, which
-          # works on their manylinux_2_28 (AlmaLinux 8) images. RHEL 10 (what
-          # manylinux_2_39 riscv64 is built on) dropped libunwind to EPEL, and manylinux
-          # enables no EPEL on riscv64, so the package simply doesn't exist here
-          # (CLAUDE.md gotcha 140). Build it from source instead: 1.8.3 has riscv64
-          # support since 1.7.0 and `--libdir=/usr/lib64` is load-bearing since
-          # autotools otherwise installs to /usr/lib, off the riscv64 linker/pkg-config
-          # path.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            cd /tmp &&
-            curl -fsSLO https://github.com/libunwind/libunwind/releases/download/v${{ env.LIBUNWIND_VERSION }}/libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
-            tar xf libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
-            cd libunwind-${{ env.LIBUNWIND_VERSION }} &&
-            ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation
-            --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo &&
-            make -j"$(nproc)" install
-          CIBW_TEST_GROUPS: test
-          # Native (C-stack) profiling is compiled in only for x86/x86_64/ppc64
-          # (VMP_SUPPORTS_NATIVE_PROFILING in src/vmprof.h); on riscv64, as on
-          # aarch64, `native=True` is a silent no-op, so test_gzip_call never sees
-          # its native frame. Upstream already skips the other native-only tests
-          # with `skipif("not hasattr(_vmprof, 'resolve_addr')")` (they SKIP here
-          # too); this one lacks that guard, and upstream never runs the suite on
-          # aarch64 (CIBW_TEST_SKIP).
-          CIBW_TEST_COMMAND: >-
-            cd {package} && pytest vmprof jitlog -vv
-            --deselect vmprof/test/test_run.py::TestNative::test_gzip_call
+          name: vmprof-${{ env.VMPROF_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the extension and licence
         run: |
@@ -132,15 +131,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: vmprof-${{ env.VMPROF_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish vmprof ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

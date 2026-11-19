@@ -52,49 +52,46 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build dm-tree ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dm-tree"
+      version: "${{ matrix.version }}"
+      repository: "deepmind/tree"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      cibw-environment-linux: "MAKEFLAGS=-j$(nproc) ABSEIL_VERSION=20260107.1 PYBIND11_VERSION=3.0.1"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # CMakeLists.txt statically links abseil-cpp into _tree.so via FetchContent;
+      # upstream's own wheels ship no licence for it, so pull it from the same
+      # tarball CMake fetches. pybind11 is header-only but its templates end up
+      # compiled into the same .so, so carry its licence too.
+      cibw-before-all-linux: "mkdir -p /tmp/abseil-cpp /tmp/pybind11 && curl -sSLf \"https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz\" | tar -xz -C /tmp/abseil-cpp --strip-components=1 && curl -sSLf \"https://github.com/pybind/pybind11/archive/refs/tags/v${PYBIND11_VERSION}.tar.gz\" | tar -xz -C /tmp/pybind11 --strip-components=1 && cp /tmp/abseil-cpp/LICENSE {project}/LICENSE.abseil-cpp && cp /tmp/pybind11/LICENSE {project}/LICENSE.pybind11"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest --pyargs tree"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       DM_TREE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout tree ${{ env.DM_TREE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: deepmind/tree
-          ref: ${{ env.DM_TREE_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # CMakeLists.txt statically links abseil-cpp into _tree.so via FetchContent;
-          # upstream's own wheels ship no licence for it, so pull it from the same
-          # tarball CMake fetches. pybind11 is header-only but its templates end up
-          # compiled into the same .so, so carry its licence too.
-          CIBW_BEFORE_ALL_LINUX: >-
-            mkdir -p /tmp/abseil-cpp /tmp/pybind11 &&
-            curl -sSLf "https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz"
-            | tar -xz -C /tmp/abseil-cpp --strip-components=1 &&
-            curl -sSLf "https://github.com/pybind/pybind11/archive/refs/tags/v${PYBIND11_VERSION}.tar.gz"
-            | tar -xz -C /tmp/pybind11 --strip-components=1 &&
-            cp /tmp/abseil-cpp/LICENSE {project}/LICENSE.abseil-cpp &&
-            cp /tmp/pybind11/LICENSE {project}/LICENSE.pybind11
-          CIBW_ENVIRONMENT_PASS_LINUX: ABSEIL_VERSION PYBIND11_VERSION
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            MAKEFLAGS=-j$(nproc)
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest --pyargs tree
+          name: dm-tree-${{ env.DM_TREE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and the licences made it into the wheel
         run: |
@@ -109,15 +106,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dm-tree-${{ env.DM_TREE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish dm-tree ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

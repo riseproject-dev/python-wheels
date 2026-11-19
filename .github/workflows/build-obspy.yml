@@ -48,42 +48,47 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build obspy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "obspy"
+      version: "${{ matrix.version }}"
+      repository: "obspy/obspy"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-fetch-depth: 0
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Only our registry has riscv64 wheels for these; keep a newer PyPI sdist from winning.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,lxml,sqlalchemy,pyproj,shapely,cartopy,rpds-py"
+      # --no-report: do not upload results to upstream's tests.obspy.org report server.
+      # Network tests stay deselected (obspy-runtests' default).
+      cibw-test-command: "obspy-runtests --no-report"
+      cibw-test-extras: "tests"
+      # Optional deps outside the tests extra; without them 25 tests skip.
+      cibw-test-requires: "cartopy geographiclib pyshp jsonschema"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       OBSPY_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout obspy ${{ env.OBSPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: obspy/obspy
-          ref: ${{ env.OBSPY_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Build and test wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Only our registry has riscv64 wheels for these; keep a newer PyPI sdist from winning.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,lxml,sqlalchemy,pyproj,shapely,cartopy,rpds-py
-          # --no-report: do not upload results to upstream's tests.obspy.org report server.
-          # Network tests stay deselected (obspy-runtests' default).
-          CIBW_TEST_COMMAND: obspy-runtests --no-report
-          CIBW_TEST_EXTRAS: tests
-          # Optional deps outside the tests extra; without them 25 tests skip.
-          CIBW_TEST_REQUIRES: cartopy geographiclib pyshp jsonschema
+          name: obspy-${{ env.OBSPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the licences and the compiled libraries
         run: |
@@ -99,15 +104,9 @@ jobs:
           assert not any(".libs/" in n for n in names), [n for n in names if ".libs/" in n]
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: obspy-${{ env.OBSPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish obspy ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

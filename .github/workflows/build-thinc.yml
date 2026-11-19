@@ -51,6 +51,91 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build thinc ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # 9.1.1 pins `cython>=0.25,<3.0`, and Cython 0.29 emits calls to the
+        # pre-3.13 `_PyLong_AsByteArray` signature, so cp313+ cannot compile.
+        # Upstream ships cp39-cp312 wheels for this release for the same reason;
+        # 10.0.0 moved to Cython 3 and builds on every interpreter.
+        python: ["cp312", "cp313", "cp314"]
+        exclude:
+          - version: 9.1.1
+            python: cp313
+          - version: 9.1.1
+            python: cp314
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "thinc"
+      version: "${{ matrix.version }}"
+      repository: "explosion/thinc"
+      ref: ''
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      timeout-minutes: 300
+      pre-build: |-
+        export THINC_VERSION='${{ matrix.version }}'
+        for ref in "release-v$THINC_VERSION" "v$THINC_VERSION" "$THINC_VERSION"; do
+          git ls-remote --exit-code --tags https://github.com/explosion/thinc "refs/tags/$ref" >/dev/null && break
+        done
+        test -n "$ref"
+
+        git fetch -q --no-tags origin "$ref"
+        git checkout -q --detach FETCH_HEAD
+
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        patches="$PWD/python-wheels/patches/thinc/$THINC_VERSION"
+        if [ -d "$patches" ]; then
+          git apply "$patches"/*.patch
+        fi
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > resolve-build-requires.py <<'REQ_EOF'
+        import sys
+        import tomllib
+
+        with open(sys.argv[1], "rb") as f:
+            requires = tomllib.load(f)["build-system"]["requires"]
+        old_cython = any(
+            r.lower().startswith("cython") and "<3" in r.replace(" ", "")
+            for r in requires
+        )
+        for r in requires:
+            print("numpy>=2.0.0,<2.5.0" if old_cython and r.lower().startswith("numpy") else r)
+        REQ_EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # numpy has no riscv64 wheel on public PyPI; the build and the test
+      # environment both resolve it from our registry.
+      # build-system.requires of the checkout, with numpy capped below 2.5.0 for a
+      # Cython<3 release (see "Stage the build-requirements script").
+      cibw-before-build: "python {project}/resolve-build-requires.py {project}/pyproject.toml > /tmp/build-requirements.txt && pip install wheel -r /tmp/build-requirements.txt"
+      cibw-build-frontend: "build; args: --no-isolation"
+      cibw-test-requires: "pytest>=8.2.0 hypothesis>=3.27.0,<6.72.2 mock>=2.0.0,<3.0.0"
+      # setup.cfg registers the `slow` marker; without it -Werror turns
+      # PytestUnknownMarkWarning into a collection error.
+      cibw-test-sources: "setup.cfg"
+      cibw-test-command: "python -m pytest --pyargs thinc -Werror"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
@@ -67,88 +152,14 @@ jobs:
             python: cp313
           - version: 9.1.1
             python: cp314
-
     env:
       THINC_VERSION: ${{ matrix.version }}
-
     steps:
-      # Upstream tagged 9.x releases `release-vX.Y.Z` and 10.0.0 `v10.0.0`; use whichever exists.
-      - name: Resolve upstream tag
-        id: tag
-        run: |
-          for ref in "release-v$VERSION" "v$VERSION" "$VERSION"; do
-            if git ls-remote --exit-code --tags https://github.com/explosion/thinc "refs/tags/$ref" >/dev/null; then
-              echo "ref=$ref" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-          echo "no tag for $VERSION in explosion/thinc" >&2
-          exit 1
-        env:
-          VERSION: ${{ env.THINC_VERSION }}
-
-      - name: Checkout thinc ${{ env.THINC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: explosion/thinc
-          ref: ${{ steps.tag.outputs.ref }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # Only some versions need patching (9.1.1 needed the removed free-threaded-support
-      # option commented out; 10.0.0 dropped it), so a missing directory is not an error.
-      - name: Patch thinc source
-        run: |
-          patches="$PWD/python-wheels/patches/thinc/$THINC_VERSION"
-          if [ -d "$patches" ]; then
-            git apply "$patches"/*.patch
-          fi
-
-      # Installs the checkout's own build-system.requires; for a Cython<3 release it also
-      # caps numpy, whose 2.5.0 replaced the legacy numpy/__init__.pxd with a hard
-      # "requires Cython 3.0.0 or newer" abort.
-      - name: Stage the build-requirements script
-        run: |
-          cat > resolve-build-requires.py <<'REQ_EOF'
-          import sys
-          import tomllib
-
-          with open(sys.argv[1], "rb") as f:
-              requires = tomllib.load(f)["build-system"]["requires"]
-          old_cython = any(
-              r.lower().startswith("cython") and "<3" in r.replace(" ", "")
-              for r in requires
-          )
-          for r in requires:
-              print("numpy>=2.0.0,<2.5.0" if old_cython and r.lower().startswith("numpy") else r)
-          REQ_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy has no riscv64 wheel on public PyPI; the build and the test
-          # environment both resolve it from our registry.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # build-system.requires of the checkout, with numpy capped below 2.5.0 for a
-          # Cython<3 release (see "Stage the build-requirements script").
-          CIBW_BEFORE_BUILD: >-
-            python {project}/resolve-build-requires.py {project}/pyproject.toml > /tmp/build-requirements.txt
-            && pip install wheel -r /tmp/build-requirements.txt
-          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-          CIBW_TEST_REQUIRES: pytest>=8.2.0 hypothesis>=3.27.0,<6.72.2 mock>=2.0.0,<3.0.0
-          # setup.cfg registers the `slow` marker; without it -Werror turns
-          # PytestUnknownMarkWarning into a collection error.
-          CIBW_TEST_SOURCES: setup.cfg
-          CIBW_TEST_COMMAND: python -m pytest --pyargs thinc -Werror
+          name: thinc-${{ env.THINC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension modules made it into the wheel
         run: |
@@ -170,15 +181,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: thinc-${{ env.THINC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish thinc ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

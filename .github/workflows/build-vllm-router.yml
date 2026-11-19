@@ -54,57 +54,61 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build vllm-router ${{ matrix.version }} cp38-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 720
-
-    env:
-      VLLM_ROUTER_VERSION: ${{ matrix.version }}
-
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "vllm-router"
+      version: "${{ matrix.version }}"
+      repository: "vllm-project/router"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp38-abi3-manylinux_riscv64"
+      timeout-minutes: 720
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply "$GITHUB_WORKSPACE"/python-wheels/patches/vllm-router/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # cp312 first so cibuildwheel compiles the abi3 wheel there and only retests
+      # it on cp313/cp314 (gotcha 96/633); the image ships no cp38 to build on.
+      cibw-build: "cp312-manylinux_riscv64"
+      # No Rust in the manylinux image; install it and put cargo on PATH. reqwest's
+      # default-tls feature needs OpenSSL headers; the zmq crate's vendored libzmq
+      # build needs cmake.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && dnf -y install openssl-devel cmake"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest pytest-asyncio"
+      cibw-test-sources: "py_test"
+      cibw-test-command: "python -c \"import vllm_router; from vllm_router_rs import PolicyType, Router; print('Rust extension: OK')\" && python -m vllm_router.launch_router --help > /dev/null && echo \"Entry point: OK\" && python -m pytest -v py_test/unit"
+
+  verify_wheels:
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      VLLM_ROUTER_VERSION: ${{ matrix.version }}
     steps:
-      - name: Checkout vllm-router v${{ env.VLLM_ROUTER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: vllm-project/router
-          ref: v${{ env.VLLM_ROUTER_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply "$GITHUB_WORKSPACE"/python-wheels/patches/vllm-router/${{ env.VLLM_ROUTER_VERSION }}/*.patch
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # cp312 first so cibuildwheel compiles the abi3 wheel there and only retests
-          # it on cp313/cp314 (gotcha 96/633); the image ships no cp38 to build on.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # No Rust in the manylinux image; install it and put cargo on PATH. reqwest's
-          # default-tls feature needs OpenSSL headers; the zmq crate's vendored libzmq
-          # build needs cmake.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            dnf -y install openssl-devel cmake
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio
-          CIBW_TEST_SOURCES: py_test
-          CIBW_TEST_COMMAND: >-
-            python -c "import vllm_router; from vllm_router_rs import PolicyType, Router;
-            print('Rust extension: OK')" &&
-            python -m vllm_router.launch_router --help > /dev/null && echo "Entry point: OK" &&
-            python -m pytest -v py_test/unit
+          name: vllm-router-${{ env.VLLM_ROUTER_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries the Apache-2.0 licence
         run: |
@@ -115,15 +119,9 @@ jobs:
           print(sys.argv[1], "->", [n for n in names if ".dist-info/licenses/" in n])
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: vllm-router-${{ env.VLLM_ROUTER_VERSION }}-cp38-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish vllm-router ${{ matrix.version }}
-    needs: [setup, build_wheel]
+    needs: [setup, build_wheel, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

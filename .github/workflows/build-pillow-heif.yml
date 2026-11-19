@@ -49,45 +49,48 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pillow-heif ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pillow_heif"
+      version: "${{ matrix.version }}"
+      repository: "bigcat88/pillow_heif"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream installs `cmake==3.31.6` from PyPI, which ships no riscv64 wheel; the
+      # image already provides cmake 4.4.2. The `cp` lines add the licences of the three
+      # libraries the wheel bundles, which upstream only references by URL.
+      cibw-before-all-linux: |-
+        set -e
+        yum makecache && yum install -y libjpeg-turbo-devel lcms2-devel zlib-devel
+        export BUILD_DIR=/tmp/ph_build_stuff
+        python3 {package}/libheif/build_libs.py
+        for lib in x265 libde265 libheif; do
+        cp "$BUILD_DIR/$lib/COPYING" "{package}/LICENSE.$lib"
+        done
+      # Pillow ships no riscv64 wheel on public PyPI; ours is what the test env installs.
+      cibw-environment-linux: "PH_RELEASE_TESTS=1"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       PILLOW_HEIF_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pillow_heif v${{ env.PILLOW_HEIF_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: bigcat88/pillow_heif
-          ref: v${{ env.PILLOW_HEIF_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream installs `cmake==3.31.6` from PyPI, which ships no riscv64 wheel; the
-          # image already provides cmake 4.4.2. The `cp` lines add the licences of the three
-          # libraries the wheel bundles, which upstream only references by URL.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -e
-            yum makecache && yum install -y libjpeg-turbo-devel lcms2-devel zlib-devel
-            export BUILD_DIR=/tmp/ph_build_stuff
-            python3 {package}/libheif/build_libs.py
-            for lib in x265 libde265 libheif; do
-              cp "$BUILD_DIR/$lib/COPYING" "{package}/LICENSE.$lib"
-            done
-          # Pillow ships no riscv64 wheel on public PyPI; ours is what the test env installs.
-          CIBW_ENVIRONMENT: >-
-            PH_RELEASE_TESTS=1
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          name: pillow_heif-${{ env.PILLOW_HEIF_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel contents
         run: |
@@ -106,15 +109,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pillow_heif-${{ env.PILLOW_HEIF_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pillow-heif ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

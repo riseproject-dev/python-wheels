@@ -53,110 +53,95 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build chromadb ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "chromadb"
+      version: "${{ matrix.version }}"
+      repository: "chroma-core/chroma"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "cp39-abi3-manylinux_riscv64"
+      timeout-minutes: 1440
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        set -euo pipefail
+        git apply -v python-wheels/patches/chromadb/${{ matrix.version }}/*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        set -euo pipefail
+        sed -i 's/^dynamic = \["version"\]$/version = "${{ matrix.version }}"/' pyproject.toml
+        grep -q '^version = "${{ matrix.version }}"$' pyproject.toml
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # pyo3 is pinned to `abi3-py39` workspace-wide, so every interpreter
+      # yields the same cp39-abi3 wheel: cibuildwheel compiles once and reuses
+      # it for cp313/cp314 while still running the test suite on each.
+      cibw-build: "cp312-* cp313-* cp314-*"
+      # rustup.rs ships no riscv64 musl toolchain.
+      cibw-skip: "*-musllinux_*"
+      # protoc builds the chroma-types gRPC stubs; it lives in Rocky's CRB repo.
+      cibw-before-all-linux: "dnf -y --enablerepo=crb install protobuf-compiler protobuf-devel && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      # PROTOC_INCLUDE points prost-build at the well-known .proto files, which
+      # the distro packages install outside protoc's own search path.
+      # `[tool.maturin] strip = true` discards the debug info upstream's
+      # `[profile.release] debug = 2` produces, so it only costs build time here.
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" PROTOC_INCLUDE=/usr/include CARGO_PROFILE_RELEASE_DEBUG=0"
+      # Upstream's requirements_dev.txt minus the lint/codegen tooling the
+      # rust-bindings suite never loads, plus pytest-xdist/pytest-rerunfailures
+      # for the retry below.
+      cibw-test-requires: "pytest pytest-asyncio psutil pandas hypothesis[numpy]==6.112.2 fastapi uvicorn[standard] snowballstemmer opentelemetry-instrumentation-fastapi chroma-hnswlib==0.7.6 pytest-xdist pytest-rerunfailures"
+      # `schemas/` is resolved relative to the source tree by
+      # chromadb/utils/embedding_functions/schemas/schema_utils.py, and
+      # pyproject.toml carries the pytest config (asyncio_mode, pythonpath).
+      cibw-test-sources: "chromadb schemas pyproject.toml"
+      # PyPI's newest grpcio/pandas have no riscv64 wheel, so without
+      # PIP_ONLY_BINARY pip picks them over the registry's and compiles both
+      # in-container. chroma-hnswlib has no riscv64 wheel either and its own
+      # release workflow sets HNSWLIB_NO_NATIVE, so the sdist build matches.
+      cibw-test-environment: "CHROMA_RUST_BINDINGS_TEST_ONLY=1 RUST_BACKTRACE=1 PIP_ONLY_BINARY=grpcio,numpy,pandas HNSWLIB_NO_NATIVE=true"
+      # The compiled extension lives in its own top-level package, so the
+      # staged `chromadb/` source tree cannot shadow it - assert it is the
+      # installed .so before running upstream's glob. `-x` is dropped so one
+      # riscv64 cycle reports every failure.
+      # test_multithreaded.py's ThreadPoolExecutor stress tests hit a rare
+      # (~1 in 3 runs here) SIGABRT inside chromadb_rust_bindings under real
+      # riscv64 parallelism - didn't reproduce in 40 loops on native aarch64,
+      # so it reads as riscv64's weaker memory ordering exposing an upstream
+      # race rather than anything in this workflow. `-n 1 --reruns 3` makes
+      # pytest-xdist restart the worker and retry the one crashed test
+      # instead of failing the whole (~1h) run.
+      cibw-test-command: "python -c \"import chromadb; from chromadb_rust_bindings import chromadb_rust_bindings as ext; assert ext.__file__.endswith('.so'), ext.__file__; print(ext.__file__)\" && python -m pytest chromadb/test --ignore-glob 'chromadb/test/property/*' --ignore-glob 'chromadb/test/stress/*' --ignore-glob 'chromadb/test/distributed/*' --ignore chromadb/test/test_multithreaded.py -v --color=yes --durations 10 && python -m pytest chromadb/test/test_multithreaded.py -v --color=yes -n 1 --reruns 3"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       CHROMADB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout chromadb ${{ env.CHROMADB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: chroma-core/chroma
-          ref: ${{ env.CHROMADB_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: |
-          set -euo pipefail
-          git apply -v python-wheels/patches/chromadb/${{ env.CHROMADB_VERSION }}/*.patch
-
-      # The tag leaves the version dynamic (setuptools_scm), but the build backend
-      # is maturin, which would fall back to the crate version (0.1.0). Upstream's
-      # release workflow rewrites pyproject.toml the same way before building.
-      - name: Pin the package version
-        run: |
-          set -euo pipefail
-          sed -i 's/^dynamic = \["version"\]$/version = "${{ env.CHROMADB_VERSION }}"/' pyproject.toml
-          grep -q '^version = "${{ env.CHROMADB_VERSION }}"$' pyproject.toml
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ARCHS: riscv64
-          # pyo3 is pinned to `abi3-py39` workspace-wide, so every interpreter
-          # yields the same cp39-abi3 wheel: cibuildwheel compiles once and reuses
-          # it for cp313/cp314 while still running the test suite on each.
-          CIBW_BUILD: "cp312-* cp313-* cp314-*"
-          # rustup.rs ships no riscv64 musl toolchain.
-          CIBW_SKIP: "*-musllinux_*"
-          # protoc builds the chroma-types gRPC stubs; it lives in Rocky's CRB repo.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y --enablerepo=crb install protobuf-compiler protobuf-devel &&
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          # PROTOC_INCLUDE points prost-build at the well-known .proto files, which
-          # the distro packages install outside protoc's own search path.
-          # `[tool.maturin] strip = true` discards the debug info upstream's
-          # `[profile.release] debug = 2` produces, so it only costs build time here.
-          CIBW_ENVIRONMENT: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PROTOC_INCLUDE=/usr/include
-            CARGO_PROFILE_RELEASE_DEBUG=0
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's requirements_dev.txt minus the lint/codegen tooling the
-          # rust-bindings suite never loads, plus pytest-xdist/pytest-rerunfailures
-          # for the retry below.
-          CIBW_TEST_REQUIRES: >-
-            pytest pytest-asyncio psutil pandas hypothesis[numpy]==6.112.2
-            fastapi uvicorn[standard] snowballstemmer
-            opentelemetry-instrumentation-fastapi chroma-hnswlib==0.7.6
-            pytest-xdist pytest-rerunfailures
-          # `schemas/` is resolved relative to the source tree by
-          # chromadb/utils/embedding_functions/schemas/schema_utils.py, and
-          # pyproject.toml carries the pytest config (asyncio_mode, pythonpath).
-          CIBW_TEST_SOURCES: chromadb schemas pyproject.toml
-          # PyPI's newest grpcio/pandas have no riscv64 wheel, so without
-          # PIP_ONLY_BINARY pip picks them over the registry's and compiles both
-          # in-container. chroma-hnswlib has no riscv64 wheel either and its own
-          # release workflow sets HNSWLIB_NO_NATIVE, so the sdist build matches.
-          CIBW_TEST_ENVIRONMENT: >-
-            CHROMA_RUST_BINDINGS_TEST_ONLY=1 RUST_BACKTRACE=1
-            PIP_ONLY_BINARY=grpcio,numpy,pandas
-            HNSWLIB_NO_NATIVE=true
-          # The compiled extension lives in its own top-level package, so the
-          # staged `chromadb/` source tree cannot shadow it - assert it is the
-          # installed .so before running upstream's glob. `-x` is dropped so one
-          # riscv64 cycle reports every failure.
-          # test_multithreaded.py's ThreadPoolExecutor stress tests hit a rare
-          # (~1 in 3 runs here) SIGABRT inside chromadb_rust_bindings under real
-          # riscv64 parallelism - didn't reproduce in 40 loops on native aarch64,
-          # so it reads as riscv64's weaker memory ordering exposing an upstream
-          # race rather than anything in this workflow. `-n 1 --reruns 3` makes
-          # pytest-xdist restart the worker and retry the one crashed test
-          # instead of failing the whole (~1h) run.
-          CIBW_TEST_COMMAND: >-
-            python -c "import chromadb;
-            from chromadb_rust_bindings import chromadb_rust_bindings as ext;
-            assert ext.__file__.endswith('.so'), ext.__file__;
-            print(ext.__file__)"
-            && python -m pytest chromadb/test
-            --ignore-glob 'chromadb/test/property/*'
-            --ignore-glob 'chromadb/test/stress/*'
-            --ignore-glob 'chromadb/test/distributed/*'
-            --ignore chromadb/test/test_multithreaded.py
-            -v --color=yes --durations 10
-            && python -m pytest chromadb/test/test_multithreaded.py
-            -v --color=yes -n 1 --reruns 3
+          name: chromadb-${{ env.CHROMADB_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the compiled extension
         run: |
@@ -169,15 +154,9 @@ jobs:
           print(sys.argv[1], "->", sos)
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: chromadb-${{ env.CHROMADB_VERSION }}-cp39-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish chromadb ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

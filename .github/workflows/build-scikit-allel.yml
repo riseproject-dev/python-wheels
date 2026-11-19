@@ -50,50 +50,54 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build scikit-allel ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "scikit-allel"
+      version: "${{ matrix.version }}"
+      repository: "cggh/scikit-allel"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-fetch-depth: 0
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy is a declared build-system requirement (pyproject.toml) and, despite
+      # not being listed there as a runtime dependency either, an implicit one too
+      # (the compiled extensions call numpy's C API at import time). Only our
+      # registry has it for riscv64; only-binary keeps a newer PyPI release from
+      # winning the resolution and then compiling from sdist.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      # The full upstream suite (allel/test) needs the `tabix` binary and sample
+      # VCF/GFF fixtures that aren't part of the wheel; smoke-import the three
+      # compiled extensions instead, proving the riscv64 .so's actually load.
+      cibw-test-command: "python -c \"import allel.opt.model, allel.opt.stats, allel.opt.io_vcf_read\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       SCIKIT_ALLEL_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout scikit-allel ${{ env.SCIKIT_ALLEL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cggh/scikit-allel
-          ref: v${{ env.SCIKIT_ALLEL_VERSION }}
-          fetch-depth: 0  # setuptools_scm derives the version from `git describe`
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a declared build-system requirement (pyproject.toml) and, despite
-          # not being listed there as a runtime dependency either, an implicit one too
-          # (the compiled extensions call numpy's C API at import time). Only our
-          # registry has it for riscv64; only-binary keeps a newer PyPI release from
-          # winning the resolution and then compiling from sdist.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # The full upstream suite (allel/test) needs the `tabix` binary and sample
-          # VCF/GFF fixtures that aren't part of the wheel; smoke-import the three
-          # compiled extensions instead, proving the riscv64 .so's actually load.
-          CIBW_TEST_COMMAND: python -c "import allel.opt.model, allel.opt.stats, allel.opt.io_vcf_read"
+          name: scikit-allel-${{ env.SCIKIT_ALLEL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -106,16 +110,9 @@ jobs:
           assert licences == {"LICENSE"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: scikit-allel-${{ env.SCIKIT_ALLEL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish scikit-allel ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

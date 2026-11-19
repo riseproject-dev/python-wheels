@@ -50,62 +50,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build gdstk ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "gdstk"
+      version: "${{ matrix.version }}"
+      repository: "heitzmann/gdstk"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        sed -n '/Author    :  Angus Johnson/,/http:\/\/www.boost.org\/LICENSE_1_0.txt/p' \
+          external/clipper/clipper.hpp > LICENSE.clipper
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/qhull/qhull/v8.0.2/COPYING.txt" -o LICENSE.qhull
+        test -s LICENSE.clipper
+        test -s LICENSE.qhull
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # zlib is linked from the system; Qhull is not on the manylinux image
+      # and is built from source, mirroring upstream's own before-all step.
+      cibw-before-all-linux: "dnf -y install zlib-devel && mkdir -p /tmp/qhull && curl -fsSL \"https://github.com/qhull/qhull/archive/refs/tags/v8.0.2.tar.gz\" | tar -xz -C /tmp/qhull --strip-components=1 && cmake -S /tmp/qhull -B /tmp/qhull/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/qhull/build --parallel --target install && ldconfig"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -m pytest tests -v"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       GDSTK_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout gdstk v${{ env.GDSTK_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: heitzmann/gdstk
-          ref: v${{ env.GDSTK_VERSION }}
-          persist-credentials: false
-
-      # external/clipper is compiled straight into the extension under its own
-      # BSL-1.0 terms (same licence as gdstk, different copyright holder), and
-      # Qhull is statically linked in too; stage both notices at the root for
-      # scikit-build-core's default license-files glob.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          sed -n '/Author    :  Angus Johnson/,/http:\/\/www.boost.org\/LICENSE_1_0.txt/p' \
-            external/clipper/clipper.hpp > LICENSE.clipper
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/qhull/qhull/${{ env.QHULL_TAG }}/COPYING.txt" -o LICENSE.qhull
-          test -s LICENSE.clipper
-          test -s LICENSE.qhull
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # zlib is linked from the system; Qhull is not on the manylinux image
-          # and is built from source, mirroring upstream's own before-all step.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install zlib-devel &&
-            mkdir -p /tmp/qhull &&
-            curl -fsSL "https://github.com/qhull/qhull/archive/refs/tags/${{ env.QHULL_TAG }}.tar.gz"
-            | tar -xz -C /tmp/qhull --strip-components=1 &&
-            cmake -S /tmp/qhull -B /tmp/qhull/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-            -DCMAKE_BUILD_TYPE=Release &&
-            cmake --build /tmp/qhull/build --parallel --target install &&
-            ldconfig
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            LIBRARY_PATH=/usr/local/lib
-            LD_LIBRARY_PATH=/usr/local/lib
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: python -m pytest tests -v
+          name: gdstk-${{ env.GDSTK_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -120,15 +115,9 @@ jobs:
               print(path, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: gdstk-${{ env.GDSTK_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish gdstk ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -52,49 +52,58 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build gemmi ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "gemmi"
+      version: "${{ matrix.version }}"
+      repository: "project-gemmi/gemmi"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/gemmi/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # find_package(nanobind 2.4.0) in CMakeLists.txt rejects nanobind 3.x as
+      # incompatible; pyproject.toml's build-system.requires has no upper bound.
+      cibw-before-all: "echo 'nanobind<3' > /nanobind-constraint.txt"
+      # The fetched zlib-ng's RVV chunkset/inflate kernels SIGILL on the first
+      # gzipped file gemmi reads; fall back to its portable C implementation.
+      cibw-environment-linux: "SKBUILD_CMAKE_ARGS='-DBUILD_GEMMI_PROGRAM=OFF;-DINSTALL_DEV_FILES=OFF;-DBUILD_SHARED_LIBS=OFF;-DFETCH_ZLIB_NG=ON;-DWITH_RVV=OFF' PIP_CONSTRAINT=/nanobind-constraint.txt PIP_BUILD_CONSTRAINT=/nanobind-constraint.txt"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       GEMMI_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout gemmi v${{ env.GEMMI_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: project-gemmi/gemmi
-          ref: v${{ env.GEMMI_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # stb_sprintf.h has no riscv64 entry in its 64-bit-pointer-arch allowlist.
-      - name: Patch gemmi source
-        run: git apply python-wheels/patches/gemmi/${{ env.GEMMI_VERSION }}/00*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # find_package(nanobind 2.4.0) in CMakeLists.txt rejects nanobind 3.x as
-          # incompatible; pyproject.toml's build-system.requires has no upper bound.
-          CIBW_BEFORE_ALL: echo 'nanobind<3' > /nanobind-constraint.txt
-          # The fetched zlib-ng's RVV chunkset/inflate kernels SIGILL on the first
-          # gzipped file gemmi reads; fall back to its portable C implementation.
-          CIBW_ENVIRONMENT: >-
-            SKBUILD_CMAKE_ARGS='-DBUILD_GEMMI_PROGRAM=OFF;-DINSTALL_DEV_FILES=OFF;-DBUILD_SHARED_LIBS=OFF;-DFETCH_ZLIB_NG=ON;-DWITH_RVV=OFF'
-            PIP_CONSTRAINT=/nanobind-constraint.txt
-            PIP_BUILD_CONSTRAINT=/nanobind-constraint.txt
+          name: gemmi-${{ env.GEMMI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -109,15 +118,9 @@ jobs:
           assert licences == {"LICENSE.txt"}, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: gemmi-${{ env.GEMMI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish gemmi ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

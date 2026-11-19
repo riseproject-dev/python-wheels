@@ -50,6 +50,30 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build capstone ${{ matrix.version }} py3-none-${{ matrix.libc }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "capstone"
+      version: "${{ matrix.version }}"
+      repository: "capstone-engine/capstone"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "py3-none-${{ matrix.libc }}_riscv64"
+      cibw-package-dir: "bindings/python"
+      # setup.py ships no ext_modules (the C library is loaded via ctypes), so
+      # setuptools tags the wheel py3-none and one build serves every interpreter.
+      cibw-build: "cp312-${{ matrix.libc }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-test-sources: "bindings/python/tests"
+      cibw-test-command: "python bindings/python/tests/test_all.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
@@ -57,30 +81,14 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         libc: [manylinux, musllinux]
-
     env:
       CAPSTONE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout capstone ${{ env.CAPSTONE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: capstone-engine/capstone
-          ref: ${{ env.CAPSTONE_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: bindings/python
-          output-dir: wheelhouse/
-          # setup.py ships no ext_modules (the C library is loaded via ctypes), so
-          # setuptools tags the wheel py3-none and one build serves every interpreter.
-          only: cp312-${{ matrix.libc }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_SOURCES: bindings/python/tests
-          CIBW_TEST_COMMAND: python bindings/python/tests/test_all.py
+          name: capstone-${{ env.CAPSTONE_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries libcapstone
         run: |
@@ -93,15 +101,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: capstone-${{ env.CAPSTONE_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish capstone ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

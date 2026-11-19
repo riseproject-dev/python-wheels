@@ -49,46 +49,51 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cmsis-pack-manager ${{ matrix.version }} py3-none-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cmsis-pack-manager"
+      version: "${{ matrix.version }}"
+      repository: "pyocd/cmsis-pack-manager"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 180
+      # maturin's cffi bindings reach the Rust cdylib through cffi's ABI mode, so
+      # the wheel is py3-none: one build serves every interpreter, and the further
+      # identifiers only re-run the test command against it.
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64 cp314t-manylinux_riscv64"
+      # Upstream also installs libffi-devel, libatomic and openssl-devel here; the
+      # first two the image already ships, and the crate graph uses rustls.
+      cibw-before-all-linux: "curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.71.1 --profile=minimal -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-extras: "test"
+      # hypothesis' newest release has no free-threaded riscv64 wheel, and pip
+      # resolves by version, not by what has one; ours is a release older.
+      cibw-test-environment: "PIP_ONLY_BINARY=hypothesis"
+      cibw-test-command: "pytest --cache-clear"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       CMSIS_PACK_MANAGER_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cmsis-pack-manager ${{ env.CMSIS_PACK_MANAGER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pyocd/cmsis-pack-manager
-          ref: v${{ env.CMSIS_PACK_MANAGER_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # maturin's cffi bindings reach the Rust cdylib through cffi's ABI mode, so
-          # the wheel is py3-none: one build serves every interpreter, and the further
-          # identifiers only re-run the test command against it.
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64 cp314t-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream also installs libffi-devel, libatomic and openssl-devel here; the
-          # first two the image already ships, and the crate graph uses rustls.
-          CIBW_BEFORE_ALL_LINUX: >
-            curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.71.1 --profile=minimal -y
-          CIBW_ENVIRONMENT: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_EXTRAS: test
-          # hypothesis' newest release has no free-threaded riscv64 wheel, and pip
-          # resolves by version, not by what has one; ours is a release older.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=hypothesis
-          CIBW_TEST_COMMAND: pytest --cache-clear
+          name: cmsis-pack-manager-${{ env.CMSIS_PACK_MANAGER_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries the Rust cdylib
         run: |
@@ -103,15 +108,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cmsis-pack-manager-${{ env.CMSIS_PACK_MANAGER_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cmsis-pack-manager ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

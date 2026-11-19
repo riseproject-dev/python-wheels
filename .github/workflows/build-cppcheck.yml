@@ -53,60 +53,62 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build cppcheck ${{ matrix.version }} py3-none-manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cppcheck"
+      version: "${{ matrix.version }}"
+      repository: "msclock/cppcheck-wheel"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/cppcheck/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      # wheel.py-api = "py3", so one build serves every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # Replaces pyproject.toml's own [tool.cibuildwheel.linux] before-build: its
+      # `pip install cmake==4.4.4`/`ninja==1.13.2` pins have no riscv64 wheel on
+      # PyPI or this registry, and vcpkg (bootstrapped in-tree, builtin-baseline
+      # 2026-10-04) has no prebuilt cmake/ninja/git for riscv64 either, so it
+      # needs VCPKG_FORCE_SYSTEM_BINARIES plus real binaries on PATH - the
+      # manylinux_riscv64 image's own dnf packages, same as build-ale-py.yml.
+      cibw-before-build-linux: "dnf install -y --setopt=install_weak_deps=False zip perl-IPC-Cmd pkgconf-pkg-config cmake ninja-build && cmake --version && ninja --version"
+      # Repeats pyproject.toml's own `environment` table: CIBW_ENVIRONMENT replaces
+      # rather than merges with it (gotcha 107). vcpkg's upstream overrides table
+      # only sets VCPKG_FORCE_SYSTEM_BINARIES for the Linux arches it already knows
+      # about (x86_64/aarch64/armv7l/ppc64le/s390x/i686), not riscv64.
+      # cppcheck is non-PIE on this image; keep its base above vm.mmap_min_addr once
+      # auditwheel's patchelf prepends a segment (gotcha 595).
+      # The version comes from setuptools_scm, which reads this shallow,
+      # patched checkout as 1.5.4.dev0+g<sha>.d<date>; pin it (gotchas 3, 31).
+      cibw-environment-linux: "VCPKG_FORCE_SYSTEM_BINARIES=1 LDFLAGS=\"-Wl,-Ttext-segment=0x200000\" SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CPPCHECK=${{ matrix.version }}"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
-
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       CPPCHECK_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout cppcheck-wheel v${{ env.CPPCHECK_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: msclock/cppcheck-wheel
-          ref: v${{ env.CPPCHECK_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch cppcheck-wheel source
-        run: git apply python-wheels/patches/cppcheck/${{ env.CPPCHECK_VERSION }}/00*.patch
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # wheel.py-api = "py3", so one build serves every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Replaces pyproject.toml's own [tool.cibuildwheel.linux] before-build: its
-          # `pip install cmake==4.4.4`/`ninja==1.13.2` pins have no riscv64 wheel on
-          # PyPI or this registry, and vcpkg (bootstrapped in-tree, builtin-baseline
-          # 2026-10-04) has no prebuilt cmake/ninja/git for riscv64 either, so it
-          # needs VCPKG_FORCE_SYSTEM_BINARIES plus real binaries on PATH - the
-          # manylinux_riscv64 image's own dnf packages, same as build-ale-py.yml.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            dnf install -y --setopt=install_weak_deps=False
-            zip perl-IPC-Cmd pkgconf-pkg-config cmake ninja-build &&
-            cmake --version && ninja --version
-          # Repeats pyproject.toml's own `environment` table: CIBW_ENVIRONMENT replaces
-          # rather than merges with it (gotcha 107). vcpkg's upstream overrides table
-          # only sets VCPKG_FORCE_SYSTEM_BINARIES for the Linux arches it already knows
-          # about (x86_64/aarch64/armv7l/ppc64le/s390x/i686), not riscv64.
-          # cppcheck is non-PIE on this image; keep its base above vm.mmap_min_addr once
-          # auditwheel's patchelf prepends a segment (gotcha 595).
-          # The version comes from setuptools_scm, which reads this shallow,
-          # patched checkout as 1.5.4.dev0+g<sha>.d<date>; pin it (gotchas 3, 31).
-          CIBW_ENVIRONMENT: >-
-            VCPKG_FORCE_SYSTEM_BINARIES=1
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            LDFLAGS="-Wl,-Ttext-segment=0x200000"
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CPPCHECK=${{ env.CPPCHECK_VERSION }}
+          name: cppcheck-${{ env.CPPCHECK_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Verify the wheel ships the cppcheck binary
         run: |
@@ -117,15 +119,9 @@ jobs:
           assert any(n.endswith("/Cppcheck/cppcheck") for n in names), names
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cppcheck-${{ env.CPPCHECK_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cppcheck ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

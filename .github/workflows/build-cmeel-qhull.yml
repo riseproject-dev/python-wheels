@@ -48,42 +48,47 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cmeel-qhull ${{ matrix.version }} manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cmeel-qhull"
+      version: "${{ matrix.version }}"
+      repository: "cmake-wheel/cmeel-qhull"
+      ref: "v${{ matrix.version }}.c1"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "true"
+      # has-sitelib = false: the wheel holds no Python extension, so one
+      # py3-none wheel covers every interpreter.
+      cibw-build: "cp312-manylinux_riscv64"
+      # qhull declares cmake_minimum_required(VERSION 3.0) and cmeel[build] resolves
+      # CMake >= 4, which refuses anything below 3.5; the cmeel backend owns the
+      # configure line, so the policy floor has to come from the environment.
+      cibw-environment-linux: "CMEEL_LOG_LEVEL=DEBUG CMAKE_POLICY_VERSION_MINIMUM=3.5"
+      # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+      cibw-repair-wheel-command: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       CMEEL_QHULL_VERSION: ${{ matrix.version }}
-
     steps:
-      # cmeel-qhull's release tags carry a packaging-revision suffix that is the wheel's
-      # build tag, not part of its version; .c1 is the revision 8.0.2.1 released last.
-      - name: Checkout cmeel-qhull v${{ env.CMEEL_QHULL_VERSION }}.c1
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cmake-wheel/cmeel-qhull
-          ref: v${{ env.CMEEL_QHULL_VERSION }}.c1
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # has-sitelib = false: the wheel holds no Python extension, so one
-          # py3-none wheel covers every interpreter.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # qhull declares cmake_minimum_required(VERSION 3.0) and cmeel[build] resolves
-          # CMake >= 4, which refuses anything below 3.5; the cmeel backend owns the
-          # configure line, so the policy floor has to come from the environment.
-          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG CMAKE_POLICY_VERSION_MINIMUM=3.5
-          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
+          name: cmeel-qhull-${{ env.CMEEL_QHULL_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -121,15 +126,9 @@ jobs:
           "$prefix/bin/rbox" 500 D4 | "$prefix/bin/qdelaunay" s
           "$prefix/bin/rbox" 100 D2 | "$prefix/bin/qvoronoi" s
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cmeel-qhull-${{ env.CMEEL_QHULL_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cmeel-qhull ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

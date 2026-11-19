@@ -57,6 +57,110 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build torchcodec ${{ matrix.version }} cp${{ matrix.python-version }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Match torch's own riscv64 matrix on the registry: torchcodec's pybind11 module is
+        # per-ABI, so there is no single abi3 wheel even though it targets torch's stable ABI.
+        # See https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+        python-version: [312, 313, 314, 314t]
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "torchcodec"
+      version: "${{ matrix.version }}"
+      repository: "pytorch/torchcodec"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp${{ matrix.python-version }}-manylinux_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/torchcodec/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "cp${{ matrix.python-version }}-manylinux_riscv64"
+      # setup is scikit-build-core driving CMake, which resolves Torch_DIR by running
+      # `import torch` in the build interpreter; torch only exists on our registry, so it
+      # cannot be declared in build-system.requires and isolation has to be off.
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      # auditwheel grafts libjpeg-turbo/libpng/libwebp/zlib into the wheel, so their
+      # licence texts have to travel with it (the rpm that owns each bundled .so is
+      # resolved rather than hardcoded; %license files are dropped by the image's
+      # tsflags=nodocs and come back with an explicit reinstall). LICENSE.* is what the
+      # patched pyproject.toml globs into .dist-info/licenses/.
+      cibw-before-all: |-
+        set -ex
+        dnf install -y --setopt=tsflags= pkgconfig libjpeg-turbo-devel libpng-devel libwebp-devel zlib-devel
+        devel=$(rpm -q --whatprovides --qf '%{NAME}\n' libjpeg-turbo-devel libpng-devel libwebp-devel zlib-devel | sort -u)
+        libs=$(rpm -ql $devel | grep -E '\.so$' | xargs -r readlink -f)
+        pkgs=$(rpm -qf --qf '%{NAME}\n' $libs | grep -E '^[A-Za-z0-9._+-]+$' | sort -u)
+        dnf reinstall -y --setopt=tsflags= $pkgs || true
+        for p in $pkgs; do
+        for f in /usr/share/licenses/$p/*; do
+        [ -f "$f" ] || continue
+        cp "$f" "{project}/LICENSE.$p.${f##*/}"
+        done
+        done
+        ls {project}/LICENSE.*
+        mkdir -p /tmp/ffmpeg
+        curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG_VERSION}.tar.gz" | tar xz --strip-components=1 -C /tmp/ffmpeg
+        cd /tmp/ffmpeg
+        ./configure --prefix=/usr/local --disable-static --enable-shared --enable-pic --disable-doc
+        make -j"$(nproc)" install
+        ldconfig
+      cibw-before-build: "pip install --only-binary=:all: torch>=2.11 \"scikit-build-core>=0.10\" pybind11 ninja setuptools wheel"
+      # I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION is upstream's own escape hatch for
+      # wheels built against an FFmpeg that is not their S3 one; the guard exists to stop
+      # a GPL FFmpeg being linked, and the build above is LGPL.
+      # AVIF and HEIC are off because neither can be had on riscv64: libavif comes from
+      # the same S3 bucket and libheif is packaged in neither Rocky 10 nor a riscv64 EPEL.
+      # decode_avif/decode_heic then raise an actionable error instead of failing the build.
+      cibw-environment-linux: "FFMPEG_VERSION=6.1.6 BUILD_VERSION=${{ matrix.version }} I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 TORCHCODEC_BUILD_AVIF=0 TORCHCODEC_BUILD_HEIC=0 TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1 PKG_CONFIG_PATH=/usr/local/lib/pkgconfig"
+      # Same exclude list as upstream's packaging/repair_wheel.py: FFmpeg is a runtime
+      # dependency the user supplies, and libtorch/libc10/libgomp come from the torch
+      # wheel, which is imported (RTLD_GLOBAL) before torchcodec loads its own libraries.
+      cibw-repair-wheel-command: "auditwheel repair -w {dest_dir} {wheel} --exclude 'libavcodec*' --exclude 'libavdevice*' --exclude 'libavfilter*' --exclude 'libavformat*' --exclude 'libavutil*' --exclude 'libswresample*' --exclude 'libswscale*' --exclude 'libpostproc*' --exclude 'libtorch*' --exclude 'libc10*' --exclude libgomp.so.1"
+      # pytest<9.2: from 9.2 pytest.approx() iterates its expected value to look for
+      # Decimals, and the sampler tests pass it a 0-d torch tensor ("iteration over a
+      # 0-d tensor").
+      cibw-test-requires: "torch>=2.11 numpy pytest<9.2 pillow"
+      # pyproject.toml is staged alongside test/ purely for its [tool.pytest.ini_options]
+      # (the needs_* markers and the 'not slow' default); src/ deliberately is not, which
+      # is what upstream's packaging/remove_src.sh achieves before its own test jobs.
+      cibw-test-sources: "test pyproject.toml"
+      # FAIL_WITHOUT_<CODEC> turns a missing image codec from a silent skip into a
+      # failure, for the three we do build. test_transform_ops.py imports torchvision at
+      # module scope and pypi.riseproject.dev has no riscv64 torchvision yet.
+      # Upstream tests against conda-forge's GPL FFmpeg; the LGPL build above has only
+      # FFmpeg's built-in codecs - no H.264/HEVC/VP9/AV1/MP3 encoder at all (libx264 and
+      # libx265 need --enable-gpl) and an AV1 decoder that only works through a hwaccel -
+      # so the tests that mux a real video, shell out to the ffmpeg CLI or ask for MP3 are
+      # dropped, smoke_test.py included: it encodes H.264 yuv444p to build every one of its
+      # fixtures. test_logging.py asserts an empty subprocess stderr, which torch's
+      # libcpuinfo pollutes on this runner by reading core_id -1 from /sys.
+      # test_seek_on_non_seekable_source_raises (0.17.0) is dropped for the same
+      # reason, and because it hangs: the ffmpeg CLI that should stream libx264 into
+      # its named pipe exits at once, so opening the pipe for reading blocks for
+      # good (every leg sat there until the 6 hour job limit).
+      # test_color_tags_describe_the_samples (0.17.0, new non-regression test) hits
+      # the same gap (gotcha 429): it encodes with pixel_format="yuv444p" and no
+      # explicit codec, so our GPL-less FFmpeg falls back to the container's built-in
+      # mpeg4 encoder, which only supports yuv420p -
+      # "Specified pixel format yuv444p is not supported by the mpeg4 encoder".
+      cibw-test-command: "FAIL_WITHOUT_JPEG=1 FAIL_WITHOUT_PNG=1 FAIL_WITHOUT_WEBP=1 pytest --ignore=test/test_transform_ops.py --ignore=test/smoke_test.py --ignore=test/test_logging.py -k \"not test_get_frame_at_av1 and not ((test_audio_against_cli or test_multiple_audio_formats or test_audio_to_file_vs_to_file_like) and mp3) and not (test_add_video_and_encode_frames or test_add_audio_and_video_and_encode or test_multiple_video_streams_and_audio or test_video_round_trip or test_video_to_file_vs_to_file_like or test_video_contiguity or test_video_against_ffmpeg_cli or test_fragmented_mp4 or test_codec_parameter_utilized or test_codec_spec_vs_impl_equivalence or test_extra_options_errors or test_extra_options_utilized or test_crf_out_of_range_errors or test_invalid_preset_errors or test_to_file_like_real_file_video or (test_to_file_like_custom_file_object and not audio) or test_add_audio_unsupported_num_channels_errors or test_add_audio_invalid_out_sample_rate_errors or test_seek_on_non_seekable_source_raises or test_color_tags_describe_the_samples)\" test"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
@@ -67,142 +171,14 @@ jobs:
         # per-ABI, so there is no single abi3 wheel even though it targets torch's stable ABI.
         # See https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
         python-version: [312, 313, 314, 314t]
-
     env:
       TORCHCODEC_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout torchcodec v${{ env.TORCHCODEC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pytorch/torchcodec
-          ref: v${{ env.TORCHCODEC_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch torchcodec source
-        run: git apply python-wheels/patches/torchcodec/${{ env.TORCHCODEC_VERSION }}/00*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_BUILD: "cp${{ matrix.python-version }}-manylinux_riscv64"
-          # setup is scikit-build-core driving CMake, which resolves Torch_DIR by running
-          # `import torch` in the build interpreter; torch only exists on our registry, so it
-          # cannot be declared in build-system.requires and isolation has to be off.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          # auditwheel grafts libjpeg-turbo/libpng/libwebp/zlib into the wheel, so their
-          # licence texts have to travel with it (the rpm that owns each bundled .so is
-          # resolved rather than hardcoded; %license files are dropped by the image's
-          # tsflags=nodocs and come back with an explicit reinstall). LICENSE.* is what the
-          # patched pyproject.toml globs into .dist-info/licenses/.
-          CIBW_BEFORE_ALL: |
-            set -ex
-            dnf install -y --setopt=tsflags= pkgconfig libjpeg-turbo-devel libpng-devel libwebp-devel zlib-devel
-            devel=$(rpm -q --whatprovides --qf '%{NAME}\n' libjpeg-turbo-devel libpng-devel libwebp-devel zlib-devel | sort -u)
-            libs=$(rpm -ql $devel | grep -E '\.so$' | xargs -r readlink -f)
-            pkgs=$(rpm -qf --qf '%{NAME}\n' $libs | grep -E '^[A-Za-z0-9._+-]+$' | sort -u)
-            dnf reinstall -y --setopt=tsflags= $pkgs || true
-            for p in $pkgs; do
-              for f in /usr/share/licenses/$p/*; do
-                [ -f "$f" ] || continue
-                cp "$f" "{project}/LICENSE.$p.${f##*/}"
-              done
-            done
-            ls {project}/LICENSE.*
-            mkdir -p /tmp/ffmpeg
-            curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG_VERSION}.tar.gz" | tar xz --strip-components=1 -C /tmp/ffmpeg
-            cd /tmp/ffmpeg
-            ./configure --prefix=/usr/local --disable-static --enable-shared --enable-pic --disable-doc
-            make -j"$(nproc)" install
-            ldconfig
-          CIBW_BEFORE_BUILD: >-
-            pip install --only-binary=:all:
-            torch>=2.11 "scikit-build-core>=0.10" pybind11 ninja setuptools wheel
-          # I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION is upstream's own escape hatch for
-          # wheels built against an FFmpeg that is not their S3 one; the guard exists to stop
-          # a GPL FFmpeg being linked, and the build above is LGPL.
-          # AVIF and HEIC are off because neither can be had on riscv64: libavif comes from
-          # the same S3 bucket and libheif is packaged in neither Rocky 10 nor a riscv64 EPEL.
-          # decode_avif/decode_heic then raise an actionable error instead of failing the build.
-          CIBW_ENVIRONMENT: >-
-            FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
-            BUILD_VERSION=${{ env.TORCHCODEC_VERSION }}
-            I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1
-            TORCHCODEC_BUILD_AVIF=0
-            TORCHCODEC_BUILD_HEIC=0
-            TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1
-            PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Same exclude list as upstream's packaging/repair_wheel.py: FFmpeg is a runtime
-          # dependency the user supplies, and libtorch/libc10/libgomp come from the torch
-          # wheel, which is imported (RTLD_GLOBAL) before torchcodec loads its own libraries.
-          CIBW_REPAIR_WHEEL_COMMAND: >-
-            auditwheel repair -w {dest_dir} {wheel}
-            --exclude 'libavcodec*'
-            --exclude 'libavdevice*'
-            --exclude 'libavfilter*'
-            --exclude 'libavformat*'
-            --exclude 'libavutil*'
-            --exclude 'libswresample*'
-            --exclude 'libswscale*'
-            --exclude 'libpostproc*'
-            --exclude 'libtorch*'
-            --exclude 'libc10*'
-            --exclude libgomp.so.1
-          # pytest<9.2: from 9.2 pytest.approx() iterates its expected value to look for
-          # Decimals, and the sampler tests pass it a 0-d torch tensor ("iteration over a
-          # 0-d tensor").
-          CIBW_TEST_REQUIRES: torch>=2.11 numpy pytest<9.2 pillow
-          # pyproject.toml is staged alongside test/ purely for its [tool.pytest.ini_options]
-          # (the needs_* markers and the 'not slow' default); src/ deliberately is not, which
-          # is what upstream's packaging/remove_src.sh achieves before its own test jobs.
-          CIBW_TEST_SOURCES: test pyproject.toml
-          # FAIL_WITHOUT_<CODEC> turns a missing image codec from a silent skip into a
-          # failure, for the three we do build. test_transform_ops.py imports torchvision at
-          # module scope and pypi.riseproject.dev has no riscv64 torchvision yet.
-          # Upstream tests against conda-forge's GPL FFmpeg; the LGPL build above has only
-          # FFmpeg's built-in codecs - no H.264/HEVC/VP9/AV1/MP3 encoder at all (libx264 and
-          # libx265 need --enable-gpl) and an AV1 decoder that only works through a hwaccel -
-          # so the tests that mux a real video, shell out to the ffmpeg CLI or ask for MP3 are
-          # dropped, smoke_test.py included: it encodes H.264 yuv444p to build every one of its
-          # fixtures. test_logging.py asserts an empty subprocess stderr, which torch's
-          # libcpuinfo pollutes on this runner by reading core_id -1 from /sys.
-          # test_seek_on_non_seekable_source_raises (0.17.0) is dropped for the same
-          # reason, and because it hangs: the ffmpeg CLI that should stream libx264 into
-          # its named pipe exits at once, so opening the pipe for reading blocks for
-          # good (every leg sat there until the 6 hour job limit).
-          # test_color_tags_describe_the_samples (0.17.0, new non-regression test) hits
-          # the same gap (gotcha 429): it encodes with pixel_format="yuv444p" and no
-          # explicit codec, so our GPL-less FFmpeg falls back to the container's built-in
-          # mpeg4 encoder, which only supports yuv420p -
-          # "Specified pixel format yuv444p is not supported by the mpeg4 encoder".
-          CIBW_TEST_COMMAND: >-
-            FAIL_WITHOUT_JPEG=1 FAIL_WITHOUT_PNG=1 FAIL_WITHOUT_WEBP=1 pytest
-            --ignore=test/test_transform_ops.py
-            --ignore=test/smoke_test.py
-            --ignore=test/test_logging.py
-            -k "not test_get_frame_at_av1
-            and not ((test_audio_against_cli or test_multiple_audio_formats
-            or test_audio_to_file_vs_to_file_like) and mp3)
-            and not (test_add_video_and_encode_frames or test_add_audio_and_video_and_encode
-            or test_multiple_video_streams_and_audio or test_video_round_trip
-            or test_video_to_file_vs_to_file_like or test_video_contiguity
-            or test_video_against_ffmpeg_cli or test_fragmented_mp4
-            or test_codec_parameter_utilized or test_codec_spec_vs_impl_equivalence
-            or test_extra_options_errors or test_extra_options_utilized
-            or test_crf_out_of_range_errors or test_invalid_preset_errors
-            or test_to_file_like_real_file_video
-            or (test_to_file_like_custom_file_object and not audio)
-            or test_add_audio_unsupported_num_channels_errors
-            or test_add_audio_invalid_out_sample_rate_errors
-            or test_seek_on_non_seekable_source_raises
-            or test_color_tags_describe_the_samples)"
-            test
+          name: torchcodec-${{ env.TORCHCODEC_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the wheel bundles the image codecs and no FFmpeg
         run: |
@@ -220,15 +196,9 @@ jobs:
           print("\n".join(n for n in names if ".so" in n or "licenses/" in n))
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: torchcodec-${{ env.TORCHCODEC_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish torchcodec ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -50,53 +50,62 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build asyncmy2 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "asyncmy2"
+      version: "${{ matrix.version }}"
+      repository: "vpmedia/asyncmy2"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        patches="$PWD/python-wheels/patches/asyncmy2/${{ matrix.version }}"
+        if [ -d "$patches" ]; then
+          git apply -v "$patches"/*.patch
+        fi
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Every other test needs a live MySQL/MariaDB server, which publishes no
+      # riscv64 image (upstream's own CI gets one via a `services:` container,
+      # unavailable here); these files exercise the compiled protocol/converters
+      # extensions without one.
+      cibw-test-sources: "tests/test_auth.py tests/test_converters.py tests/test_optionfile.py"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -m pytest -v tests/test_auth.py tests/test_converters.py tests/test_optionfile.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ASYNCMY2_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout asyncmy2 v${{ env.ASYNCMY2_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: vpmedia/asyncmy2
-          ref: v${{ env.ASYNCMY2_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: |
-          patches="$PWD/python-wheels/patches/asyncmy2/${{ env.ASYNCMY2_VERSION }}"
-          if [ -d "$patches" ]; then
-            git apply -v "$patches"/*.patch
-          fi
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Every other test needs a live MySQL/MariaDB server, which publishes no
-          # riscv64 image (upstream's own CI gets one via a `services:` container,
-          # unavailable here); these files exercise the compiled protocol/converters
-          # extensions without one.
-          CIBW_TEST_SOURCES: tests/test_auth.py tests/test_converters.py tests/test_optionfile.py
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -m pytest -v tests/test_auth.py tests/test_converters.py
-            tests/test_optionfile.py
+          name: asyncmy2-${{ env.ASYNCMY2_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the Cython extensions made it into the wheel
         run: |
@@ -114,15 +123,9 @@ jobs:
               print(whl, 'ok')
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: asyncmy2-${{ env.ASYNCMY2_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish asyncmy2 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

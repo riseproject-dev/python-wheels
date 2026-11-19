@@ -53,34 +53,36 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build tetgen ${{ matrix.version }} manylinux_riscv64
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tetgen"
+      version: "${{ matrix.version }}"
+      repository: "pyvista/tetgen"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "manylinux_riscv64"
+      timeout-minutes: 120
+      # Every test imports pyvista, whose vtk dependency has riscv64 wheels for cp312+ only.
+      cibw-test-skip: "cp310-* cp311-*"
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,vtk,pymeshfix,matplotlib,pillow,contourpy,kiwisolver,fonttools"
+      cibw-build: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     env:
       TETGEN_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout tetgen v${{ env.TETGEN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: pyvista/tetgen
-          ref: v${{ env.TETGEN_VERSION }}
-          persist-credentials: false
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # build/skip come from upstream's own pyproject.toml [tool.cibuildwheel]:
-          # cp310/cp311 each get a real extension, cp312+ collapse into one
-          # cp312-abi3 wheel (STABLE_ABI in src/CMakeLists.txt), same as upstream's
-          # own 6-wheel (3 abi tags x 2 archs) PyPI release.
-          CIBW_ARCHS: riscv64
-          # Every test imports pyvista, whose vtk dependency has riscv64 wheels for cp312+ only.
-          CIBW_TEST_SKIP: "cp310-* cp311-*"
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,vtk,pymeshfix,matplotlib,pillow,contourpy,kiwisolver,fonttools
+          name: tetgen-${{ env.TETGEN_VERSION }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check the extension and license made it into the wheel
         run: |
@@ -94,15 +96,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tetgen-${{ env.TETGEN_VERSION }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish tetgen ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

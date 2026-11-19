@@ -48,66 +48,69 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build chiavdf ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "chiavdf"
+      version: "${{ matrix.version }}"
+      repository: "Chia-Network/chiavdf"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      pre-build: |-
+        export CHIAVDF_VERSION='${{ matrix.version }}'
+        case "${CHIAVDF_VERSION}" in
+          1.0.*|1.1.*)
+            echo "GMP_VERSION=6.2.1" >> "$GITHUB_ENV"
+            echo "GMP_SHA256=fd4829912cddd12f84181c3451cc752be224643e87fac497b69edddadc49b4f2" >> "$GITHUB_ENV" ;;
+          *)
+            echo "GMP_VERSION=6.3.0" >> "$GITHUB_ENV"
+            echo "GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898" >> "$GITHUB_ENV" ;;
+        esac
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        set -euo pipefail
+        curl -fsSL --retry 5 "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" -o "gmp-${GMP_VERSION}.tar.xz"
+        echo "${GMP_SHA256}  gmp-${GMP_VERSION}.tar.xz" | sha256sum -c -
+        tar xJf "gmp-${GMP_VERSION}.tar.xz" --to-stdout "gmp-${GMP_VERSION}/COPYING.LESSERv3" "gmp-${GMP_VERSION}/COPYINGv3" > LICENSE.gmp
+        pybind11=$(sed -n '/GIT_REPOSITORY .*\/pybind11\.git/{n;s/.*GIT_TAG *//p}' src/CMakeLists.txt)
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${pybind11}/LICENSE" -o LICENSE.pybind11
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-environment-linux: "GMP_VERSION=${{ (startsWith(matrix.version, '1.0.') || startsWith(matrix.version, '1.1.')) && '6.2.1' || '6.3.0' }}"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # manylinux has no EPEL on riscv64 and Rocky 10 has no lzip, so GMP comes from the .tar.xz fetched above.
+      cibw-before-all: "yum -y install boost-devel && tar xJf gmp-$GMP_VERSION.tar.xz && cd gmp-$GMP_VERSION && if [ -d ../src/lib/gmp-patch-$GMP_VERSION ]; then cp ../src/lib/gmp-patch-$GMP_VERSION/longlong.h ../src/lib/gmp-patch-$GMP_VERSION/compat.c . && cp ../src/lib/gmp-patch-$GMP_VERSION/mpz/inp_raw.c mpz/; else patch -p1 < ../src/lib/gmp-$GMP_VERSION.diff; fi && ./configure --enable-fat --enable-cxx && make && make install && cd .. && rm -rf gmp-$GMP_VERSION && cmake --version && uname -a"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CHIAVDF_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout chiavdf ${{ env.CHIAVDF_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: Chia-Network/chiavdf
-          ref: ${{ env.CHIAVDF_VERSION }}
-          persist-credentials: false
-
-      # Up to 1.1.14 upstream bundled GMP 6.2.1 with replacement files (gmp-patch-6.2.1/);
-      # from 1.2.0 it bundles GMP 6.3.0 with a diff (gmp-6.3.0.diff).
-      - name: Select the GMP version
-        run: |
-          case "${CHIAVDF_VERSION}" in
-            1.0.*|1.1.*)
-              echo "GMP_VERSION=6.2.1" >> "$GITHUB_ENV"
-              echo "GMP_SHA256=fd4829912cddd12f84181c3451cc752be224643e87fac497b69edddadc49b4f2" >> "$GITHUB_ENV" ;;
-            *)
-              echo "GMP_VERSION=6.3.0" >> "$GITHUB_ENV"
-              echo "GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898" >> "$GITHUB_ENV" ;;
-          esac
-
-      # GMP and pybind11 are linked into the wheel; upstream ships neither notice.
-      - name: Fetch GMP and stage the bundled dependencies' licences
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 5 "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" -o "gmp-${GMP_VERSION}.tar.xz"
-          echo "${GMP_SHA256}  gmp-${GMP_VERSION}.tar.xz" | sha256sum -c -
-          tar xJf "gmp-${GMP_VERSION}.tar.xz" --to-stdout "gmp-${GMP_VERSION}/COPYING.LESSERv3" "gmp-${GMP_VERSION}/COPYINGv3" > LICENSE.gmp
-          pybind11=$(sed -n '/GIT_REPOSITORY .*\/pybind11\.git/{n;s/.*GIT_TAG *//p}' src/CMakeLists.txt)
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${pybind11}/LICENSE" -o LICENSE.pybind11
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # manylinux has no EPEL on riscv64 and Rocky 10 has no lzip, so GMP comes from the .tar.xz fetched above.
-          CIBW_BEFORE_ALL: >-
-            yum -y install boost-devel
-            && tar xJf gmp-${{ env.GMP_VERSION }}.tar.xz
-            && cd gmp-${{ env.GMP_VERSION }}
-            && if [ -d ../src/lib/gmp-patch-${{ env.GMP_VERSION }} ]; then
-            cp ../src/lib/gmp-patch-${{ env.GMP_VERSION }}/longlong.h ../src/lib/gmp-patch-${{ env.GMP_VERSION }}/compat.c . &&
-            cp ../src/lib/gmp-patch-${{ env.GMP_VERSION }}/mpz/inp_raw.c mpz/;
-            else patch -p1 < ../src/lib/gmp-${{ env.GMP_VERSION }}.diff; fi
-            && ./configure --enable-fat --enable-cxx
-            && make && make install && cd .. && rm -rf gmp-${{ env.GMP_VERSION }}
-            && cmake --version
-            && uname -a
+          name: chiavdf-${{ env.CHIAVDF_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -125,13 +128,6 @@ jobs:
                       if ".dist-info/licenses/" in n and not n.endswith("/")}
           assert licences == {"LICENSE", "LICENSE.gmp", "LICENSE.pybind11"}, licences
           EOF
-
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: chiavdf-${{ env.CHIAVDF_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -198,7 +194,7 @@ jobs:
 
   publish:
     name: Publish chiavdf ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

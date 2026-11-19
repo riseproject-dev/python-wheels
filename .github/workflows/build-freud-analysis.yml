@@ -55,90 +55,90 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build freud-analysis ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "freud-analysis"
+      version: "${{ matrix.version }}"
+      repository: "glotzerlab/freud"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      timeout-minutes: 300
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/freud-analysis/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        git submodule update --init --depth=1 -- extern/Eigen extern/voro++ extern/fsph
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        set -euo pipefail
+        cat extern/Eigen/COPYING.README extern/Eigen/COPYING.MPL2 extern/Eigen/COPYING.BSD extern/Eigen/COPYING.LGPL > LICENSE.eigen
+        cp extern/voro++/LICENSE LICENSE.voropp
+        cp extern/fsph/LICENSE LICENSE.fsph
+        curl -fsSL --retry 5 https://raw.githubusercontent.com/jodesarro/bessel-library/main/LICENSE -o LICENSE.bessel-library
+        curl -fsSL --retry 5 https://raw.githubusercontent.com/wjakob/nanobind/v3.1.0/LICENSE -o LICENSE.nanobind
+        curl -fsSL --retry 5 https://raw.githubusercontent.com/Tessil/robin-map/master/LICENSE -o LICENSE.robin-map
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/uxlfoundation/oneTBB/v2022.1.0/LICENSE.txt" -o LICENSE.tbb
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "cp312-manylinux_riscv64"
+      # Upstream's own before-build script (unmodified: it ships in the checked-out
+      # tree) builds oneTBB from source and installs it to the default CMake prefix,
+      # which freud/CMake/FindTBB.cmake's find_package_config_first() then picks up.
+      cibw-before-build: "source .github/workflows/cibuildwheel-before-build.sh {package} linux"
+      cibw-environment-linux: "CMAKE_PREFIX_PATH=/project/tbb LD_LIBRARY_PATH=/project/tbb/lib/intel64/gcc4.8:$LD_LIBRARY_PATH CMAKE_ARGS=-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=True PIP_ONLY_BINARY=numpy,scipy,matplotlib"
+      # Upstream's own repair-wheel-command pipes auditwheel repair into a
+      # pipx-installed abi3audit; the riscv64 image carries no pipx (CLAUDE.md gotcha
+      # 217), and it is redundant besides, since cibuildwheel's own default
+      # audit-command already abi3audits every abi3-tagged wheel natively.
+      cibw-repair-wheel-command-linux: "auditwheel repair -w {dest_dir} {wheel}"
+      # matplotlib (a CIBW_TEST_REQUIRES pin) transitively pulls in pillow/contourpy/
+      # kiwisolver; none publish a riscv64 wheel on PyPI newer than ours, and pillow's
+      # sdist build fails outright (no libjpeg headers in the manylinux image). Pin
+      # these to our registry's wheels for the test install too.
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow"
+      cibw-test-requires: "pytest==9.1.1 numpy==2.5.2 scipy==1.18.1 gsd==5.0.1 matplotlib==3.11.1 sympy==1.14.0"
+      cibw-test-command: "pytest {package}/tests -v --log-level=DEBUG"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       FREUD_ANALYSIS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout glotzerlab/freud v${{ env.FREUD_ANALYSIS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: glotzerlab/freud
-          ref: v${{ env.FREUD_ANALYSIS_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # pyproject.toml's license-files is an explicit ["LICENSE"] list, so
-      # scikit-build-core's default licence glob never runs; widen it to also match
-      # LICENSE.* instead of setting SKBUILD_WHEEL_LICENSE_FILES, since scikit-build-core
-      # refuses to have both project.license-files and the env var set at once.
-      - name: Patch freud-analysis source
-        run: git apply python-wheels/patches/freud-analysis/${{ env.FREUD_ANALYSIS_VERSION }}/00*.patch
-
-      # doc/source/gettingstarted/examples is a doc-only submodule, unneeded for the build.
-      - name: Fetch the Eigen/voro++/fsph submodules
-        run: git submodule update --init --depth=1 -- extern/Eigen extern/voro++ extern/fsph
-
-      # The extension compiles in Eigen (MPL2, plus BSD/LGPL components since
-      # EIGEN_MPL2_ONLY is never defined), voro++ (BSD-ish) and fsph (MIT) from their
-      # submodules, extern/bessel-library.hpp (MIT, vendored straight into the repo, licence
-      # only in its header comment) and oneTBB (Apache-2.0, see below); nanobind (BSD-3-Clause,
-      # a pip build dependency, not vendored) also vendors tsl::robin_map (MIT). Upstream's
-      # own wheel ships only its own LICENSE; the patch above widens pyproject.toml's
-      # license-files so these all get picked up too.
-      - name: Stage the vendored dependencies' licences
-        run: |
-          set -euo pipefail
-          cat extern/Eigen/COPYING.README extern/Eigen/COPYING.MPL2 extern/Eigen/COPYING.BSD extern/Eigen/COPYING.LGPL > LICENSE.eigen
-          cp extern/voro++/LICENSE LICENSE.voropp
-          cp extern/fsph/LICENSE LICENSE.fsph
-          curl -fsSL --retry 5 https://raw.githubusercontent.com/jodesarro/bessel-library/main/LICENSE -o LICENSE.bessel-library
-          curl -fsSL --retry 5 https://raw.githubusercontent.com/wjakob/nanobind/v3.1.0/LICENSE -o LICENSE.nanobind
-          curl -fsSL --retry 5 https://raw.githubusercontent.com/Tessil/robin-map/master/LICENSE -o LICENSE.robin-map
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/uxlfoundation/oneTBB/v${{ env.TBB_VERSION }}/LICENSE.txt" -o LICENSE.tbb
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: cp312-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's own before-build script (unmodified: it ships in the checked-out
-          # tree) builds oneTBB from source and installs it to the default CMake prefix,
-          # which freud/CMake/FindTBB.cmake's find_package_config_first() then picks up.
-          CIBW_BEFORE_BUILD: source .github/workflows/cibuildwheel-before-build.sh {package} linux
-          CIBW_ENVIRONMENT: >-
-            CMAKE_PREFIX_PATH=/project/tbb
-            LD_LIBRARY_PATH=/project/tbb/lib/intel64/gcc4.8:$LD_LIBRARY_PATH
-            CMAKE_ARGS=-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=True
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,matplotlib
-          # Upstream's own repair-wheel-command pipes auditwheel repair into a
-          # pipx-installed abi3audit; the riscv64 image carries no pipx (CLAUDE.md gotcha
-          # 217), and it is redundant besides, since cibuildwheel's own default
-          # audit-command already abi3audits every abi3-tagged wheel natively.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
-          # matplotlib (a CIBW_TEST_REQUIRES pin) transitively pulls in pillow/contourpy/
-          # kiwisolver; none publish a riscv64 wheel on PyPI newer than ours, and pillow's
-          # sdist build fails outright (no libjpeg headers in the manylinux image). Pin
-          # these to our registry's wheels for the test install too.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow
-          CIBW_TEST_REQUIRES: >-
-            pytest==9.1.1 numpy==2.5.2 scipy==1.18.1 gsd==5.0.1 matplotlib==3.11.1
-            sympy==1.14.0
-          CIBW_TEST_COMMAND: pytest {package}/tests -v --log-level=DEBUG
+          name: freud-analysis-${{ env.FREUD_ANALYSIS_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -156,15 +156,9 @@ jobs:
           assert licences == expected, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: freud-analysis-${{ env.FREUD_ANALYSIS_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish freud-analysis ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

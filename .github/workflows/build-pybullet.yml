@@ -53,52 +53,52 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pybullet ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pybullet"
+      version: "${{ matrix.version }}"
+      repository: "bulletphysics/bullet3"
+      ref: "6c888f4abd7b46f572587360cc214985f02e5c6b"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 1440
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # setup.py enables the numpy code paths from a plain `import numpy`,
+      # which a PEP 517 build-isolation overlay is invisible to, so numpy is
+      # preinstalled with isolation disabled (upstream's wheel.sh installs
+      # requirements.txt into the interpreter it then builds with).
+      # pybullet.c hands PyObject* to numpy's PyArrayObject* accessors, which
+      # GCC 14 rejects outright where upstream's older image only warned.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy CFLAGS=-Wno-error=incompatible-pointer-types"
+      cibw-before-build: "pip install setuptools wheel -r {package}/requirements.txt"
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-test-requires: "numpy"
+      # The unittests resolve `r2d2.urdf` & co through bullet's own relative
+      # `../../../data/` search path, so `data/` is staged beside them.
+      cibw-test-sources: "data examples/pybullet/unittests"
+      cibw-test-command: "cd examples/pybullet/unittests && python unittests.py && python userDataTest.py && python saveRestoreStateTest.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYBULLET_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout bullet3 for pybullet ${{ env.PYBULLET_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: bulletphysics/bullet3
-          ref: ${{ env.PYBULLET_REF }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py enables the numpy code paths from a plain `import numpy`,
-          # which a PEP 517 build-isolation overlay is invisible to, so numpy is
-          # preinstalled with isolation disabled (upstream's wheel.sh installs
-          # requirements.txt into the interpreter it then builds with).
-          # pybullet.c hands PyObject* to numpy's PyArrayObject* accessors, which
-          # GCC 14 rejects outright where upstream's older image only warned.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-            CFLAGS=-Wno-error=incompatible-pointer-types
-          CIBW_BEFORE_BUILD: pip install setuptools wheel -r {package}/requirements.txt
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_TEST_REQUIRES: numpy
-          # The unittests resolve `r2d2.urdf` & co through bullet's own relative
-          # `../../../data/` search path, so `data/` is staged beside them.
-          CIBW_TEST_SOURCES: data examples/pybullet/unittests
-          CIBW_TEST_COMMAND: >-
-            cd examples/pybullet/unittests &&
-            python unittests.py &&
-            python userDataTest.py &&
-            python saveRestoreStateTest.py
+          name: pybullet-${{ env.PYBULLET_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -109,16 +109,9 @@ jobs:
           assert exts == {"pybullet", "eglRenderer"}, exts
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pybullet-${{ env.PYBULLET_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pybullet ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

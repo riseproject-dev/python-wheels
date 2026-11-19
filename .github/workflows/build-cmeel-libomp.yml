@@ -48,53 +48,58 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cmeel-libomp ${{ matrix.version }} py3-none-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cmeel-libomp"
+      version: "${{ matrix.version }}"
+      repository: "cmake-wheel/cmeel-libomp"
+      ref: "v${{ matrix.version }}.c0"
+      artifact-tag: "py3-none-manylinux_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "true"
+      cibw-build: "cp312-manylinux_riscv64"
+      # LLVM's openmp runtime (confirmed against the real llvm-project
+      # llvmorg-21.1.8 source, openmp/ subdirectory) already recognizes
+      # riscv64 natively in its own architecture detection
+      # (LibompGetArchitecture.cmake keys off the standard __riscv /
+      # __riscv_xlen compiler macros, and config-ix.cmake lists riscv64
+      # as a known LIBOMP_ARCH) and its only x86-specific compiler flag
+      # (-msse2, LibompHandleFlags.cmake) is gated behind a real
+      # check_cxx_compiler_flag probe rather than an unconditional set,
+      # so riscv64 GCC simply fails that probe and never gets the flag
+      # -- unlike cmeel-gklib/cmeel-metis's unconditional -march=native,
+      # this needs no patch. Its own cmake_minimum_required (3.20.0) is
+      # already above cmeel[build]'s CMake >= 4 floor of 3.5, so no
+      # CMAKE_POLICY_VERSION_MINIMUM override either. Upstream's own
+      # release.yml already builds this identically on aarch64
+      # (ubuntu-24.04-arm) with no extra flags.
+      cibw-environment-linux: "CMEEL_LOG_LEVEL=DEBUG"
+      # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets
+      # itself.
+      cibw-repair-wheel-command: ''
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
     env:
       CMEEL_LIBOMP_VERSION: ${{ matrix.version }}
-
     steps:
-      # has-sitelib = false: the wheel holds no Python extension, so one
-      # py3-none wheel covers every interpreter.
-      - name: Checkout cmeel-libomp v${{ env.CMEEL_LIBOMP_VERSION }}.c0
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: cmake-wheel/cmeel-libomp
-          ref: v${{ env.CMEEL_LIBOMP_VERSION }}.c0
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # LLVM's openmp runtime (confirmed against the real llvm-project
-          # llvmorg-21.1.8 source, openmp/ subdirectory) already recognizes
-          # riscv64 natively in its own architecture detection
-          # (LibompGetArchitecture.cmake keys off the standard __riscv /
-          # __riscv_xlen compiler macros, and config-ix.cmake lists riscv64
-          # as a known LIBOMP_ARCH) and its only x86-specific compiler flag
-          # (-msse2, LibompHandleFlags.cmake) is gated behind a real
-          # check_cxx_compiler_flag probe rather than an unconditional set,
-          # so riscv64 GCC simply fails that probe and never gets the flag
-          # -- unlike cmeel-gklib/cmeel-metis's unconditional -march=native,
-          # this needs no patch. Its own cmake_minimum_required (3.20.0) is
-          # already above cmeel[build]'s CMake >= 4 floor of 3.5, so no
-          # CMAKE_POLICY_VERSION_MINIMUM override either. Upstream's own
-          # release.yml already builds this identically on aarch64
-          # (ubuntu-24.04-arm) with no extra flags.
-          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG
-          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets
-          # itself.
-          CIBW_REPAIR_WHEEL_COMMAND: ""
+          name: cmeel-libomp-${{ env.CMEEL_LIBOMP_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -124,15 +129,9 @@ jobs:
           print(lib)
           "
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cmeel-libomp-${{ env.CMEEL_LIBOMP_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish cmeel-libomp ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

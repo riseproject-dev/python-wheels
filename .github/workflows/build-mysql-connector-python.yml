@@ -49,69 +49,70 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mysql-connector-python ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "mysql-connector-python"
+      version: "${{ matrix.version }}"
+      repository: "mysql/mysql-connector-python"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v python-wheels/patches/mysql-connector-python/${{ matrix.version }}/*.patch
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "mysql-connector-python"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Oracle publishes no riscv64 MySQL C API build, so the extension links
+      # Rocky 10's libmysqlclient (auditwheel then vendors it into the wheel)
+      # instead of the static one Oracle's own wheels bundle.
+      cibw-before-all-linux: "dnf -y install mysql8.4-devel"
+      # Without MYSQL_CAPI setup.py silently drops the C extension; SKIP_VENDOR
+      # turns off bundling the auth plugins, which mysql8.4-devel does not ship.
+      # EXTRA_LINK_ARGS is needed because upstream only puts the MySQL library
+      # path on the link line when it finds a static libmysqlclient.a to copy.
+      cibw-environment-linux: "MYSQL_CAPI=/usr SKIP_VENDOR=1 EXTRA_LINK_ARGS=-L/usr/lib64/mysql"
+      # Clear them again for the test phase, or unittests.py's in-tree rebuild
+      # would shadow the wheel's extension with one it just compiled.
+      cibw-test-environment: "MYSQL_CAPI= SKIP_VENDOR= EXTRA_LINK_ARGS="
+      # unittests.py bootstraps its own server; the container's capability
+      # bounding set makes mysqld's cap_sys_nice file capability unexecutable.
+      cibw-before-test-linux: "dnf -y install mysql8.4-server mysql8.4 libcap && setcap -r /usr/libexec/mysqld"
+      cibw-test-requires: "setuptools wheel"
+      cibw-test-command: "cd {package} && python -c \"import _mysql_connector as m; assert 'site-packages' in m.__file__, m.__file__; print(m.__file__, m.MySQL().get_client_info())\" && python -c \"import importlib.metadata as md; n={p.name for p in md.files('mysql-connector-python') if '.dist-info/licenses/' in str(p)}; assert n == {'LICENSE.txt', 'LICENSE.zstd'}, n\" && python unittests.py --with-mysql=/usr --with-mysql-share=/usr/share/mysql --verbosity=1 --test-regex '^cext_'"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MYSQL_CONNECTOR_PYTHON_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout mysql-connector-python ${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: mysql/mysql-connector-python
-          ref: ${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: |
-          git apply -v python-wheels/patches/mysql-connector-python/${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: mysql-connector-python
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Oracle publishes no riscv64 MySQL C API build, so the extension links
-          # Rocky 10's libmysqlclient (auditwheel then vendors it into the wheel)
-          # instead of the static one Oracle's own wheels bundle.
-          CIBW_BEFORE_ALL_LINUX: dnf -y install mysql8.4-devel
-          # Without MYSQL_CAPI setup.py silently drops the C extension; SKIP_VENDOR
-          # turns off bundling the auth plugins, which mysql8.4-devel does not ship.
-          # EXTRA_LINK_ARGS is needed because upstream only puts the MySQL library
-          # path on the link line when it finds a static libmysqlclient.a to copy.
-          CIBW_ENVIRONMENT: MYSQL_CAPI=/usr SKIP_VENDOR=1 EXTRA_LINK_ARGS=-L/usr/lib64/mysql
-          # Clear them again for the test phase, or unittests.py's in-tree rebuild
-          # would shadow the wheel's extension with one it just compiled.
-          CIBW_TEST_ENVIRONMENT: MYSQL_CAPI= SKIP_VENDOR= EXTRA_LINK_ARGS=
-          # unittests.py bootstraps its own server; the container's capability
-          # bounding set makes mysqld's cap_sys_nice file capability unexecutable.
-          CIBW_BEFORE_TEST_LINUX: >-
-            dnf -y install mysql8.4-server mysql8.4 libcap &&
-            setcap -r /usr/libexec/mysqld
-          CIBW_TEST_REQUIRES: setuptools wheel
-          CIBW_TEST_COMMAND: >-
-            cd {package} &&
-            python -c "import _mysql_connector as m; assert 'site-packages' in m.__file__, m.__file__;
-            print(m.__file__, m.MySQL().get_client_info())" &&
-            python -c "import importlib.metadata as md;
-            n={p.name for p in md.files('mysql-connector-python') if '.dist-info/licenses/' in str(p)};
-            assert n == {'LICENSE.txt', 'LICENSE.zstd'}, n" &&
-            python unittests.py --with-mysql=/usr --with-mysql-share=/usr/share/mysql
-            --verbosity=1 --test-regex '^cext_'
+          name: mysql-connector-python-${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the C extension made it into the wheel
         run: |
@@ -123,12 +124,6 @@ jobs:
                          for n in names), f"no C extension in {whl}"
               print(whl, "ok")
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mysql-connector-python-${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
 
   gpl_sources:
     needs: [setup]
@@ -165,7 +160,7 @@ jobs:
 
   publish:
     name: Publish mysql-connector-python ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels, gpl_sources, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

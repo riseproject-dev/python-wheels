@@ -48,6 +48,57 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build connected-components-3d ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          - python: cp312
+            scipy: scipy
+            k: not test_connected_components_stack
+          - python: cp313
+            scipy: scipy
+            k: not test_connected_components_stack
+          - python: cp314
+            scipy: scipy
+            k: not test_connected_components_stack
+          - python: cp314t
+            scipy: ''
+            k: not test_connected_components_stack and not test_compare_scipy
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "connected-components-3d"
+      version: "${{ matrix.version }}"
+      repository: "seung-lab/connected-components-3d"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      cibw-build: "${{ matrix.python }}-manylinux_riscv64"
+      # numpy is a build-time requirement (headers, via pyproject.toml's
+      # build-system.requires) and, despite not being declared as a
+      # runtime dependency by name in pyproject.toml, an implicit one too
+      # (the compiled extension calls numpy's C API at import time; it is
+      # declared in install_requires in setup.py). Only our registry has
+      # it for riscv64; only-binary keeps a newer PyPI release from
+      # winning the resolution and then compiling from sdist.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      # fastremap has no riscv64 wheel on either index, so pip builds it
+      # from sdist; scipy has no cp314t wheel on any index/platform yet,
+      # so it and its tests are dropped on that leg only (gotcha 149).
+      cibw-test-requires: "pytest numpy fastremap ${{ matrix.scipy }}"
+      # automated_test.py sits next to the unbuilt cc3d/ source package;
+      # staging only the test file keeps that directory out of test_cwd
+      # so `import cc3d` resolves to the installed wheel (gotcha 25).
+      cibw-test-sources: "automated_test.py"
+      # crackle-codec (the optional "stack" extra's codec) has no riscv64
+      # wheel anywhere, so test_connected_components_stack is deselected
+      # on every leg rather than building its pybind11/google_crc32c
+      # dependency chain from source for one optional extra.
+      cibw-test-command: "python -m pytest -v automated_test.py -k \"${{ matrix.k }}\""
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
@@ -67,48 +118,14 @@ jobs:
           - python: cp314t
             scipy: ''
             k: not test_connected_components_stack and not test_compare_scipy
-
     env:
       CC3D_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout connected-components-3d ${{ env.CC3D_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: seung-lab/connected-components-3d
-          ref: ${{ env.CC3D_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a build-time requirement (headers, via pyproject.toml's
-          # build-system.requires) and, despite not being declared as a
-          # runtime dependency by name in pyproject.toml, an implicit one too
-          # (the compiled extension calls numpy's C API at import time; it is
-          # declared in install_requires in setup.py). Only our registry has
-          # it for riscv64; only-binary keeps a newer PyPI release from
-          # winning the resolution and then compiling from sdist.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # fastremap has no riscv64 wheel on either index, so pip builds it
-          # from sdist; scipy has no cp314t wheel on any index/platform yet,
-          # so it and its tests are dropped on that leg only (gotcha 149).
-          CIBW_TEST_REQUIRES: pytest numpy fastremap ${{ matrix.scipy }}
-          # automated_test.py sits next to the unbuilt cc3d/ source package;
-          # staging only the test file keeps that directory out of test_cwd
-          # so `import cc3d` resolves to the installed wheel (gotcha 25).
-          CIBW_TEST_SOURCES: automated_test.py
-          # crackle-codec (the optional "stack" extra's codec) has no riscv64
-          # wheel anywhere, so test_connected_components_stack is deselected
-          # on every leg rather than building its pybind11/google_crc32c
-          # dependency chain from source for one optional extra.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest -v automated_test.py -k "${{ matrix.k }}"
+          name: connected-components-3d-${{ env.CC3D_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -121,16 +138,9 @@ jobs:
           assert licences == {"AUTHORS", "COPYING", "COPYING.LESSER"}, licences
           EOF
 
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: connected-components-3d-${{ env.CC3D_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish connected-components-3d ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

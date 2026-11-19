@@ -51,46 +51,46 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build oracledb ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "oracledb"
+      version: "${{ matrix.version }}"
+      repository: "oracle/python-oracledb"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "true"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PYO_COMPILE_ARGS=-g0"
+      # Test phase only, so it can't starve the build backend (cython builds from sdist).
+      cibw-test-environment: "PIP_ONLY_BINARY=:all: PYO_TEST_MAIN_PASSWORD=unused"
+      cibw-test-requires: "pytest numpy pandas"
+      cibw-test-sources: "tests"
+      # Upstream's suite needs a live Oracle Database, which has no riscv64 build.
+      # These five modules pass without one; test_misc_1009 is the only test in
+      # them that opens a connection.
+      cibw-test-command: "python -m pytest -k \"not test_misc_1009\" tests/misc/test_1000_module.py tests/data_types/test_1200_types.py tests/misc/test_1300_connect_params.py tests/misc/test_1400_pool_params.py tests/misc/test_1500_tnsnames.py"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       ORACLEDB_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout python-oracledb v${{ env.ORACLEDB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: oracle/python-oracledb
-          ref: v${{ env.ORACLEDB_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PYO_COMPILE_ARGS=-g0
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Test phase only, so it can't starve the build backend (cython builds from sdist).
-          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all: PYO_TEST_MAIN_PASSWORD=unused'
-          CIBW_TEST_REQUIRES: pytest numpy pandas
-          CIBW_TEST_SOURCES: tests
-          # Upstream's suite needs a live Oracle Database, which has no riscv64 build.
-          # These five modules pass without one; test_misc_1009 is the only test in
-          # them that opens a connection.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest -k "not test_misc_1009"
-            tests/misc/test_1000_module.py tests/data_types/test_1200_types.py
-            tests/misc/test_1300_connect_params.py tests/misc/test_1400_pool_params.py
-            tests/misc/test_1500_tnsnames.py
+          name: oracledb-${{ env.ORACLEDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension modules made it into the wheel
         run: |
@@ -107,15 +107,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: oracledb-${{ env.ORACLEDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish oracledb ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -46,36 +46,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build asyncdb ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "asyncdb"
+      version: "${{ matrix.version }}"
+      repository: "${{ github.repository }}"
+      ref: "${{ github.sha }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: |-
+        export ASYNCDB_VERSION='${{ matrix.version }}'
+        set -euo pipefail
+        shopt -s dotglob
+        rm -rf ./*
+        git init -q .
+        git remote add origin https://github.com/phenobarbital/asyncdb
+        git fetch -q --depth=1 origin "$ASYNCDB_VERSION"
+        git checkout -q FETCH_HEAD
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-output-dir: "dist"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       ASYNCDB_VERSION: ${{ matrix.version }}
-
     steps:
-      # Upstream's tree carries a gitlink with no corresponding .gitmodules entry
-      # (libraries/python-driver), which makes actions/checkout's own
-      # persist-credentials cleanup (`git submodule foreach`) fail with "No url
-      # found for submodule path"; plain git sidesteps that internal routine.
-      - name: Checkout asyncdb ${{ env.ASYNCDB_VERSION }}
-        run: |
-          set -euo pipefail
-          shopt -s dotglob
-          rm -rf ./*
-          git init -q .
-          git remote add origin https://github.com/phenobarbital/asyncdb
-          git fetch -q --depth=1 origin "$ASYNCDB_VERSION"
-          git checkout -q FETCH_HEAD
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          output-dir: dist
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          name: asyncdb-${{ env.ASYNCDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: dist
 
       - name: Verify wheel tags and compiled Cython extension
         env:
@@ -104,15 +121,9 @@ jobs:
           assert found_cpython_tags == {os.environ["EXPECTED_CPYTHON_TAG"]}, found_cpython_tags
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: asyncdb-${{ env.ASYNCDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: dist/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish asyncdb ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

@@ -49,41 +49,48 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build moderngl ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "moderngl"
+      version: "${{ matrix.version }}"
+      repository: "moderngl/moderngl"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-environment-linux: "LIBGL_ALWAYS_SOFTWARE=1"
+      # Upstream's own pytest suite (tests/, via a standalone EGL context -
+      # see tests/conftest.py) needs numpy/scipy/PyOpenGL, which have no
+      # musllinux riscv64 wheel on either PyPI or our registry, so musllinux
+      # gets the lighter EGL-context smoke test instead of the full suite.
+      # test_local.py asserts the tests dir sits next to an editable install
+      # (upstream's own Containerfile runs `setup.py build_ext --inplace`
+      # first); it never holds for a wheel installed into its own venv.
+      cibw-test-requires: "${{ matrix.platform == 'manylinux' && 'pytest numpy scipy PyOpenGL' || '' }}"
+      cibw-test-command: "${{ matrix.platform == 'manylinux' && 'python -m pytest {project}/tests -v -k \"not test_local\"' || 'python3 -c ''from glcontext import egl; import moderngl; ctx = moderngl.create_context(standalone=True, context=egl.create_context(glversion=330, mode=\"standalone\")); print(ctx.info); ctx.release()''' }}"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       MODERNGL_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout moderngl ${{ env.MODERNGL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: moderngl/moderngl
-          ref: ${{ env.MODERNGL_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ LIBGL_ALWAYS_SOFTWARE=1
-          # Upstream's own pytest suite (tests/, via a standalone EGL context -
-          # see tests/conftest.py) needs numpy/scipy/PyOpenGL, which have no
-          # musllinux riscv64 wheel on either PyPI or our registry, so musllinux
-          # gets the lighter EGL-context smoke test instead of the full suite.
-          # test_local.py asserts the tests dir sits next to an editable install
-          # (upstream's own Containerfile runs `setup.py build_ext --inplace`
-          # first); it never holds for a wheel installed into its own venv.
-          CIBW_TEST_REQUIRES: ${{ matrix.platform == 'manylinux' && 'pytest numpy scipy PyOpenGL' || '' }}
-          CIBW_TEST_COMMAND: ${{ matrix.platform == 'manylinux' && 'python -m pytest {project}/tests -v -k "not test_local"' || 'python3 -c ''from glcontext import egl; import moderngl; ctx = moderngl.create_context(standalone=True, context=egl.create_context(glversion=330, mode="standalone")); print(ctx.info); ctx.release()''' }}
+          name: moderngl-${{ env.MODERNGL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the compiled extension made it into the wheel
         run: |
@@ -95,15 +102,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: moderngl-${{ env.MODERNGL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish moderngl ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

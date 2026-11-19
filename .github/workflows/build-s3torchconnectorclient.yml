@@ -50,96 +50,91 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build s3torchconnectorclient ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "s3torchconnectorclient"
+      version: "${{ matrix.version }}"
+      repository: "awslabs/s3-connector-for-pytorch"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply -v python-wheels/patches/s3torchconnectorclient/${{ matrix.version }}/*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        cat > collect-crt-licenses.sh <<'EOF'
+        #!/bin/bash
+        set -euo pipefail
+        project="${1:?usage: collect-crt-licenses.sh <project-dir>}"
+        repo_root="$(dirname "$project")"
+        cp "$repo_root/LICENSE" "$project/LICENSE"
+        cp "$repo_root/NOTICE" "$project/NOTICE"
+        cargo fetch --manifest-path "$project/Cargo.toml"
+        crt_sys_src="$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d -name 'mountpoint-s3-crt-sys-*' | head -1)"
+        for lib in aws-lc s2n-tls aws-c-common aws-c-cal aws-c-io aws-c-compression aws-c-http aws-c-sdkutils aws-c-auth aws-checksums aws-c-s3; do
+          lib_license="$(find "$crt_sys_src/crt/$lib" -maxdepth 1 -name 'LICENSE*' | head -1)"
+          cp "$lib_license" "$project/LICENSE.$lib"
+        done
+        EOF
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "s3torchconnectorclient"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # The image ships no Rust toolchain for the setuptools-rust/pyo3 extension; rustup
+      # provisions a native riscv64gc-unknown-linux-gnu one (gotcha 10). fuse/fuse-devel and
+      # clang/clang-devel (libclang for mountpoint-s3-crt-sys's bindgen) match upstream's own
+      # manylinux_2_28 before-all, minus its gcc-toolset, which this image's own gcc replaces.
+      cibw-before-all-linux: "dnf -y install fuse fuse-devel clang clang-devel && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-before-build: "bash collect-crt-licenses.sh {project}/s3torchconnectorclient"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Drops the four CI_*-prefixed integration/e2e commands from upstream's own
+      # test-command list: they need real AWS S3 buckets this CI has no credentials for.
+      # The client's own unit tests and the connector's own exercise the "mock" S3 client
+      # feature instead, so neither needs network access.
+      cibw-test-requires: "./s3torchconnector[test]"
+      # PyPI's newest Pillow (the client's own test extra) is sdist-only on riscv64, so take
+      # the registry's wheel. The container does not inherit the runner's CI variable, so set
+      # it to get Hypothesis' built-in ci profile (no per-example deadline) on slow runners.
+      cibw-test-environment: "PIP_ONLY_BINARY=pillow CI=true"
+      cibw-test-sources: "s3torchconnectorclient/python/tst s3torchconnector"
+      cibw-test-command: "pytest -v s3torchconnectorclient/python/tst/unit && pytest -v s3torchconnector/tst/unit --ignore s3torchconnector/tst/unit/lightning --ignore s3torchconnector/tst/unit/dcp"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       S3TORCHCONNECTORCLIENT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout s3-connector-for-pytorch v${{ env.S3TORCHCONNECTORCLIENT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: awslabs/s3-connector-for-pytorch
-          ref: v${{ env.S3TORCHCONNECTORCLIENT_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply -v python-wheels/patches/s3torchconnectorclient/${{ env.S3TORCHCONNECTORCLIENT_VERSION }}/*.patch
-
-      # THIRD-PARTY-LICENSES is generated by upstream's own ORT-based CI job
-      # (generate_third_party_licenses.yml) and is never checked into the repo, so a plain
-      # checkout has no equivalent to stage. The patch above points license-files at LICENSE.*
-      # instead; this collects the licence actually shipped by each statically-linked CRT
-      # library, read from the same mountpoint-s3-crt-sys crate source cargo fetches for the
-      # real build, rather than re-implementing upstream's ORT scan.
-      #
-      # Upstream's own pyproject.toml carries a `before-build` that copies the repo-root
-      # LICENSE/NOTICE into the s3torchconnectorclient package dir, since license-files
-      # resolves relative to pyproject.toml, not the repo root. Setting CIBW_BEFORE_BUILD
-      # below overrides that `before-build` entirely (cibuildwheel's env var wins over the
-      # config file), so this collector also stages LICENSE/NOTICE itself to make up for it.
-      - name: Write the CRT licence collector
-        run: |
-          cat > collect-crt-licenses.sh <<'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          project="${1:?usage: collect-crt-licenses.sh <project-dir>}"
-          repo_root="$(dirname "$project")"
-          cp "$repo_root/LICENSE" "$project/LICENSE"
-          cp "$repo_root/NOTICE" "$project/NOTICE"
-          cargo fetch --manifest-path "$project/Cargo.toml"
-          crt_sys_src="$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d -name 'mountpoint-s3-crt-sys-*' | head -1)"
-          for lib in aws-lc s2n-tls aws-c-common aws-c-cal aws-c-io aws-c-compression aws-c-http aws-c-sdkutils aws-c-auth aws-checksums aws-c-s3; do
-            lib_license="$(find "$crt_sys_src/crt/$lib" -maxdepth 1 -name 'LICENSE*' | head -1)"
-            cp "$lib_license" "$project/LICENSE.$lib"
-          done
-          EOF
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: s3torchconnectorclient
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # The image ships no Rust toolchain for the setuptools-rust/pyo3 extension; rustup
-          # provisions a native riscv64gc-unknown-linux-gnu one (gotcha 10). fuse/fuse-devel and
-          # clang/clang-devel (libclang for mountpoint-s3-crt-sys's bindgen) match upstream's own
-          # manylinux_2_28 before-all, minus its gcc-toolset, which this image's own gcc replaces.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install fuse fuse-devel clang clang-devel &&
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_BEFORE_BUILD: bash collect-crt-licenses.sh {project}/s3torchconnectorclient
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Drops the four CI_*-prefixed integration/e2e commands from upstream's own
-          # test-command list: they need real AWS S3 buckets this CI has no credentials for.
-          # The client's own unit tests and the connector's own exercise the "mock" S3 client
-          # feature instead, so neither needs network access.
-          CIBW_TEST_REQUIRES: ./s3torchconnector[test]
-          # PyPI's newest Pillow (the client's own test extra) is sdist-only on riscv64, so take
-          # the registry's wheel. The container does not inherit the runner's CI variable, so set
-          # it to get Hypothesis' built-in ci profile (no per-example deadline) on slow runners.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_ONLY_BINARY=pillow
-            CI=true
-          CIBW_TEST_SOURCES: s3torchconnectorclient/python/tst s3torchconnector
-          CIBW_TEST_COMMAND: >-
-            pytest -v s3torchconnectorclient/python/tst/unit &&
-            pytest -v s3torchconnector/tst/unit --ignore s3torchconnector/tst/unit/lightning --ignore s3torchconnector/tst/unit/dcp
+          name: s3torchconnectorclient-${{ env.S3TORCHCONNECTORCLIENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension and the vendored licences made it into the wheel
         run: |
@@ -160,15 +155,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: s3torchconnectorclient-${{ env.S3TORCHCONNECTORCLIENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish s3torchconnectorclient ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

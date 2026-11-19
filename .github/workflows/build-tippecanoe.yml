@@ -50,6 +50,48 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build tippecanoe ${{ matrix.version }} py2.py3-none-${{ matrix.libc }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+        include:
+          # The manylinux GCC links non-PIE at riscv64's 0x10000 (= mmap_min_addr); the segment
+          # auditwheel's patchelf prepends for the RPATH lands below it and the CLIs die at exec
+          # (gotcha 595). Alpine's GCC links PIE by default, so musllinux is unaffected.
+          - libc: manylinux
+            ldflags: -Wl,-Ttext-segment=0x200000
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tippecanoe"
+      version: "${{ matrix.version }}"
+      repository: "nightlark/tippecanoe-pypi"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "py2.py3-none-${{ matrix.libc }}_riscv64"
+      checkout-fetch-depth: 0
+      # wheel.py-api = "py2.py3", so one build serves every interpreter.
+      cibw-build: "cp312-${{ matrix.libc }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # felt/tippecanoe's Makefile links sqlite3 and zlib; the image carries zlib
+      # already, so only sqlite needs installing. felt/tippecanoe's own LICENSE.md
+      # covers the CLI this wheel bundles; upstream's own wheels ship only this
+      # repo's LICENSE/NOTICE and never add it, so pull it in ourselves (gotcha 44:
+      # a LICEN[CS]E*-named file at the root needs no packaging change to be
+      # picked up).
+      cibw-before-all-linux: |-
+        if command -v dnf > /dev/null; then
+        dnf install -y sqlite sqlite-devel
+        elif command -v apk > /dev/null; then
+        apk add sqlite-dev
+        fi
+        curl -sL https://raw.githubusercontent.com/felt/tippecanoe/${{ matrix.version }}/LICENSE.md -o {project}/LICENSE.felt-tippecanoe
+      cibw-environment-linux: "LDFLAGS=\"${{ matrix.ldflags }}\""
+      cibw-test-command: "python -c \"import importlib.metadata as m; f = sorted(p.name for p in m.files('tippecanoe') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.felt-tippecanoe', 'NOTICE'], f\" && tippecanoe --version"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
@@ -63,47 +105,14 @@ jobs:
           # (gotcha 595). Alpine's GCC links PIE by default, so musllinux is unaffected.
           - libc: manylinux
             ldflags: -Wl,-Ttext-segment=0x200000
-
     env:
       TIPPECANOE_VERSION: ${{ matrix.version }}
-
     steps:
-      # This repo (not felt/tippecanoe, which has no Python packaging) is upstream for
-      # the `tippecanoe` PyPI distribution; its CMakeLists.txt downloads and `make`s the
-      # felt/tippecanoe CLI (source, not pre-built) at this same tag during the build.
-      - name: Checkout tippecanoe-pypi ${{ env.TIPPECANOE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: nightlark/tippecanoe-pypi
-          ref: ${{ env.TIPPECANOE_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # wheel.py-api = "py2.py3", so one build serves every interpreter.
-          only: cp312-${{ matrix.libc }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # felt/tippecanoe's Makefile links sqlite3 and zlib; the image carries zlib
-          # already, so only sqlite needs installing. felt/tippecanoe's own LICENSE.md
-          # covers the CLI this wheel bundles; upstream's own wheels ship only this
-          # repo's LICENSE/NOTICE and never add it, so pull it in ourselves (gotcha 44:
-          # a LICEN[CS]E*-named file at the root needs no packaging change to be
-          # picked up).
-          CIBW_BEFORE_ALL_LINUX: |
-            if command -v dnf > /dev/null; then
-              dnf install -y sqlite sqlite-devel
-            elif command -v apk > /dev/null; then
-              apk add sqlite-dev
-            fi
-            curl -sL https://raw.githubusercontent.com/felt/tippecanoe/${{ env.TIPPECANOE_VERSION }}/LICENSE.md -o {project}/LICENSE.felt-tippecanoe
-          CIBW_ENVIRONMENT_LINUX: LDFLAGS="${{ matrix.ldflags }}"
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('tippecanoe') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.felt-tippecanoe', 'NOTICE'], f"
-            && tippecanoe --version
+          name: tippecanoe-${{ env.TIPPECANOE_VERSION }}-py2.py3-none-${{ matrix.libc }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel carries the binaries and both licences
         run: |
@@ -116,15 +125,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tippecanoe-${{ env.TIPPECANOE_VERSION }}-py2.py3-none-${{ matrix.libc }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish tippecanoe ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

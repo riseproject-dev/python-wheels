@@ -49,60 +49,52 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pytype ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pytype"
+      version: "${{ matrix.version }}"
+      repository: "google/pytype"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 300
+      checkout-submodules: "recursive"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # libcst and msgspec have no riscv64 wheels on public PyPI.
+      # Without this pip takes the newest libcst, whose riscv64 form is an
+      # sdist needing Rust, over our registry's wheel for an older release.
+      cibw-test-environment: "PIP_ONLY_BINARY=:all:"
+      cibw-test-requires: "pytest pytest-xdist"
+      # The wheel carries pytype's unit tests but not the pytype.tests
+      # helpers a third of them import, so those are copied in beside it.
+      cibw-test-sources: "pytype/tests/__init__.py pytype/tests/test_base.py pytype/tests/test_utils.py"
+      # Deselected: the helpers themselves; main_test.py and test_error_doc,
+      # which run files that exist only in a git checkout; the two typeshed
+      # tests reading typeshed/tests/, excluded from the wheel; test_die,
+      # which needs a mkdir to fail and the container runs as root; and the
+      # two serialize_ast tests, which fail the same way on an x86 checkout.
+      cibw-test-command: "cp -r pytype/tests \"$(python -c 'import pytype, os; print(os.path.dirname(pytype.__file__))')\" && printf 'def f(x: int) -> str:\\n return str(x)\\n' > ok.py && pytype ok.py && python -m pytest --pyargs pytype -n auto --deselect tests/test_base.py --deselect tests/test_utils.py --deselect main_test.py --deselect errors/errors_test.py::ErrorDocTest::test_error_doc --deselect imports/typeshed_test.py::TestTypeshedLoading::test_blacklisted_modules --deselect imports/typeshed_test.py::TestTypeshedLoading::test_read_blacklist --deselect tools/tool_utils_test.py::TestMakeDirsOrDie::test_die --deselect pytd/serialize_ast_test.py::SerializeAstTest::test_node_index_visitor_usage --deselect pytd/serialize_ast_test.py::SerializeAstTest::test_unrestorable_child"
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       PYTYPE_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout pytype ${{ env.PYTYPE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: google/pytype
-          ref: ${{ env.PYTYPE_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # libcst and msgspec have no riscv64 wheels on public PyPI.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Without this pip takes the newest libcst, whose riscv64 form is an
-          # sdist needing Rust, over our registry's wheel for an older release.
-          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
-          CIBW_TEST_REQUIRES: pytest pytest-xdist
-          # The wheel carries pytype's unit tests but not the pytype.tests
-          # helpers a third of them import, so those are copied in beside it.
-          CIBW_TEST_SOURCES: pytype/tests/__init__.py pytype/tests/test_base.py pytype/tests/test_utils.py
-          # Deselected: the helpers themselves; main_test.py and test_error_doc,
-          # which run files that exist only in a git checkout; the two typeshed
-          # tests reading typeshed/tests/, excluded from the wheel; test_die,
-          # which needs a mkdir to fail and the container runs as root; and the
-          # two serialize_ast tests, which fail the same way on an x86 checkout.
-          CIBW_TEST_COMMAND: >-
-            cp -r pytype/tests "$(python -c 'import pytype, os; print(os.path.dirname(pytype.__file__))')"
-            && printf 'def f(x: int) -> str:\n  return str(x)\n' > ok.py
-            && pytype ok.py
-            && python -m pytest --pyargs pytype -n auto
-            --deselect tests/test_base.py
-            --deselect tests/test_utils.py
-            --deselect main_test.py
-            --deselect errors/errors_test.py::ErrorDocTest::test_error_doc
-            --deselect imports/typeshed_test.py::TestTypeshedLoading::test_blacklisted_modules
-            --deselect imports/typeshed_test.py::TestTypeshedLoading::test_read_blacklist
-            --deselect tools/tool_utils_test.py::TestMakeDirsOrDie::test_die
-            --deselect pytd/serialize_ast_test.py::SerializeAstTest::test_node_index_visitor_usage
-            --deselect pytd/serialize_ast_test.py::SerializeAstTest::test_unrestorable_child
+          name: pytype-${{ env.PYTYPE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the extension module made it into the wheel
         run: |
@@ -115,15 +107,9 @@ jobs:
               print(whl, "ok")
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pytype-${{ env.PYTYPE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish pytype ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

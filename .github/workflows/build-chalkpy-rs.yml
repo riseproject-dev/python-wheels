@@ -52,190 +52,210 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build chalkpy-rs ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "chalkpy-rs"
+      version: "${{ matrix.version }}"
+      repository: "${{ github.repository }}"
+      ref: "${{ github.sha }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 300
+      pre-build: |-
+        export CHALKPY_RS_VERSION='${{ matrix.version }}'
+        url="$(curl -sSfL "https://pypi.org/pypi/chalkpy-rs/${CHALKPY_RS_VERSION}/json" \
+          | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+        curl -sSfL -o sdist.tar.gz "$url"
+        # Extracted rather than passed to cibuildwheel as a tarball: for a
+        # tarball package-dir cibuildwheel chdirs into its own extraction temp
+        # dir, and CIBW_TEST_SOURCES resolves against that cwd, so the staged
+        # tests below would be invisible.
+        tar xzf sdist.tar.gz
+        test -f "chalkpy_rs-${CHALKPY_RS_VERSION}/pyproject.toml"
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+
+        mkdir -p tests
+        cat > tests/test_chalk_rs.py <<'PYTEST'
+        """Smoke tests for the riscv64 chalkpy-rs wheel.
+
+        Upstream ships no Python test suite, so these exercise the compiled PyO3
+        extension end to end: the duration/ISO-8601 helpers, the naming helpers and
+        the ruff-backed Python AST indexer that is the bulk of the extension.
+        """
+
+        import datetime
+        import textwrap
+
+        import pytest
+
+        import chalk_rs
+
+        FEATURES_SOURCE = textwrap.dedent(
+            '''
+            from chalk.features import features, feature
+            from chalk import online
+
+
+            @features
+            class User:
+                id: str
+                email: str = feature(description="primary email", owner="team@example.com", tags=["pii"])
+                age: int
+
+
+            @online
+            def get_age(uid: User.id) -> User.age:
+                return 42
+            '''
+        ).lstrip()
+
+
+        @pytest.fixture
+        def project(tmp_path):
+            path = tmp_path / "features.py"
+            path.write_text(FEATURES_SOURCE)
+            return str(tmp_path), [str(path)]
+
+
+        def test_extension_module_is_compiled():
+            assert chalk_rs.__file__.endswith(".so"), chalk_rs.__file__
+
+
+        def test_parse_duration():
+            assert chalk_rs.parse_duration_ms("1h") == 3_600_000
+            assert chalk_rs.parse_duration_ms("1h30m") == 5_400_000
+            assert chalk_rs.parse_duration_s("1d") == 86_400
+            with pytest.raises(ValueError):
+                chalk_rs.parse_duration_s("not a duration")
+
+
+        def test_seconds_to_duration_string():
+            assert chalk_rs.seconds_to_duration_string(3661.0) == "1h1m1s"
+            assert chalk_rs.seconds_to_duration_string(90.0) == "1m30s"
+
+
+        def test_parse_iso_date_time():
+            assert chalk_rs.parse_iso_date("2026-09-21") == datetime.date(2026, 9, 21)
+            assert chalk_rs.parse_iso_time("13:45:06") == datetime.time(13, 45, 6)
+            assert chalk_rs.parse_datetime("2026-09-21T13:45:06") == datetime.datetime(2026, 9, 21, 13, 45, 6)
+            aware = chalk_rs.parse_datetime("2026-09-21T13:45:06+00:00")
+            assert aware.utcoffset() == datetime.timedelta(0)
+            with pytest.raises(ValueError):
+                chalk_rs.parse_iso_date("not a date")
+
+
+        def test_iso_duration_round_trip():
+            delta = datetime.timedelta(days=1, hours=2, minutes=3, seconds=4)
+            assert chalk_rs.parse_iso_duration("P1DT2H3M4S") == delta
+            assert chalk_rs.duration_isoformat(delta) == "P1DT2H3M4S"
+            with pytest.raises(TypeError):
+                chalk_rs.duration_isoformat(123)
+
+
+        def test_timezone_from_name():
+            assert chalk_rs.timezone_from_name("UTC") is not None
+            assert chalk_rs.timezone_from_name("Not/AZone") is None
+            assert datetime.datetime(
+                2026, 9, 21, tzinfo=chalk_rs.timezone_from_name("UTC")
+            ).utcoffset() == datetime.timedelta(0)
+
+
+        def test_naming_helpers():
+            assert chalk_rs.to_snake_case("FooBarBaz") == "foo_bar_baz"
+            assert chalk_rs.to_snake_case("HTTPResponse") == "http_response"
+            assert chalk_rs.build_namespaced_name("user", "email") == "user::email"
+            assert chalk_rs.build_namespaced_name(None, "email") == "email"
+
+
+        def test_file_system_and_parser_cache(project):
+            root, files = project
+            filesystem = chalk_rs.StdAstFileSystem(files)
+            assert filesystem.all_files() == files
+            assert filesystem.read_to_string(files[0]) == FEATURES_SOURCE
+
+            cache = chalk_rs.AstFileParserCache(files, root)
+            path, source, imports = cache.get_parsed_file(files[0])
+            assert path == files[0]
+            assert source == FEATURES_SOURCE
+            assert imports["chalk.features"]["feature"] == ["feature"]
+            assert imports["chalk"]["online"] == ["online"]
+
+
+        def test_feature_class_ast(project):
+            root, files = project
+            index = chalk_rs.AstProjectIndex(files, root)
+            index.nonblocking_start_index()
+
+            feature_class = index.feature_class_ast_in_file(files[0], "User")
+            assert feature_class is not None
+            assert feature_class.class_name == "User"
+            assert feature_class.namespace == "user"
+            assert feature_class.module == "features"
+            assert sorted(feature_class.fields) == ["age", "email", "id"]
+
+            email = feature_class.fields["email"]
+            assert email.field_name == "email"
+            assert sorted(email.kwarg_names) == ["description", "owner", "tags"]
+            line, start, end_line, end = email.field_name_location
+            assert line == end_line
+            assert FEATURES_SOURCE.splitlines()[line][start:end] == "email"
+
+
+        def test_resolver_ast(project):
+            root, files = project
+            index = chalk_rs.AstProjectIndex(files, root)
+            resolver = index.resolver_ast_in_file(files[0], "get_age")
+            assert resolver is not None
+            assert resolver.resolver_name == "get_age"
+            assert resolver.module == "features"
+            assert resolver.args_in_order == ["uid"]
+            assert resolver.return_annotation is not None
+            assert resolver.missing_return_annotation is None
+            assert index.resolver_ast_in_file(files[0], "does_not_exist") is None
+        PYTEST
+
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-package-dir: "chalkpy_rs-${{ matrix.version }}"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl host toolchain.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # No [tool.cibuildwheel] table upstream, so the Rust toolchain
+      # setuptools-rust needs is installed in-container here.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -m pytest -v tests"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       CHALKPY_RS_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Fetch chalkpy-rs ${{ env.CHALKPY_RS_VERSION }} sdist
-        run: |
-          url="$(curl -sSfL "https://pypi.org/pypi/chalkpy-rs/${CHALKPY_RS_VERSION}/json" \
-            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
-          curl -sSfL -o sdist.tar.gz "$url"
-          # Extracted rather than passed to cibuildwheel as a tarball: for a
-          # tarball package-dir cibuildwheel chdirs into its own extraction temp
-          # dir, and CIBW_TEST_SOURCES resolves against that cwd, so the staged
-          # tests below would be invisible.
-          tar xzf sdist.tar.gz
-          test -f "chalkpy_rs-${CHALKPY_RS_VERSION}/pyproject.toml"
-
-      - name: Stage smoke tests
-        run: |
-          mkdir -p tests
-          cat > tests/test_chalk_rs.py <<'PYTEST'
-          """Smoke tests for the riscv64 chalkpy-rs wheel.
-
-          Upstream ships no Python test suite, so these exercise the compiled PyO3
-          extension end to end: the duration/ISO-8601 helpers, the naming helpers and
-          the ruff-backed Python AST indexer that is the bulk of the extension.
-          """
-
-          import datetime
-          import textwrap
-
-          import pytest
-
-          import chalk_rs
-
-          FEATURES_SOURCE = textwrap.dedent(
-              '''
-              from chalk.features import features, feature
-              from chalk import online
-
-
-              @features
-              class User:
-                  id: str
-                  email: str = feature(description="primary email", owner="team@example.com", tags=["pii"])
-                  age: int
-
-
-              @online
-              def get_age(uid: User.id) -> User.age:
-                  return 42
-              '''
-          ).lstrip()
-
-
-          @pytest.fixture
-          def project(tmp_path):
-              path = tmp_path / "features.py"
-              path.write_text(FEATURES_SOURCE)
-              return str(tmp_path), [str(path)]
-
-
-          def test_extension_module_is_compiled():
-              assert chalk_rs.__file__.endswith(".so"), chalk_rs.__file__
-
-
-          def test_parse_duration():
-              assert chalk_rs.parse_duration_ms("1h") == 3_600_000
-              assert chalk_rs.parse_duration_ms("1h30m") == 5_400_000
-              assert chalk_rs.parse_duration_s("1d") == 86_400
-              with pytest.raises(ValueError):
-                  chalk_rs.parse_duration_s("not a duration")
-
-
-          def test_seconds_to_duration_string():
-              assert chalk_rs.seconds_to_duration_string(3661.0) == "1h1m1s"
-              assert chalk_rs.seconds_to_duration_string(90.0) == "1m30s"
-
-
-          def test_parse_iso_date_time():
-              assert chalk_rs.parse_iso_date("2026-09-21") == datetime.date(2026, 9, 21)
-              assert chalk_rs.parse_iso_time("13:45:06") == datetime.time(13, 45, 6)
-              assert chalk_rs.parse_datetime("2026-09-21T13:45:06") == datetime.datetime(2026, 9, 21, 13, 45, 6)
-              aware = chalk_rs.parse_datetime("2026-09-21T13:45:06+00:00")
-              assert aware.utcoffset() == datetime.timedelta(0)
-              with pytest.raises(ValueError):
-                  chalk_rs.parse_iso_date("not a date")
-
-
-          def test_iso_duration_round_trip():
-              delta = datetime.timedelta(days=1, hours=2, minutes=3, seconds=4)
-              assert chalk_rs.parse_iso_duration("P1DT2H3M4S") == delta
-              assert chalk_rs.duration_isoformat(delta) == "P1DT2H3M4S"
-              with pytest.raises(TypeError):
-                  chalk_rs.duration_isoformat(123)
-
-
-          def test_timezone_from_name():
-              assert chalk_rs.timezone_from_name("UTC") is not None
-              assert chalk_rs.timezone_from_name("Not/AZone") is None
-              assert datetime.datetime(
-                  2026, 9, 21, tzinfo=chalk_rs.timezone_from_name("UTC")
-              ).utcoffset() == datetime.timedelta(0)
-
-
-          def test_naming_helpers():
-              assert chalk_rs.to_snake_case("FooBarBaz") == "foo_bar_baz"
-              assert chalk_rs.to_snake_case("HTTPResponse") == "http_response"
-              assert chalk_rs.build_namespaced_name("user", "email") == "user::email"
-              assert chalk_rs.build_namespaced_name(None, "email") == "email"
-
-
-          def test_file_system_and_parser_cache(project):
-              root, files = project
-              filesystem = chalk_rs.StdAstFileSystem(files)
-              assert filesystem.all_files() == files
-              assert filesystem.read_to_string(files[0]) == FEATURES_SOURCE
-
-              cache = chalk_rs.AstFileParserCache(files, root)
-              path, source, imports = cache.get_parsed_file(files[0])
-              assert path == files[0]
-              assert source == FEATURES_SOURCE
-              assert imports["chalk.features"]["feature"] == ["feature"]
-              assert imports["chalk"]["online"] == ["online"]
-
-
-          def test_feature_class_ast(project):
-              root, files = project
-              index = chalk_rs.AstProjectIndex(files, root)
-              index.nonblocking_start_index()
-
-              feature_class = index.feature_class_ast_in_file(files[0], "User")
-              assert feature_class is not None
-              assert feature_class.class_name == "User"
-              assert feature_class.namespace == "user"
-              assert feature_class.module == "features"
-              assert sorted(feature_class.fields) == ["age", "email", "id"]
-
-              email = feature_class.fields["email"]
-              assert email.field_name == "email"
-              assert sorted(email.kwarg_names) == ["description", "owner", "tags"]
-              line, start, end_line, end = email.field_name_location
-              assert line == end_line
-              assert FEATURES_SOURCE.splitlines()[line][start:end] == "email"
-
-
-          def test_resolver_ast(project):
-              root, files = project
-              index = chalk_rs.AstProjectIndex(files, root)
-              resolver = index.resolver_ast_in_file(files[0], "get_age")
-              assert resolver is not None
-              assert resolver.resolver_name == "get_age"
-              assert resolver.module == "features"
-              assert resolver.args_in_order == ["uid"]
-              assert resolver.return_annotation is not None
-              assert resolver.missing_return_annotation is None
-              assert index.resolver_ast_in_file(files[0], "does_not_exist") is None
-          PYTEST
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          output-dir: wheelhouse/
-          package-dir: chalkpy_rs-${{ env.CHALKPY_RS_VERSION }}
-          # musllinux is dropped: rustup.rs ships no riscv64 musl host toolchain.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # No [tool.cibuildwheel] table upstream, so the Rust toolchain
-          # setuptools-rust needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: python -m pytest -v tests
+          name: chalkpy-rs-${{ env.CHALKPY_RS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check the wheel ships the compiled extension
         run: |
@@ -247,15 +267,9 @@ jobs:
           print("extension:", sos[0])
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: chalkpy-rs-${{ env.CHALKPY_RS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish chalkpy-rs ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

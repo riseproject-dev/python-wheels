@@ -51,49 +51,56 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build drjit ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "drjit"
+      version: "${{ matrix.version }}"
+      repository: "mitsuba-renderer/drjit"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
+      checkout-submodules: "recursive"
+      pre-build: |-
+        rm -rf "python-wheels"
+        git init -q "python-wheels"
+        git -C "python-wheels" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        git -C "python-wheels" fetch -q --no-tags --depth=1 origin "${{ github.sha }}"
+        git -C "python-wheels" checkout -q --detach FETCH_HEAD
+
+        git apply python-wheels/patches/drjit/${{ matrix.version }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # nanothread/drjit-core/drjit each set their own *_NATIVE_FLAGS cache
+      # var to -march=haswell for a scikit-build/non-aarch64 build; riscv64
+      # GCC rejects it outright ("ISA string must begin with rv32 or rv64").
+      cibw-environment-linux: "SKBUILD_CMAKE_ARGS='-DDRJIT_NATIVE_FLAGS=;-DDRJIT_CORE_NATIVE_FLAGS=;-DNANOTHREAD_NATIVE_FLAGS='"
+
+  verify_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
     env:
       DRJIT_VERSION: ${{ matrix.version }}
-
     steps:
-      - name: Checkout drjit v${{ env.DRJIT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: mitsuba-renderer/drjit
-          ref: v${{ env.DRJIT_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      # DRJIT_ENABLE_LLVM/DRJIT_ENABLE_CUDA both resolve their backend by
-      # dlopen()-ing libLLVM.so/libcuda.so at runtime (DRJIT_DYNAMIC_LLVM,
-      # DRJIT_DYNAMIC_CUDA), so the build itself needs neither an LLVM install
-      # nor the CUDA toolkit; ext/drjit-core/include/drjit-core/intrin.h and
-      # src/lock.h just assume every non-aarch64 target is x86.
-      - name: Patch drjit source
-        run: git apply python-wheels/patches/drjit/${{ env.DRJIT_VERSION }}/00*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # nanothread/drjit-core/drjit each set their own *_NATIVE_FLAGS cache
-          # var to -march=haswell for a scikit-build/non-aarch64 build; riscv64
-          # GCC rejects it outright ("ISA string must begin with rv32 or rv64").
-          CIBW_ENVIRONMENT: >-
-            SKBUILD_CMAKE_ARGS='-DDRJIT_NATIVE_FLAGS=;-DDRJIT_CORE_NATIVE_FLAGS=;-DNANOTHREAD_NATIVE_FLAGS='
+          name: drjit-${{ env.DRJIT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse
 
       - name: Check wheel contents
         run: |
@@ -112,15 +119,9 @@ jobs:
           }, licences
           EOF
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: drjit-${{ env.DRJIT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
-
   publish:
     name: Publish drjit ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, verify_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
