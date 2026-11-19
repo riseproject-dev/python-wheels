@@ -252,7 +252,7 @@ class TestScopeAndProvision(unittest.TestCase):
         bad = self.apply(r, "/upstreaming provision revision=2", provisioning={"error": "no riscv64 branch"})
         self.assertFalse(bad.accepted)
         self.assertIn("riscv64", bad.reason)
-        prov = {"fork": "riseproject-upstreaming/proj", "fork_id": 9, "head_sha": SHA_A, "upstream_id": 1,
+        prov = {"workflow_verified": True, "fork": "riseproject-upstreaming/proj", "fork_id": 9, "head_sha": SHA_A, "upstream_id": 1,
                 "base_ref": "main", "base_sha": SHA_A}
         out = self.apply(r, "/upstreaming provision revision=2", provisioning=prov)
         self.assertTrue(out.accepted, out.reason)

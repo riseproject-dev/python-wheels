@@ -330,6 +330,8 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
             return _reject(record, f"provision needs phase provisioning, not {phase}")
         if not provisioning or provisioning.get("error"):
             return _reject(record, (provisioning or {}).get("error") or "fork not verified")
+        if provisioning.get("workflow_verified") is not True:
+            return _reject(record, "fork provisioning must complete through the trusted upstreaming workflow; a bare existing fork is not sufficient")
         rec["fork"] = {"repository_id": provisioning["fork_id"], "name": provisioning["fork"],
                        "head_ref": DEV_REF, "head_sha": provisioning["head_sha"], "pr_number": None}
         rec["upstream"] = dict(rec["upstream"], repository_id=provisioning["upstream_id"],

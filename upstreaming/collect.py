@@ -138,6 +138,40 @@ def tracking_issues(api: Api, contributions: Iterable[dict], intake_issues: list
     return issues
 
 
+def upstream_snapshots(api: Api, contributions: Iterable[dict], issues: list[dict], policy: dict) -> dict[str, dict]:
+    """Verify source IDs and initial immutable bases before task admission.
+    Errors are data: urgent commands must still run when an upstream is absent."""
+    from . import intake, lifecycle
+    contributions = list(contributions)
+    parked = {c["upstream"]["full_name"] for c in contributions if c["phase"] == "parked"}
+    refs = {c["upstream"]["full_name"]: c["upstream"].get("base_ref") for c in contributions
+            if c["phase"] not in lifecycle.TERMINAL | {"parked"}}
+    known = {c["tracking_issue"]["id"] for c in contributions}
+    for issue in issues:
+        if issue["id"] in known:
+            continue
+        try:
+            req = intake.parse_request(issue, policy)
+        except intake.IntakeError:
+            continue
+        if req.upstream not in parked:
+            refs.setdefault(req.upstream, req.target_branch)
+    snapshots = {}
+    for name, ref in refs.items():
+        try:
+            repo = repository(api, name)
+            if repo["full_name"].lower() != name.lower():
+                raise CollectError("upstream repository name changed")
+            base_ref = ref or repo["default_branch"]
+            base = branch_head(api, name, base_ref)
+            if base is None:
+                raise CollectError("upstream base branch missing")
+            snapshots[name] = {"repository_id": repo["id"], "base_ref": base_ref, "base_sha": base["head"]}
+        except CollectError as e:
+            snapshots[name] = {"error": str(e)}
+    return snapshots
+
+
 def label_acceptances(api: Api, issues: Iterable[dict], label: str, authority: Iterable[int]) -> dict[int, int]:
     """issue id -> the authorized actor who added ``label`` (from the issue's
     events). Adding the intake label is how a RISE owner accepts a request
@@ -247,7 +281,8 @@ def repository(api: Api, full_name: str) -> dict:
     r = api.get(f"/repos/{full_name}")
     return {"id": r["id"], "full_name": r["full_name"], "default_branch": r["default_branch"],
             "fork": r.get("fork", False), "archived": r.get("archived", False),
-            "parent": (r.get("parent") or {}).get("full_name")}
+            "parent": (r.get("parent") or {}).get("full_name"),
+            "parent_id": (r.get("parent") or {}).get("id")}
 
 
 def branch_head(api: Api, full_name: str, ref: str) -> dict | None:

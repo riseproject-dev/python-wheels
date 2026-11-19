@@ -133,6 +133,8 @@ def cmd_observe(args) -> int:
     res = controller.tick(contributions=contributions, operations=operations, consumed=consumed,
                           projects=projects, policy=dict(policy, read_only=True),
                           inputs=controller.Inputs(now=now, issues=issues, comments=comments, pressure=pressure,
+                                                   upstream_snapshots={} if args.offline else collect.upstream_snapshots(
+                                                       api, contributions.values(), issues, policy),
                                                    tracking_issues={} if args.offline else collect.tracking_issues(
                                                        api, contributions.values(), issues),
                                                    **dict(zip(("users", "provisioning"),
@@ -189,6 +191,8 @@ def cmd_plan(args) -> int:
             continue
         if len(nodes) >= policy["concurrency"]["coding_workers"]:
             break
+        if not rec["upstream"].get("repository_id") or not rec["upstream"].get("base_sha"):
+            raise ValueError("requested task lacks verified upstream identity/base; request a fresh verified revision")
         if not (rec["active_work"].get("tracking_issue") or {}).get("url"):
             raise ValueError("requested task lacks a frozen tracking-issue description; request a fresh revision")
         ctr = (contracts.get(rec.get("target_contract_id") or "") or {}).get("data") or {}
@@ -254,10 +258,18 @@ def cmd_reconcile(args) -> int:
                 except json.JSONDecodeError:
                     pass
         pubs.append(o)
+    provisions = []
+    for p in sorted(Path(args.provisions).glob("*/outcome.json")) if args.provisions else []:
+        receipt = json.loads(p.read_text())
+        receipt["provision_run_id"] = p.parent.name
+        aid = p.parent / "artifact-id"
+        receipt["provision_artifact_id"] = int(aid.read_text()) if aid.exists() else None
+        provisions.append(receipt)
     issues = [] if args.offline else collect.intake_issues(api)
     tracking = sorted({c["tracking_issue"]["number"] for c in snap.contributions.values()}
                       | {i["number"] for i in issues})
     comments = [] if args.offline else collect.command_comments(api, tracking, args.since)
+    source_snapshots = {} if args.offline else collect.upstream_snapshots(api, snap.contributions.values(), issues, policy)
     issue_snapshots = {} if args.offline else collect.tracking_issues(api, snap.contributions.values(), issues)
     users, provisioning = _command_lookups(api, snap, comments) if not args.offline else ({}, {})
     from .common import INTAKE_LABEL
@@ -275,7 +287,8 @@ def cmd_reconcile(args) -> int:
     out = reconcile.tick(api, snap, policy=policy, now=datetime.now(timezone.utc), publications=pubs,
                          pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline,
                          dispatcher_runs=runs, queue_works=queue, users=users, provisioning=provisioning,
-                         acceptances=acceptances, tracking_issues=issue_snapshots)
+                         acceptances=acceptances, tracking_issues=issue_snapshots, upstream_snapshots=source_snapshots,
+                         provisions=provisions)
     for kind, rec in out.staged:
         store.stage(kind, rec)
     written = store.write_staged()
@@ -301,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan"); p.add_argument("--root"); p.add_argument("--out", required=True)
     p.add_argument("--control-repo-id", required=True); p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("reconcile"); p.add_argument("--root"); p.add_argument("--publications")
+    p.add_argument("--provisions")
     p.add_argument("--report"); p.add_argument("--since"); p.add_argument("--offline", action="store_true")
     p.add_argument("--gh-aw", help="pinned gh-aw v1.2.2 binary, to read the queue for dispatch recovery")
     p.set_defaults(fn=cmd_reconcile)

@@ -78,6 +78,14 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
             if out.event:
                 obs.staged.append(("events", out.event))
             entry["head_changed"] = True
+        if cur["phase"] == "development" and cur["activity"] == "idle" \
+                and not cur.get("proposal_artifact") and not cur.get("publication_operation_id") \
+                and not cur.get("last_ci_evidence_id") and head["head"] == cur["upstream"].get("base_sha"):
+            # The provisioned base is not a delivered contribution. Missing or
+            # fork-guarded base CI must not suppress the initial patch task.
+            entry["note"] = "awaiting initial development patch"
+            obs.report.append(entry)
+            continue
         upstream_facing = cur.get("upstream_pr") is not None
         repo_for_ci = cur["upstream"]["full_name"] if upstream_facing else fork
         snap = collect.ci_snapshot(api, repo_for_ci, head["head"])

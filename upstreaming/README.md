@@ -104,7 +104,9 @@ The repository also gets:
 - The gh-aw workflows, compiled with gh-aw v1.2.2
   (`upstreaming/check_gh_aw.sh` verifies the locks). Two worker profiles
   share the `upstreaming` pool; `work.profile_for` routes each task:
-  - `upstreaming-investigator.md` / `.lock.yml`: investigations
+  - `upstreaming-investigator-v2.md` / `.lock.yml`: new investigations
+  - `upstreaming-investigator.md` / `.lock.yml`: retained legacy profile history
+  - `upstreaming-provision.yml`: trusted fork creation, settings and branch setup
     (`anthropic/claude-sonnet-5-5`). Read and report only; its trusted
     `record` job checks the verified Result and hands the dossier to the
     controller. No fork token, no environment.
@@ -145,7 +147,8 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
 1. **Request.** Add the `upstreaming-request` label to the project's
    *Package build request* issue. The next controller tick creates the
    contribution in `queued` and, unless paused, requests an investigation.
-2. **Investigation.** The dispatcher launches `upstreaming-investigator`.
+2. **Investigation.** The dispatcher launches `upstreaming-investigator-v2` in
+   the same native pool, preserving the installed legacy profile and Work history.
    Its dossier is recorded as evidence and the contribution waits in
    `investigation` / `waiting_human` (`review_dossier`).
 3. **Approve the scope.** After reading the dossier:
@@ -157,23 +160,17 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    You become the primary owner, `<login>` the backup. Optional
    `paths=".github/workflows/*,pyproject.toml"` narrows or widens the patch
    surface (default `.github/workflows/*`). Phase becomes `provisioning`.
-4. **Provision the fork through trusted upstreaming workflows only.** The
-   current operating policy forbids direct writes or direct CI dispatches in
-   `riseproject-upstreaming/*`. The historical
-   `provision_fork.sh` human helper must not be used under this policy. General
-   workflow-only fork creation still needs a supported provisioning identity
-   (the writer App cannot fork an upstream where it is not installed).
-
-   Once the workflow has provisioned the verified fork and `riscv64` base:
-
-
-   ```text
-   /upstreaming provision revision=N+1
-   ```
-
-   The controller verifies the fork (fork of the right upstream by ID, not
-   archived, `riscv64` exists), records it and the base SHA, and moves to
-   `development`.
+4. **Provision the fork through trusted upstreaming workflows only.** Direct
+   writes or direct CI dispatches in `riseproject-upstreaming/*` are forbidden.
+   The controller records a `fork_provision` intent and dispatches the trusted
+   workflow. It creates or verifies the fork, initializes read-only CI, disables
+   inherited privileged/publication workflows, and creates the exact `riscv64`
+   base only if absent. Existing work is never reset. Creation uses a token that
+   cannot write existing repositories; branch/settings operations use a separate
+   single-fork token. Permission failures hold for review, without local fallback.
+   After receipt verification and fresh fork/ref readback, the controller moves
+   to `development`. Bare existing-fork verification cannot bypass this workflow.
+   Real API permissions and first-time creation remain unverified.
 5. **Development.** The next tick requests a `development_patch`; the
    `upstreaming-worker` proposes a series, and its trusted `publish` job
    (environment `upstreaming-publish`: approve the deployment) rebuilds and

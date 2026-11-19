@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import capacity, collect, controller, lifecycle, observe_ci, recovery
+from . import capacity, collect, controller, lifecycle, observe_ci, recovery, schemas
 from .common import safe_id
 
 
@@ -216,11 +216,59 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
          verified_prs: dict[str, dict] | None = None, acceptances: dict[int, int] | None = None,
          observe: bool = True, dispatcher_runs: list[dict] | None = None,
          queue_works: dict[str, str] | None = None, users: dict | None = None,
-         provisioning: dict | None = None, tracking_issues: dict | None = None) -> TickOutput:
+         provisioning: dict | None = None, tracking_issues: dict | None = None,
+         upstream_snapshots: dict | None = None, provisions: list[dict] | None = None) -> TickOutput:
     out = TickOutput()
     iso = now.isoformat()
     contributions = dict(snap.contributions)
     by_cid = {c["contribution_id"]: k for k, c in contributions.items()}
+
+    # Verified administrative provisioning receipts are separate from model
+    # artifact Results. Re-read the actual fork/ref before advancing state.
+    provision_report = []
+    for receipt in provisions or []:
+        cid = receipt.get("contribution_id")
+        if cid not in by_cid:
+            continue
+        key = by_cid[cid]
+        c = contributions[key]
+        op = snap.operations.get(receipt.get("operation_id"))
+        if not op or op["kind"] != "fork_provision" or op["status"] not in recovery.OPEN \
+                or c["phase"] != "provisioning" or c.get("active_operation_id") != op["operation_id"] \
+                or c["revision"] != receipt.get("revision") or receipt.get("status") != "provisioned":
+            continue
+        if receipt.get("fork") != op["target"]["repository"] \
+                or receipt.get("upstream_id") != c["upstream"]["repository_id"] \
+                or receipt.get("base_sha") != c["upstream"]["base_sha"] \
+                or receipt.get("actions_read_only") is not True:
+            provision_report.append({"contribution": cid, "status": "receipt mismatch"})
+            continue
+        try:
+            repo = collect.repository(api, receipt["fork"])
+            head = collect.branch_head(api, receipt["fork"], "riscv64")
+        except collect.CollectError:
+            provision_report.append({"contribution": cid, "status": "readback unavailable"})
+            continue
+        expected = op["target"].get("expected_head") or op["target"]["base_sha"]
+        if not head or head["head"] != receipt.get("head_sha") or head["head"] != expected \
+                or repo["id"] != receipt.get("fork_id") or repo.get("parent_id") != c["upstream"]["repository_id"]:
+            provision_report.append({"contribution": cid, "status": "fork identity/ref mismatch"})
+            continue
+        new_op = recovery.record_discovery(op, "confirmed", "fork/source identity, branch and trusted setup receipt verified", iso)
+        if receipt.get("provision_run_id"):
+            new_op["external_ids"]["provision_run_id"] = str(receipt["provision_run_id"])
+        if receipt.get("provision_artifact_id"):
+            new_op["external_ids"]["provision_artifact_id"] = int(receipt["provision_artifact_id"])
+        new = dict(c, fork={"repository_id": repo["id"], "name": repo["full_name"], "head_ref": "riscv64",
+                            "head_sha": head["head"], "pr_number": None}, phase="development", activity="idle",
+                   active_operation_id=None, pending_human_action=None, revision=c["revision"] + 1, updated_at=iso)
+        schemas.validate("contribution", new)
+        contributions[key] = new
+        snap.operations[op["operation_id"]] = new_op
+        out.staged.extend([("operations", new_op), ("contributions", new),
+                           ("events", lifecycle._event(c, new, "fork_provisioned", "observation", op["operation_id"], iso, True))])
+        provision_report.append({"contribution": cid, "status": "provisioned"})
+    out.report["provisions"] = provision_report
 
     # 1. Publication outcomes from finished workers.
     pubs_report = []
@@ -290,10 +338,12 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
                                                    pressure=pressure, verified_prs=verified_prs or {},
                                                    users=users or {}, provisioning=provisioning or {},
                                                    tracking_issues=tracking_issues or {},
+                                                   upstream_snapshots=upstream_snapshots or {},
                                                    acceptances=acceptances or {}))
     out.staged.extend(res.staged)
     out.report["controller"] = res.report
     out.report["requested_effects"] = res.requested_effects
+    out.report["provision_requests"] = res.report["provision_requests"]
     # 4. Publish-only retries due now (infrastructure failures; no model call).
     retries = []
     for c in contributions.values():
