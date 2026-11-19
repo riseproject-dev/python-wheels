@@ -104,6 +104,12 @@ class TestWorkflowContracts(unittest.TestCase):
                                                    "permission-contents", "permission-actions"})
             self.assertIn("upstreaming-controller.yml", str(job))
 
+    def test_controller_uses_publication_artifact_not_overall_run_status(self):
+        text = (WF / "upstreaming-controller.yml").read_text()
+        self.assertIn('actions/workflows/$wf/runs?per_page=20', text)
+        self.assertNotIn('actions/workflows/$wf/runs?status=completed', text)
+        self.assertIn("Artifact existence, not overall run", text)
+
     def test_controller_chains_every_pipeline_completion_and_has_schedule_fallback(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         triggers = controller.get("on", controller.get(True))
