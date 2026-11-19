@@ -72,6 +72,18 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("upstreaming.dossier_comment", notify_text)
         self.assertIn("upstreaming-publication", notify_text)
 
+    def test_controller_chains_every_pipeline_completion_and_has_schedule_fallback(self):
+        controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
+        triggers = controller.get("on", controller.get(True))
+        self.assertEqual(triggers["schedule"], [{"cron": "*/15 * * * *"}])
+        self.assertEqual(set(triggers["workflow_run"]["workflows"]), {
+            "Upstreaming investigator", "Upstreaming worker",
+            "Upstreaming fork provisioning", "Upstreaming publish retry"})
+        self.assertEqual(triggers["workflow_run"]["types"], ["completed"])
+        self.assertIn("labeled", triggers["issues"]["types"])
+        self.assertIn("created", triggers["issue_comment"]["types"])
+        self.assertIn("github.event_name == 'workflow_run'", controller["jobs"]["filter"]["if"])
+
     def test_development_writers_do_not_wait_for_environment_review(self):
         worker = source("upstreaming-worker")
         self.assertNotIn("environment", worker["jobs"]["publish"])
