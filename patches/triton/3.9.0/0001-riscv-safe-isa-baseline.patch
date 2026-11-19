@@ -1,0 +1,105 @@
+Upstream-Status: Inappropriate [this fleet's riscv64 silicon implements RVV 0.7.1, not 1.0]
+
+Real riscv64 CI (run 44206575156, job 135305237854): "Build wheel" succeeded after
+~7h45m, then "Test triton wheel" ran a plain @triton.jit elementwise add kernel on
+real torch tensors and died with `Illegal instruction`, exit code 132 (128+4 =
+SIGILL), right after the one UserWarning print and before the kernel's own print -
+i.e. inside the JIT-compiled kernel itself, on first execution, every time.
+
+backend/riscv.py's DEFAULT_LLC_FEATURES hardcodes
+"+m,+a,+f,+d,+c,+v,+zfh,+zvfh,+zba,+zbb,+zvfbfmin" (RVV + half-float-vector +
+bitmanip) and backend/compiler.py's native (non-cross-compile) `_llir_to_bin`
+codegen path passes that string to `llc -mattr=...` unconditionally - with no
+runtime feature probe at all, i.e. gotcha 139's "compiled with RVV, no runtime
+check at all" shape, except reached by a hardcoded default rather than a
+build-time autodetect. The test kernel's `tl.load`/`+`/`tl.store` over
+BLOCK_SIZE=1024-wide tiles lowers through MLIR's vector dialect, and with `+v`
+set, `llc` is free to codegen that as real RVV (`vsetvli`, `vle32.v`, `vfadd.vv`,
+`vse32.v` - see triton-riscv's own docs/06-RISCV-QEMU.md, which documents exactly
+this instruction shape as the intended output of this path).
+
+This repo's own CI fleet is already established, independently and repeatedly,
+to be T-Head-class RVV-0.7.1 silicon that still advertises HWCAP_V (CLAUDE.md
+gotcha 272, confirmed again for this same `ubuntu-24.04-riscv` runner pool by
+gotcha 448's openvino ELF-attribute/opcode analysis: "the fleet is T-Head
+(C906/C910/C920 class: TH1520, SG2042)... hence RVV 0.7.1... HWCAP advertises V;
+the first RVV-1.0 `vsetvli` is still illegal"). LLVM's `llc` only ever emits the
+RVV-1.0 vsetvli/vsetivli encoding (RVV 0.7.1 support was removed upstream years
+ago), so any kernel whose IR actually contains a vector op and is codegen'd with
+`+v` on this fleet hits exactly the symptom above: the very first `vsetvli`
+traps. Gotcha 272 also already establishes QEMU cannot be used to confirm or
+rule this out - TCG implements `vsetvli` correctly regardless of version, so
+triton-riscv's own QEMU-based testing (docs/06-RISCV-QEMU.md,
+scripts/triton-riscv-env.sh) would never have caught this; it only reproduces on
+the real runner, which is what just happened.
+
+Fix: lower DEFAULT_MARCH/DEFAULT_LLC_FEATURES to the plain rv64gc baseline
+(I+M+A+F+D+C, matching this repo's established "RISCV64_GENERIC" safe baseline
+for every other RVV-bearing port - see gotcha 448's "Pick RISCV64_GENERIC, not a
+vector target" and gotcha 139's "capping the baseline to rv64gcv would make
+every wheel require RVV hardware" framing, here with RVV-1.0-vs-0.7.1 added on
+top of "require RVV at all"). +f,+d stay (lp64d is the real ABI; dropping them
+causes soft-float link errors per the existing comment two lines above this
+hunk) - only +v and its dependents (+zfh,+zvfh,+zvfbfmin) and the two bitmanip
+extensions (+zba,+zbb, unverified on this fleet and not needed by anything this
+backend currently emits) are dropped.
+
+Also fix the native `_llir_to_bin` codegen branch to read the toolchain's
+`llc_features` (TRITON_RISCV_LLC_FEATURES env var, falling back to the now-safe
+DEFAULT_LLC_FEATURES) instead of the bare DEFAULT_LLC_FEATURES module constant
+it had inlined directly. TRITON_RISCV_CROSS_COMPILE=1's codegen path already
+reads this env var via RiscvToolchain.from_env(); the plain native
+`@triton.jit` path - the one this wheel's own test, and every consumer's normal
+import, actually exercises - silently did not, so the override this project
+already documents (TRITON_RISCV_LLC_FEATURES) had no effect for a native run.
+This keeps the safe default closed by this patch, while letting anyone who has
+confirmed their own riscv64 target genuinely implements RVV 1.0 opt back in
+without needing a repatch.
+
+--- a/backend/riscv.py
++++ b/backend/riscv.py
+@@ -11,9 +11,17 @@ import subprocess
+ from typing import Iterable, Sequence
+
+ DEFAULT_TRIPLE = "riscv64-unknown-linux-gnu"
+-DEFAULT_MARCH = "rv64gcv_zfh_zvfh_zba_zbb"
++# Baseline is rv64gc (I+M+A+F+D+C), not the RVV/Zfh/Zba/Zbb superset upstream
++# defaults to. The real silicon this is JIT-compiled and executed on natively
++# can advertise HWCAP_V while actually implementing RVV 0.7.1, so any RVV-1.0
++# `vsetvli` llc emits for the superset SIGILLs at kernel-launch time; see the
++# patch header for the real-hardware evidence. TRITON_RISCV_MARCH/
++# TRITON_RISCV_LLC_FEATURES remain the override for anyone who has confirmed
++# their target genuinely implements RVV 1.0 (or the bitmanip/half-float
++# extensions) and wants them back.
++DEFAULT_MARCH = "rv64gc"
+ DEFAULT_MABI = "lp64d"
+-DEFAULT_LLC_FEATURES = "+m,+a,+f,+d,+c,+v,+zfh,+zvfh,+zba,+zbb,+zvfbfmin"
++DEFAULT_LLC_FEATURES = "+m,+a,+f,+d,+c"
+
+
+ def _find_tool(
+--- a/backend/compiler.py
++++ b/backend/compiler.py
+@@ -835,13 +835,21 @@ def _llir_to_bin(llir: str, metadata, options=None):
+                 # of generated Triton IR when optimized (including masked
+                 # copies and scalar random-number kernels). Keep native
+                 # codegen unoptimized until those backend issues are fixed.
++                #
++                # Read TRITON_RISCV_LLC_FEATURES here too (RiscvToolchain.
++                # from_env() falls back to DEFAULT_LLC_FEATURES otherwise):
++                # this native-run path previously hardcoded the module
++                # constant directly, so the env var that TRITON_RISCV_CROSS_
++                # COMPILE=1 already honors silently had no effect on a plain
++                # native `@triton.jit` call - the actual path a wheel's
++                # consumer exercises.
+                 llc_args = [
+                     llc_path,
+                     src_path,
+                     "-filetype=obj",
+                     "-O0",
+                     "-relocation-model=pic",
+-                    f"-mattr={DEFAULT_LLC_FEATURES}",
++                    f"-mattr={RiscvToolchain.from_env().llc_features}",
+                     "-o",
+                     dst_path,
+                 ]
