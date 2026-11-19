@@ -181,8 +181,12 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    to `development`. Bare existing-fork verification cannot bypass this workflow.
    Fork creation, one-fork Administration/settings, inherited-workflow disabling
    and exact base branch initialization are live-verified.
-4. **Development.** The next tick requests a `development_patch`; the
-   `upstreaming-worker` proposes a series, and its trusted `publish` job
+4. **Development.** The next tick requests a `development_patch`. Before any
+   edit, the worker must inspect per-file commit history, analogous accepted and
+   rejected PRs, relevant issues/reviews and repository contribution/release
+   policy. Policy-sensitive files such as changelogs are changed only when that
+   evidence establishes the convention. The `upstreaming-worker` then proposes
+   a series, and its trusted `publish` job
    automatically rebuilds, revalidates and pushes it to `riscv64` under the
    exact operation, token and expected-head gates. The controller records a
    `dev_pr_create` operation; the trusted workflow opens or discovers `riscv64`

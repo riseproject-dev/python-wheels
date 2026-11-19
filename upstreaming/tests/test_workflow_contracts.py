@@ -101,6 +101,14 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("created", triggers["issue_comment"]["types"])
         self.assertIn("github.event_name == 'workflow_run'", controller["jobs"]["filter"]["if"])
 
+    def test_worker_forbids_unrelated_fork_ci_debug_changes(self):
+        text = (WF / "upstreaming-worker.md").read_text()
+        self.assertIn("do not add `push: riscv64`", text)
+        self.assertIn("do not broaden conditions", text)
+        self.assertIn("`inputs.upload`", text)
+        self.assertIn("commit history", text)
+        self.assertIn("rejected/superseded approaches", text)
+
     def test_development_writers_do_not_wait_for_environment_review(self):
         worker = source("upstreaming-worker")
         self.assertNotIn("environment", worker["jobs"]["publish"])
