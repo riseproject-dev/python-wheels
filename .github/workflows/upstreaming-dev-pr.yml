@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+name: Upstreaming development PR
+run-name: "Upstreaming development PR ${{ inputs.operation-id }}"
+on:
+  workflow_dispatch:
+    inputs:
+      operation-id:
+        description: Controller-recorded dev_pr_create operation
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: upstreaming-fork-writer
+  cancel-in-progress: false
+jobs:
+  create:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+      - name: Resolve the one verified fork name
+        id: target
+        env:
+          OPERATION: ${{ inputs.operation-id }}
+        run: |
+          set -euo pipefail
+          repo=$(uv run --no-project python - <<'PY'
+          import json, os
+          op=json.load(open(f"upstreaming-state/operations/{os.environ['OPERATION']}.json"))
+          print(op["target"]["repository"].split("/", 1)[1])
+          PY
+          )
+          [[ "$repo" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid fork name"; exit 1; }
+          printf 'fork_name=%s\n' "$repo" >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: fork-token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-upstreaming
+          repositories: ${{ steps.target.outputs.fork_name }}
+          permission-contents: read
+          permission-pull-requests: write
+      - name: Create or discover and verify the same-fork development PR
+        env:
+          OPERATION: ${{ inputs.operation-id }}
+          UPSTREAMING_FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.dev_pr --operation-id "$OPERATION" --out development-pr/outcome.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: upstreaming-development-pr
+          path: development-pr/outcome.json
+          if-no-files-found: error
+          retention-days: 30

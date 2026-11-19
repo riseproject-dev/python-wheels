@@ -249,11 +249,58 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
          observe: bool = True, dispatcher_runs: list[dict] | None = None,
          queue_works: dict[str, str] | None = None, users: dict | None = None,
          provisioning: dict | None = None, tracking_issues: dict | None = None,
-         upstream_snapshots: dict | None = None, provisions: list[dict] | None = None) -> TickOutput:
+         upstream_snapshots: dict | None = None, provisions: list[dict] | None = None,
+         development_prs: list[dict] | None = None) -> TickOutput:
     out = TickOutput()
     iso = now.isoformat()
     contributions = dict(snap.contributions)
     by_cid = {c["contribution_id"]: k for k, c in contributions.items()}
+
+    # Trusted same-fork development PR receipts are independently read back.
+    dev_pr_report = []
+    for receipt in development_prs or []:
+        cid = receipt.get("contribution_id")
+        if cid not in by_cid:
+            continue
+        key = by_cid[cid]
+        c = contributions[key]
+        op = snap.operations.get(receipt.get("operation_id"))
+        if not op or op["kind"] != "dev_pr_create" or op["status"] not in recovery.OPEN \
+                or c["phase"] != "development" or c.get("active_operation_id") != op["operation_id"] \
+                or c["revision"] != receipt.get("revision") or receipt.get("status") != "published":
+            continue
+        if receipt.get("repository") != op["target"]["repository"] \
+                or receipt.get("repository_id") != op["target"]["repository_id"] \
+                or receipt.get("head_sha") != op["target"]["expected_head"]:
+            dev_pr_report.append({"contribution": cid, "status": "receipt mismatch"})
+            continue
+        try:
+            pr = api.get(f"/repos/{receipt['repository']}/pulls/{int(receipt['pr_number'])}")
+        except (ValueError, KeyError, collect.CollectError):
+            dev_pr_report.append({"contribution": cid, "status": "readback unavailable"})
+            continue
+        marker = op["proposed"].get("marker")
+        if pr.get("id") != receipt.get("pr_id") or pr.get("state") != "open" \
+                or marker not in (pr.get("body") or "") \
+                or (pr.get("head") or {}).get("sha") != op["target"]["expected_head"] \
+                or (pr.get("head") or {}).get("ref") != "riscv64" \
+                or (pr.get("head") or {}).get("repo", {}).get("id") != op["target"]["repository_id"] \
+                or (pr.get("base") or {}).get("ref") != c["upstream"]["base_ref"]:
+            dev_pr_report.append({"contribution": cid, "status": "PR readback mismatch"})
+            continue
+        new_op = recovery.record_discovery(op, "confirmed", f"development PR {pr['number']} verified", iso)
+        new_op["external_ids"].update({"pr_id": int(pr["id"]), "pr_number": int(pr["number"]),
+                                       "development_pr_run_id": str(receipt["development_pr_run_id"])})
+        fork = dict(c["fork"], pr_number=int(pr["number"]))
+        new = dict(c, fork=fork, active_operation_id=None, activity="waiting_ci", updated_at=iso)
+        schemas.validate("contribution", new)
+        contributions[key] = new
+        snap.operations[op["operation_id"]] = new_op
+        out.staged.extend([("operations", new_op), ("contributions", new),
+                           ("events", lifecycle._event(c, new, "development_pr_created", "observation",
+                                                       op["operation_id"], iso, False))])
+        dev_pr_report.append({"contribution": cid, "status": "confirmed", "pr_number": pr["number"]})
+    out.report["development_prs"] = dev_pr_report
 
     # Verified administrative provisioning receipts are separate from model
     # artifact Results. Re-read the actual fork/ref before advancing state.
@@ -402,6 +449,7 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
     out.report["controller"] = res.report
     out.report["requested_effects"] = res.requested_effects
     out.report["provision_requests"] = res.report["provision_requests"]
+    out.report["dev_pr_requests"] = res.report["dev_pr_requests"]
     # 4. Publish-only retries due now (infrastructure failures; no model call).
     retries = []
     for c in contributions.values():

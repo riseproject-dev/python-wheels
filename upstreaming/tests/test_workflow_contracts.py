@@ -72,6 +72,13 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("upstreaming.dossier_comment", notify_text)
         self.assertIn("upstreaming-publication", notify_text)
 
+    def test_development_pr_writer_is_restricted_to_one_verified_fork(self):
+        workflow = yaml.safe_load((WF / "upstreaming-dev-pr.yml").read_text())
+        token = next(step for step in workflow["jobs"]["create"]["steps"] if step.get("id") == "fork-token")
+        self.assertEqual(token["with"]["permission-pull-requests"], "write")
+        self.assertEqual(token["with"]["permission-contents"], "read")
+        self.assertEqual(token["with"]["repositories"], "${{ steps.target.outputs.fork_name }}")
+
     def test_provisioning_administration_is_restricted_to_one_verified_fork(self):
         provision = yaml.safe_load((WF / "upstreaming-provision.yml").read_text())
         token = next(step for step in provision["jobs"]["provision"]["steps"] if step.get("id") == "fork-token")
@@ -82,10 +89,11 @@ class TestWorkflowContracts(unittest.TestCase):
     def test_controller_chains_every_pipeline_completion_and_has_schedule_fallback(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         triggers = controller.get("on", controller.get(True))
-        self.assertEqual(triggers["schedule"], [{"cron": "*/15 * * * *"}])
+        self.assertEqual(triggers["schedule"], [{"cron": "*/5 * * * *"}])
         self.assertEqual(set(triggers["workflow_run"]["workflows"]), {
             "Upstreaming investigator", "Upstreaming worker",
-            "Upstreaming fork provisioning", "Upstreaming publish retry"})
+            "Upstreaming fork provisioning", "Upstreaming development PR",
+            "Upstreaming publish retry"})
         self.assertEqual(triggers["workflow_run"]["types"], ["completed"])
         self.assertIn("labeled", triggers["issues"]["types"])
         self.assertIn("created", triggers["issue_comment"]["types"])

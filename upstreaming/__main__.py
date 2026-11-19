@@ -258,6 +258,12 @@ def cmd_reconcile(args) -> int:
                 except json.JSONDecodeError:
                     pass
         pubs.append(o)
+    development_prs = []
+    for p in sorted(Path(args.development_prs).glob("*/outcome.json")) if args.development_prs else []:
+        receipt = json.loads(p.read_text())
+        aid = p.parent / "artifact-id"
+        receipt["development_pr_artifact_id"] = int(aid.read_text()) if aid.exists() else None
+        development_prs.append(receipt)
     provisions = []
     for p in sorted(Path(args.provisions).glob("*/outcome.json")) if args.provisions else []:
         receipt = json.loads(p.read_text())
@@ -288,7 +294,7 @@ def cmd_reconcile(args) -> int:
                          pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline,
                          dispatcher_runs=runs, queue_works=queue, users=users, provisioning=provisioning,
                          acceptances=acceptances, tracking_issues=issue_snapshots, upstream_snapshots=source_snapshots,
-                         provisions=provisions)
+                         provisions=provisions, development_prs=development_prs)
     for kind, rec in out.staged:
         store.stage(kind, rec)
     written = store.write_staged()
@@ -314,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan"); p.add_argument("--root"); p.add_argument("--out", required=True)
     p.add_argument("--control-repo-id", required=True); p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("reconcile"); p.add_argument("--root"); p.add_argument("--publications")
-    p.add_argument("--provisions")
+    p.add_argument("--provisions"); p.add_argument("--development-prs")
     p.add_argument("--report"); p.add_argument("--since"); p.add_argument("--offline", action="store_true")
     p.add_argument("--gh-aw", help="pinned gh-aw v1.2.2 binary, to read the queue for dispatch recovery")
     p.set_defaults(fn=cmd_reconcile)

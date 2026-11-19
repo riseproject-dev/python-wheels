@@ -16,7 +16,7 @@ name: Upstreaming controller
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   issues:
     types: [opened, labeled, reopened]
   issue_comment:
@@ -26,6 +26,7 @@ on:
       - Upstreaming investigator
       - Upstreaming worker
       - Upstreaming fork provisioning
+      - Upstreaming development PR
       - Upstreaming publish retry
     types: [completed]
   workflow_dispatch:
@@ -132,6 +133,23 @@ jobs:
             done
           done
 
+      - name: Collect trusted development PR receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p development-prs
+          gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/upstreaming-dev-pr.yml/runs?status=completed&per_page=20" \
+            --jq '.workflow_runs[].id' | while read -r run; do
+            id=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" \
+              --jq '[.artifacts[] | select(.name == "upstreaming-development-pr" and (.expired | not))][0].id // empty')
+            [ -n "$id" ] || continue
+            mkdir -p "development-prs/$run"
+            gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "development-prs/$run/a.zip"
+            unzip -q -o -j "development-prs/$run/a.zip" -d "development-prs/$run"
+            printf '%s' "$id" > "development-prs/$run/artifact-id"
+          done
+
       - name: Collect trusted provisioning receipts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -159,7 +177,7 @@ jobs:
           # dispatch recovery is skipped for this tick (never guessed).
           gh_aw=$(upstreaming/install_gh_aw.sh "$RUNNER_TEMP/gh-aw-cli") || gh_aw=
           uv run --no-project --with-requirements upstreaming/requirements.txt \
-            python -m upstreaming reconcile --publications publications --provisions provisions --report report.json \
+            python -m upstreaming reconcile --publications publications --provisions provisions --development-prs development-prs --report report.json \
               ${gh_aw:+--gh-aw "$gh_aw"}
           {
             echo '## Upstreaming reconciliation'
@@ -201,6 +219,16 @@ jobs:
           if [ "$(jq '(.requested_effects | length) + (.dispatch_relaunch // [] | length)' report.json)" -gt 0 ]; then
             gh workflow run upstreaming-dispatcher.lock.yml --ref main
           fi
+
+      - name: Launch controller-authorized development PR creation
+        if: steps.policy.outputs.read_only == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          jq -r '.dev_pr_requests[].operation_id' report.json | while read -r operation; do
+            gh workflow run upstreaming-dev-pr.yml --ref main -f operation-id="$operation"
+          done
 
       - name: Launch controller-authorized fork provisioning
         if: steps.policy.outputs.read_only == 'false'

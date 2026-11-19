@@ -87,7 +87,7 @@ The remaining orchestration gap was automatic continuation: rollout-disabled
 controller triggers left a completed investigation in `agent_running` until a
 manual tick. Current local workflow changes trigger reconciliation when an
 investigator, worker, provisioning or publish-retry workflow completes, plus on
-request labels and commands. A 15-minute schedule is the recovery fallback.
+request labels and commands. A 5-minute schedule is the recovery fallback.
 State-only commits do not trigger the controller, so the chain cannot recurse.
 
 Workflow-only fork creation is now live-verified: the trusted job created the
@@ -107,7 +107,19 @@ The first development task did not launch because investigation delivery had
 incorrectly populated the generic `proposal_artifact` field. Observation then
 misclassified base-branch CI as patch CI and set `waiting_ci`. Current local code
 keeps investigation artifacts only as dossier evidence, clears the patch field
-defensively, and lets the controller request the initial development patch.
+defensively, and lets the controller request the initial development patch. The
+correction was deployed, state was repaired without changing the revision or
+fork, and the patch worker plus trusted publisher successfully advanced the exact
+leased `riscv64` head.
+
+Current local work closes the next gap: after a published patch, the controller
+persists a `dev_pr_create` operation. A trusted main-only workflow mints a token
+restricted to the verified fork, creates or discovers the same-fork
+`riscv64`-to-base PR, verifies repository/head/base/body readback, and returns a
+receipt. Reconciliation records the PR number before CI observation. The PR event,
+not a direct target-workflow dispatch, starts fork CI. The schedule fallback is
+reduced to five minutes because GitHub may suppress deeply chained
+`workflow_run` events.
 
 Previously merged implementation:
 

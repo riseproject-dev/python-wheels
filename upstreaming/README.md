@@ -97,7 +97,7 @@ The repository also gets:
   report) and `reconcile` (state writer, active only when `read_only` is
   false). Label and command events trigger immediate ticks. Completion of an
   investigator, worker, provisioning or publish-retry workflow triggers the
-  next tick, and a 15-minute schedule is the recovery fallback. State-only
+  next tick, and a 5-minute schedule is the recovery fallback. State-only
   commits do not match any trigger, preventing recursion.
 - `.github/workflows/upstreaming-image.yml`: rebuilds and publishes the
   reproduction image weekly, on changes to `upstreaming/image/`, and on demand.
@@ -112,6 +112,8 @@ The repository also gets:
     the dossier. A dependent `notify` job then publishes or discovers the
     deterministic human-readable tracking-issue comment and uploads its
     read-back receipt. No fork token or publishing environment.
+  - `upstreaming-dev-pr.yml`: trusted idempotent creation and readback of the
+    same-fork `riscv64` development PR after a published patch head.
   - `upstreaming-worker.md` / `.lock.yml`: development patch, repair and
     upstream revision (`anthropic/claude-opus-5-5`), with the trusted
     `publish` job.
@@ -176,12 +178,16 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    single-fork token. Permission failures hold for review, without local fallback.
    After receipt verification and fresh fork/ref readback, the controller moves
    to `development`. Bare existing-fork verification cannot bypass this workflow.
-   Real API permissions and first-time creation remain unverified.
+   Fork creation, one-fork Administration/settings, inherited-workflow disabling
+   and exact base branch initialization are live-verified.
 4. **Development.** The next tick requests a `development_patch`; the
    `upstreaming-worker` proposes a series, and its trusted `publish` job
    automatically rebuilds, revalidates and pushes it to `riscv64` under the
-   exact operation, token and expected-head gates. Fork CI then runs on `ubuntu-24.04-riscv`; the
-   controller records CI evidence for the exact head and asks for repairs
+   exact operation, token and expected-head gates. The controller records a
+   `dev_pr_create` operation; the trusted workflow opens or discovers `riscv64`
+   against the frozen base and verifies readback. The pull-request event starts
+   fork CI on `ubuntu-24.04-riscv`; the controller records CI evidence for the
+   exact head and asks for repairs
    while it fails. Passing means every required riscv64 job executed
    natively and a riscv64 wheel artifact was uploaded.
 5. **Upstream handoff.** Human involvement begins only after bounded development,
