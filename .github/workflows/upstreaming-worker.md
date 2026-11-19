@@ -107,7 +107,6 @@ jobs:
     if: needs.safe_outputs.outputs.work_queue_outcome == 'completed'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: upstreaming-publish
     permissions:
       contents: read
       actions: read
