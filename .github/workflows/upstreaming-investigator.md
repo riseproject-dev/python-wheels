@@ -247,7 +247,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -260,10 +259,20 @@ jobs:
         with:
           name: upstreaming-publication
           path: publication
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: comment-token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-dev
+          repositories: python-wheels
+          permission-contents: read
+          permission-issues: write
       - name: Publish or discover the exact verified dossier comment
         working-directory: control
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.comment-token.outputs.token }}
+          UPSTREAMING_COMMENT_AUTHOR: riseproject-dev[bot]
         run: |
           set -euo pipefail
           outcome=../publication/in/outcome.json

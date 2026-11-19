@@ -67,7 +67,7 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertNotIn("detection", lock["jobs"])
         notify = lock["jobs"]["notify"]
         self.assertEqual(set(notify["needs"]), {"safe_outputs", "record"})
-        self.assertEqual(notify["permissions"]["issues"], "write")
+        self.assertNotIn("issues", notify["permissions"])
         notify_text = str(notify)
         self.assertIn("upstreaming.dossier_comment", notify_text)
         self.assertIn("upstreaming-publication", notify_text)
@@ -126,11 +126,24 @@ class TestWorkflowContracts(unittest.TestCase):
             for job in workflow["jobs"].values():
                 self.assertNotIn("environment", job, name)
 
+    def test_dossier_comments_use_the_control_app_identity(self):
+        investigator = source("upstreaming-investigator")
+        retry = yaml.safe_load((WF / "upstreaming-publish-retry.yml").read_text())
+        for notify in (investigator["jobs"]["notify"], retry["jobs"]["notify"]):
+            self.assertNotIn("issues", notify["permissions"])
+            token = next(step for step in notify["steps"] if step.get("id") == "comment-token")
+            self.assertEqual(token["with"]["owner"], "riseproject-dev")
+            self.assertEqual(token["with"]["repositories"], "python-wheels")
+            self.assertEqual(token["with"]["permission-issues"], "write")
+            publish = next(step for step in notify["steps"] if "dossier comment" in step.get("name", ""))
+            self.assertEqual(publish["env"]["GH_TOKEN"], "${{ steps.comment-token.outputs.token }}")
+            self.assertEqual(publish["env"]["UPSTREAMING_COMMENT_AUTHOR"], "riseproject-dev[bot]")
+
     def test_investigation_retry_also_publishes_verified_comment(self):
         retry = yaml.safe_load((WF / "upstreaming-publish-retry.yml").read_text())
         notify = retry["jobs"]["notify"]
         self.assertEqual(notify["needs"], "publish")
-        self.assertEqual(notify["permissions"]["issues"], "write")
+        self.assertNotIn("issues", notify["permissions"])
         self.assertIn("upstreaming.dossier_comment", str(notify))
         self.assertIn("upstreaming-publication", str(notify))
 
