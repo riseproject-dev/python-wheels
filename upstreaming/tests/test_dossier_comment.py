@@ -26,6 +26,14 @@ class TestDossierComment(unittest.TestCase):
         self.assertIn(dossier_comment.marker(self.task(), self.result()), body)
         self.assertLess(len(body.encode()), 60_000)
 
+    def test_trusted_worker_ref_is_accepted_without_weakening_workflow_identity(self):
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "riseproject-dev/python-wheels",
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKFLOW": "Upstreaming investigator",
+               "GITHUB_REF": "refs/heads/work-queue"}
+        self.assertTrue(dossier_comment.trusted_runtime(env))
+        env["GITHUB_WORKFLOW"] = "Untrusted workflow"
+        self.assertFalse(dossier_comment.trusted_runtime(env))
+
     def test_missing_result_identity_is_rejected(self):
         result = self.result(); del result["claim_id"]
         with self.assertRaises(dossier_comment.CommentError):

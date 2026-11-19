@@ -84,6 +84,12 @@ def request(method: str, path: str, token: str, body: dict | None = None):
     return json.loads(raw)
 
 
+def trusted_runtime(env: dict[str, str]) -> bool:
+    return env.get("GITHUB_ACTIONS") == "true" and env.get("GITHUB_REPOSITORY") == CONTROL_REPO \
+        and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" \
+        and env.get("GITHUB_WORKFLOW") in ("Upstreaming investigator", "Upstreaming publish retry")
+
+
 def publish(dossier: dict, proposal: dict, task: dict, result: dict, token: str, run_id: str) -> dict:
     validate(dossier, proposal, task)
     for key in ("work_id", "claim_id", "artifact_id", "digest"):
@@ -114,9 +120,8 @@ if __name__ == "__main__":
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_REPOSITORY") != CONTROL_REPO \
-            or os.environ.get("GITHUB_REF") != "refs/heads/main":
-        raise CommentError("dossier comments require the trusted investigator workflow on main")
+    if not trusted_runtime(os.environ):
+        raise CommentError("dossier comments require a trusted upstreaming Result workflow")
     values = [json.loads(getattr(args, name).read_text()) for name in ("dossier", "proposal", "task", "result")]
     receipt = publish(*values, os.environ.get("GH_TOKEN", ""), os.environ["GITHUB_RUN_ID"])
     args.out.parent.mkdir(parents=True, exist_ok=True)

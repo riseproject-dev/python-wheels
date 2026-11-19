@@ -75,7 +75,7 @@ The fork push is a separate pipeline operation with its own receipt.
 | `work.py` | Immutable gh-aw Work payloads, artifact-only effect contracts, staged plans | 5.1, 15.1 |
 | `queue_result.py` | Publication gate: the exact Claim's verified Result and its artifact identity, from the pinned gh-aw CLI's `work-queue replay --json` | 15.3 |
 | `install_gh_aw.sh` | Installs gh-aw v1.2.2 with a pinned SHA-256 (worker publish job, retry, validation CI) | 15.3, 22 |
-| `SETUP.md` | Exact one-time repository settings: the `upstreaming-publish` and `upstreaming-state` environments, emergency stop | 10.2, 6.3 |
+| `SETUP.md` | Exact one-time repository settings: state environment, automatic development writers, upstream handoff and emergency stop | 10.2, 6.3 |
 | `artifact.py` | Safe extraction of the untrusted proposal artifact | 15.3 |
 | `fork_publish.py` | Trusted fork publisher: preflight, fresh rebuild of the patch series, validation, leased push, readback | 10.4, 15.3, 16.3 |
 | `reconcile.py` | One reconciliation tick: publications, live observation, controller | 9 |
@@ -154,18 +154,17 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    dependency evidence. After native delivery,
    the trusted `record` job validates the exact Result and the dependent
    `notify` job posts a bounded readable summary to the tracking issue. The
-   controller records the dossier as evidence and waits in `investigation` /
-   `waiting_human` (`review_dossier`).
-3. **Approve the scope.** After reading the dossier:
+   controller records the dossier as evidence. A machine-readable, trusted-gated
+   dossier decision either moves directly to `provisioning` with a bounded
+   admission class and path set, or moves to `parked` when no concrete patch is
+   actionable. Neither route waits for scope approval. An authorized human may
+   override a parked decision with:
 
    ```text
-   /upstreaming approve-scope revision=N class=configuration_integration backup=<login>
+   /upstreaming force-develop revision=N class=configuration_integration paths=".github/workflows/*" reason="Concrete scope to pursue."
    ```
 
-   You become the primary owner, `<login>` the backup. Optional
-   `paths=".github/workflows/*,pyproject.toml"` narrows or widens the patch
-   surface (default `.github/workflows/*`). Phase becomes `provisioning`.
-4. **Provision the fork through trusted upstreaming workflows only.** Direct
+3. **Provision the fork through trusted upstreaming workflows only.** Direct
    writes or direct CI dispatches in `riseproject-upstreaming/*` are forbidden.
    The controller records a `fork_provision` intent and dispatches the trusted
    workflow. It creates or verifies the fork, initializes read-only CI, disables
@@ -176,13 +175,16 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    After receipt verification and fresh fork/ref readback, the controller moves
    to `development`. Bare existing-fork verification cannot bypass this workflow.
    Real API permissions and first-time creation remain unverified.
-5. **Development.** The next tick requests a `development_patch`; the
+4. **Development.** The next tick requests a `development_patch`; the
    `upstreaming-worker` proposes a series, and its trusted `publish` job
-   (environment `upstreaming-publish`: approve the deployment) rebuilds and
-   pushes it to `riscv64`. Fork CI then runs on `ubuntu-24.04-riscv`; the
+   automatically rebuilds, revalidates and pushes it to `riscv64` under the
+   exact operation, token and expected-head gates. Fork CI then runs on `ubuntu-24.04-riscv`; the
    controller records CI evidence for the exact head and asks for repairs
    while it fails. Passing means every required riscv64 job executed
    natively and a riscv64 wheel artifact was uploaded.
+5. **Upstream handoff.** Human involvement begins only after bounded development,
+   cleanup and CI evidence are complete. A human approves the exact clean head
+   and opens or registers the upstream-facing PR.
 
 Investigator inputs, mandatory history/dependency/report research and the trusted
 pre-Completion gate: [`INVESTIGATION.md`](INVESTIGATION.md). Weekly runtime,
@@ -208,9 +210,8 @@ work that moved meanwhile:
 
 ```text
 /upstreaming resume revision=1 reason="quota back"
-/upstreaming approve-scope revision=2 class=configuration_integration backup=<login>
-/upstreaming provision revision=3
-/upstreaming approve-handoff revision=4 head=<clean head sha>
+/upstreaming force-develop revision=2 class=configuration_integration paths=".github/workflows/*" reason="Concrete override scope."
+/upstreaming approve-handoff revision=3 head=<clean head sha>
 ```
 
 ## Usage
@@ -242,10 +243,11 @@ None of these perform remote writes.
 - **Pause** is best effort. A pause is honored at the publication check, and
   a stale pause is still honored. An effect that already passed the check
   may finish and is then reconciled as usual.
-- **Park** can be lifted only by an explicit, current-revision `resume`,
-  which sends the contribution back to `investigation` so the dossier is
-  revalidated. Duplicates, timers and prerequisite changes never resume a
-  parked contribution.
+- **Park** is an automatic no-action outcome when the dossier identifies no
+  concrete patch. `resume` sends it through a new investigation. An authorized,
+  current-revision `force-develop` instead records a bounded override scope and
+  proceeds directly to automatic provisioning. Duplicates, timers and
+  prerequisite changes never resume a parked contribution.
 - **Handoff**: `request-handoff` needs executed CI evidence for the exact
   head. `approve-handoff` binds to the clean head after `{debug}` removal.
   Any new change made before submission clears the approval.

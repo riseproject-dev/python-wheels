@@ -178,11 +178,12 @@ class TestMergeAndRelease(unittest.TestCase):
             lifecycle.transition(contribution(phase="upstream_review"), "released",
                                  cause_type="observation", cause_id=None, now=NOW)
 
-    def test_write_admission_requires_owners(self):
+    def test_write_admission_is_automatic_after_dossier_and_fork(self):
         rec = contribution()
+        rec["owners"] = {"primary": None, "backup": None, "submitter": None, "handoff_reviewer": None}
         self.assertIsNone(lifecycle.write_admission(rec))
-        rec["owners"]["backup"] = None
-        self.assertIn("backup", lifecycle.write_admission(rec))
+        rec["admission_class"] = None
+        self.assertIn("admission class", lifecycle.write_admission(rec))
 
     def test_schema_rejects_wrong_ref_and_unknown_version(self):
         rec = contribution()
@@ -262,6 +263,20 @@ class TestScopeAndProvision(unittest.TestCase):
         self.assertIsNone(lifecycle.write_admission(d))
         from upstreaming import controller
         self.assertEqual(controller._actionable(d), "development_patch")
+
+    def test_human_can_force_parked_dossier_into_automatic_development(self):
+        parked = dict(self.rec, phase="parked", activity="idle", parked_reason="No current patch")
+        out = self.apply(parked, '/upstreaming force-develop revision=1 class=configuration_integration '
+                                 'paths=".github/workflows/*,pyproject.toml" reason="Proceed with a concrete reviewed scope."')
+        self.assertTrue(out.accepted, out.reason)
+        self.assertEqual((out.record["phase"], out.record["revision"], out.record["activity"]),
+                         ("provisioning", 2, "idle"))
+        self.assertEqual(out.record["scope_paths"], [".github/workflows/*", "pyproject.toml"])
+        self.assertIsNone(out.record["parked_reason"])
+        self.assertFalse(self.apply(self.rec, '/upstreaming force-develop revision=1 class=configuration_integration '
+                                             'paths=".github/workflows/*" reason="Not parked."').accepted)
+        self.assertFalse(self.apply(parked, '/upstreaming force-develop revision=1 class=configuration_integration '
+                                             'paths="*" reason="Scope is too broad."').accepted)
 
     def test_approve_scope_needs_dossier_and_other_backup(self):
         bk = dict(BACKUP)

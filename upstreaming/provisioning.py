@@ -63,8 +63,6 @@ def validate_request(record: dict, operation: dict, policy: dict) -> None:
         raise ProvisionError("contribution is not authorized for provisioning")
     if not record.get("dossier_evidence_id") or not record.get("admission_class"):
         raise ProvisionError("reviewed dossier and approved scope required")
-    if not record["owners"].get("primary") or not record["owners"].get("backup"):
-        raise ProvisionError("primary and backup owners required")
     if not record["upstream"].get("repository_id") or not record["upstream"].get("base_sha"):
         raise ProvisionError("upstream identity and immutable base must be verified first")
     if operation["kind"] != "fork_provision" or operation["status"] != "planned" \

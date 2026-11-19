@@ -52,7 +52,9 @@ def dossier():
                                   "support_status": "Used and verified the report's riscv64 support-status findings.",
                                   "dependencies": "Used the report's graph findings and checked them against the build configuration.",
                                   "prior_work_and_blockers": "Followed and reviewed the report's linked prior contributions and architecture blockers."},
-                              "corroboration_and_conflicts": [ISSUE_URL]}, "proposal": {}}
+                              "corroboration_and_conflicts": [ISSUE_URL]},
+         "proposal": {"decision": "develop", "rationale": "Add bounded wheel CI configuration following the verified architecture precedent.",
+                      "admission_class": "configuration_integration", "allowed_paths": [".github/workflows/*"]}}
     d["research"]["ecosystem_report"]["sources"][0]["url"] = REPORT_URL
     return d
 
@@ -73,6 +75,19 @@ class TestDossierCompleteness(unittest.TestCase):
             invalid = dossier(); invalid["history"] = [[ISSUE_URL, "open"]]
             (root / "dossier.json").write_text(json.dumps(invalid))
             self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+
+    def test_development_decision_requires_bounded_scope_and_park_is_empty(self):
+        for path in ("*", "**", "../setup.py", "/tmp/setup.py", ".git/config", "src/**"):
+            d = dossier(); d["proposal"]["allowed_paths"] = [path]
+            with self.assertRaises((dossier_gate.DossierError, schemas.SchemaError), msg=path):
+                dossier_gate.validate(d, proposal(), task())
+        d = dossier()
+        d["proposal"].update(decision="park", admission_class=None, allowed_paths=[],
+                             rationale="No concrete patch is actionable until a documented external prerequisite is resolved.")
+        dossier_gate.validate(d, proposal(), task())
+        d["proposal"]["allowed_paths"] = ["pyproject.toml"]
+        with self.assertRaises(schemas.SchemaError):
+            dossier_gate.validate(d, proposal(), task())
 
     def test_every_category_is_required(self):
         for category in dossier_gate.RESEARCH_CATEGORIES:

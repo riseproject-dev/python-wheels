@@ -9,14 +9,15 @@ local `session-log.md`, not this generic pipeline documentation.
 
 ## Current checkpoint (2026-11-19)
 
-**Stage A is not complete.** Controller intake, state publication, dispatch
-recovery and investigator execution work remotely. A native artifact upload has
-succeeded, but its Claim has no verified Result. The trusted record/publish jobs
-correctly stayed blocked. No end-to-end workflow-mediated fork patch, development
-PR, native wheel acceptance or release rehearsal is claimed.
+**Investigation delivery is complete.** The canonical investigator has completed
+authenticated research, passed the trusted completeness gate, recorded native
+Completion, obtained verified artifact delivery, resolved the exact Result,
+recorded durable dossier evidence and published an idempotent human-readable
+tracking comment. No manual artifact adoption or model rerun was used.
 
-Stages B/C remain limited by Stage A. Local observer and simulated publication
-coverage are not substitutes for verified live delivery and publication.
+**Fork development remains incomplete.** Workflow-mediated fork creation,
+`riscv64` patch publication, development PR creation, native wheel acceptance and
+release-path rehearsal still need live evidence.
 
 ## Operating decisions
 
@@ -26,7 +27,11 @@ coverage are not substitutes for verified live delivery and publication.
 - All contribution-fork creation, branch writes, PR mutations and CI dispatches
   must be performed exclusively by upstreaming workflows in the control
   repository. No direct local fork operations or manual target CI workaround.
-- No upstream PR creation or production package publication is authorized.
+- Fork provisioning and bounded `riscv64` development are automatic after a
+  verified dossier decides `develop`. A `park` decision stops work and can be
+  overridden with an authorized stale-proof `force-develop` command.
+- Human approval starts at upstream handoff. No automatic upstream PR creation or
+  production package publication is authorized.
 - Keep gh-aw v1.2.2 until a stable, coordinated upgrade is reviewed. No alternate
   scheduler, publication route, salted branch or unverified-artifact fallback.
 - Only the investigator has approved unsandboxed internet access. It remains
@@ -47,8 +52,8 @@ coverage are not substitutes for verified live delivery and publication.
 | Native queue bootstrap/launch | Dispatcher 44414548306 and 44420780035 | Work/Claim admitted, authenticated investigator launched |
 | Investigator execution | Runs 44415024119 and 44421278888 | Read-only checkout and model execution succeeded |
 | Native artifact compatibility patch | PR #4940 merged as `101ad75`; subsequent run 44421278888 | Original upload authorization blocker fixed; native artifact uploaded |
-| Verified native Result | `safe_outputs` failed in run 44421278888; record skipped | **Blocked**, not equivalent to uploaded bytes |
-| Fork write / development PR | Trusted publisher has not run for a verified patch Result | **Unverified** |
+| Verified native Result and dossier comment | Canonical investigator, trusted record, infrastructure-only retry and notification receipt | **Verified**; exact Result recorded and readable tracking comment published |
+| Fork write / development PR | No verified patch Result has been published to a fork | **Unverified** |
 | Native build/test/release acceptance | No workflow-mediated validated contribution yet | **Unverified** |
 
 The earlier manually initiated pilot workaround was removed and the branch
@@ -63,49 +68,23 @@ CI-trigger association still need integration evidence.
 
 ## Latest deployment and current local changes
 
-PR #4941 passed all control checks and merged as `5b7277becea`. Its investigator,
-dependency and finalization fixes are deployed as source, but native contract
-adoption and a successful remote Result remain unverified. GitHub server-signed
-control commits verified the requested author identity; local SSH signing no
-longer prevents control-code publication.
+The single canonical investigator is deployed. Its custom read-only GitHub MCP
+server uses the job's scoped token without the pinned gateway's incompatible
+source-integrity composition; web tools cover non-GitHub research. The exact
+native staging codec, file preflight, completeness gate and safe cross-origin
+artifact download are all live-verified. The record path and dependent notify job
+successfully produced durable dossier evidence and one readable tracking comment.
+
+Current local work removes the pre-development human scope gate. The dossier
+contract now requires a machine-readable `develop` or `park` decision. `develop`
+provides a validated admission class and bounded paths, moves directly to trusted
+fork provisioning and continues through development without reviewer-gated
+workflow environments. `park` stops work without a human prompt; an authorized
+`force-develop` command can override it with an exact revision, class, paths and
+reason. Human approval remains mandatory at upstream handoff.
 
 Workflow-only fork provisioning is deployed but real creation/token/settings
 permissions remain unverified.
-
-Two development investigator attempts completed extensive research and staged
-schema-valid artifacts, but strict DIFC rejected the unlabeled native
-claim-finish tool after a labeled GitHub source guard initialized the session.
-The completeness gate failed closed both times: no Completion or Result was
-accepted, and no research comment was published.
-
-The operator explicitly authorized resetting non-production state and the native
-queue. Current local work consolidates all investigator checkpoints into the
-single canonical `upstreaming-investigator` workflow and removes GitHub MCP from
-that read-only role. A custom read-only GitHub MCP server uses the job's scoped `GITHUB_TOKEN` for
-issues, PRs, reviews, Actions and code without anonymous rate limits, while
-omitting the incompatible source-integrity guard. The pinned web extension is
-reserved for non-GitHub sources and general discovery. The
-trusted `record` job still independently resolves and validates the exact native
-Result. A new dependent `notify` job renders that verified dossier into a bounded,
-idempotent tracking-issue comment, verifies readback and uploads a receipt. Agent
-prose, staging and unverified artifacts cannot reach the issue. Development state and the native queue have been reset and the canonical
-contract bootstrapped. Live authenticated GitHub research succeeded without
-anonymous rate-limit failures, the agent's file preflight passed, artifact staging
-and claim-finish intent both succeeded. The trusted gate then exposed a local
-namespace bug: it hashed pretty pipeline JSON rather than gh-aw's compact,
-key-sorted native Claim identity. The staged directory matched the native codec; the correction now uses that exact
-codec and installs `uv` in the agent job for the required preflight.
-
-The next live run completed the gate, native Completion and delivery. Its trusted
-`record` job resolved the Result metadata but received HTTP 401 while following
-the artifact API's cross-origin blob redirect, so it emitted `infra_error`; the
-`notify` job correctly published nothing. Python's default redirect handler
-forwarded the bearer token to blob storage despite the collector's contrary
-assumption. Current local code permits only the expected HTTPS GitHub/Azure blob
-origins and strips Authorization on cross-origin redirects. A live read-only test
-downloaded the verified artifact ZIP successfully. After deployment, a
-publish-only retry can record this existing Result and run the dependent comment
-job without another model call.
 
 Previously merged implementation:
 
@@ -204,9 +183,10 @@ Result, token, expected-head or operation-receipt checks.
 3. **Run the complete investigator through the controller/dispatcher.** Verify
    issue/comments, graph MCP, ecosystem report and historical research; require
    the gate, native verified Result and recorded dossier evidence.
-4. **Approve bounded scope and owners.** The primary/backup owner, target matrix,
-   allowed paths, release contract and existing-upstream-work decision must come
-   from reviewed evidence. Do not infer that wheel CI alone closes a release gap.
+4. **Apply the dossier decision automatically.** `develop` adopts the validated
+   bounded class and paths and enters provisioning. `park` stops work; only an
+   authorized `force-develop` command can override it directly. No routine human
+   scope or owner approval occurs before fork development.
 5. **Validate workflow-only fork provisioning.** The implementation is now local:
    the controller persists a `fork_provision` operation, dispatches the trusted
    provisioning workflow, then consumes its receipt only after fork/ref readback.

@@ -212,7 +212,7 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         if (c.get("pending_human_action") or {}).get("kind") not in (None, "provision_fork"):
             continue
         if not c.get("dossier_evidence_id") or not c.get("admission_class") \
-                or not c["owners"].get("primary") or not c["owners"].get("backup") \
+                or not c.get("scope_paths") \
                 or not c["upstream"].get("repository_id") or not c["upstream"].get("base_sha"):
             rep["deferred"].append({"contribution": cid, "why": "provisioning prerequisites missing"})
             continue
