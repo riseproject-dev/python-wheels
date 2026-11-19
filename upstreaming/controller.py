@@ -283,6 +283,12 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
                 or c.get("active_operation_id") or fork.get("pr_number") is None \
                 or c.get("last_ci_evidence_id") or artifact.get("outcome") != "published":
             continue
+        created_at_head = any(op["contribution_id"] == cid and op["kind"] == "dev_pr_create"
+                              and op["status"] == "confirmed"
+                              and op["target"].get("expected_head") == fork.get("head_sha")
+                              for op in operations.values())
+        if not created_at_head:
+            continue  # later patch pushes already emit pull_request:synchronize
         reason = f"ci-bootstrap-event-v2:{fork['head_sha']}"
         prior = [op for op in operations.values() if op["contribution_id"] == cid \
                  and op["kind"] == "dev_pr_update" and reason in op["reason_ids"] \
