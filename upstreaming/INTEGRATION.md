@@ -97,9 +97,17 @@ the token lacks repository-administration permission for an Actions-settings
 PUT. Fresh readback showed both desired settings were already inherited exactly
 (read-only workflow token, Actions enabled, all actions allowed). Current local
 code skips unnecessary administrative writes when settings already match and
-still requires exact readback; divergent settings remain fail-closed. The same
-operation can then be retried idempotently to disable inherited privileged
-workflows and create the exact `riscv64` base.
+still requires exact readback; divergent settings remain fail-closed. After the App gained Administration permission, the same operation retried
+idempotently, verified settings, disabled inherited privileged workflows and
+created `riscv64` at the exact upstream base. Completion-event chaining then
+recorded the receipt and advanced to development without a manual controller
+run.
+
+The first development task did not launch because investigation delivery had
+incorrectly populated the generic `proposal_artifact` field. Observation then
+misclassified base-branch CI as patch CI and set `waiting_ci`. Current local code
+keeps investigation artifacts only as dossier evidence, clears the patch field
+defensively, and lets the controller request the initial development patch.
 
 Previously merged implementation:
 

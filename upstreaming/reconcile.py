@@ -168,7 +168,8 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
         return new, staged
     new["pending_publication"] = None
     art = outcome.get("artifact")
-    if art and all(k in art for k in ("work_id", "claim_id", "artifact_id", "name", "digest", "run_id")):
+    if outcome.get("status") != "investigation" and art \
+            and all(k in art for k in ("work_id", "claim_id", "artifact_id", "name", "digest", "run_id")):
         new["proposal_artifact"] = {k: art[k] for k in ("work_id", "claim_id", "artifact_id", "name",
                                                         "digest", "run_id")} | {
             "result_commit": art.get("result_commit"), "outcome": outcome.get("status")}
@@ -188,6 +189,10 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
     elif status == "rejected":
         new["activity"] = "idle" if fclass == "stale" else "fix_needed"
     elif status == "investigation":
+        # Investigation artifacts are evidence, never patch proposals. Keeping
+        # one in proposal_artifact would make base-branch CI look like patch CI
+        # and suppress the first development task.
+        new["proposal_artifact"] = None
         # The dossier is recorded as evidence. Its validated decision either
         # enters automatic provisioning or parks without launching a writer.
         dossier = outcome.get("dossier")

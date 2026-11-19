@@ -311,6 +311,7 @@ class TestTick(unittest.TestCase):
         self.assertEqual(final["admission_class"], "configuration_integration")
         self.assertEqual(final["scope_paths"], [".github/workflows/*"])
         self.assertIsNone(final["pending_human_action"])
+        self.assertIsNone(final["proposal_artifact"])
         self.assertEqual(len(out.report["provision_requests"]), 1)
         self.assertTrue(any(item.get("ignored") == "superseded publication artifact"
                             for item in out.report["publications"]))
