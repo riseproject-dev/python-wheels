@@ -37,12 +37,19 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertEqual(investigator["engine"]["extensions"],
                          ["npm:pi-web-access@0.48.0", "npm:pi-subagents@0.89.0"])
         self.assertNotIn("github", investigator["tools"])
+        github = investigator["mcp-servers"]["github-authenticated"]
+        self.assertTrue(github["required"])
+        self.assertEqual(github["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "${{ github.token }}")
+        self.assertEqual(github["env"]["GITHUB_READ_ONLY"], "1")
+        self.assertIn("issue_read", github["allowed"])
+        self.assertIn("pull_request_read", github["allowed"])
         graph = investigator["mcp-servers"]["project-graph"]
         self.assertTrue(graph["required"])
         self.assertEqual(graph["container"], "ghcr.io/riseproject-dev/sw-ecosystem/project-graph-mcp:latest")
         self.assertEqual(graph["allowed"], ["project_graph_query"])
         current_text = (WF / "upstreaming-investigator.md").read_text()
         self.assertIn("read-only web extension", current_text)
+        self.assertIn("Do not use the web extension's anonymous GitHub fetcher", current_text)
         for name in ("upstreaming-worker", "upstreaming-dispatcher"):
             config = source(name)
             self.assertTrue(config["strict"])
