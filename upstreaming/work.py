@@ -62,6 +62,10 @@ def payload(request: dict, record: dict, *, control_repo_id: str, allowed_paths:
     agent and the trusted publish job need is in here; nothing is looked up
     from mutable state at execution time except re-checks."""
     task = request["task"]
+    context = dict(context or {})
+    issue = (record.get("active_work") or {}).get("tracking_issue")
+    if issue is not None:
+        context["tracking_issue"] = issue
     fork = record.get("fork") or {}
     up = record["upstream"]
     p = {
@@ -145,7 +149,14 @@ def task_digest(pl: dict) -> str:
 _PLANS = {
     "investigation": (
         "Investigate this upstream project and produce the dossier for a riscv64 wheel contribution. "
-        "Do not modify any repository. Return the dossier JSON as the proposal artifact."),
+        "Read the full tracking issue description in context.tracking_issue and fetch its comments. "
+        "Research upstream issues, open/closed PRs, CI/history, docs, websites, mailing lists, blogs, "
+        "maintainers and their past reviews before recommending scope. Query project_graph_query for "
+        "the dependency graph. Check sw-ecosystem/project-reports and extensively use any matching "
+        "report, cross-checking it with current upstream sources. The dossier must satisfy "
+        "upstreaming/schemas/dossier.schema.json, including complete research records with source URLs "
+        "and findings for every category. Missing or unavailable required research is incomplete work: "
+        "do not finish completed. Do not modify any repository. Return the dossier JSON as the proposal artifact."),
     "development_patch": (
         "Write the smallest patch to the fork's riscv64 branch that makes the upstream project build, "
         "test and publish Linux riscv64 wheels through its normal release process, following the "

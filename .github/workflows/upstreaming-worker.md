@@ -12,6 +12,7 @@ permissions:
   actions: read
 engine:
   id: pi
+  version: "1.5.0"
 model: anthropic/claude-opus-5-5
 concurrency:
   job-discriminator: ${{ github.run_id }}
@@ -92,8 +93,11 @@ jobs:
           persist-credentials: false
           path: native-artifact-compat
           sparse-checkout: upstreaming
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
       - name: Apply hash-pinned gh-aw v1.2.2 native artifact fix
-        run: python3 native-artifact-compat/upstreaming/gh_aw_compat.py "$RUNNER_TEMP/gh-aw/actions"
+        run: uv run --no-project python native-artifact-compat/upstreaming/gh_aw_compat.py "$RUNNER_TEMP/gh-aw/actions"
   publish:
     # Ordinary trusted job, not a safe output. Gated on the compiled
     # safe_outputs outcome, then on the exact Claim's verified Result as

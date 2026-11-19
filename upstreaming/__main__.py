@@ -133,6 +133,8 @@ def cmd_observe(args) -> int:
     res = controller.tick(contributions=contributions, operations=operations, consumed=consumed,
                           projects=projects, policy=dict(policy, read_only=True),
                           inputs=controller.Inputs(now=now, issues=issues, comments=comments, pressure=pressure,
+                                                   tracking_issues={} if args.offline else collect.tracking_issues(
+                                                       api, contributions.values(), issues),
                                                    **dict(zip(("users", "provisioning"),
                                                               _command_lookups(api, reconcile_snapshot(root, policy), comments)
                                                               if not args.offline else ({}, {})))))
@@ -187,6 +189,8 @@ def cmd_plan(args) -> int:
             continue
         if len(nodes) >= policy["concurrency"]["coding_workers"]:
             break
+        if not (rec["active_work"].get("tracking_issue") or {}).get("url"):
+            raise ValueError("requested task lacks a frozen tracking-issue description; request a fresh revision")
         ctr = (contracts.get(rec.get("target_contract_id") or "") or {}).get("data") or {}
         nodes.append(work.node(req, rec, control_repo_id=args.control_repo_id,
                                allowed_paths=rec.get("scope_paths") or ctr.get("allowed_paths")
@@ -254,6 +258,7 @@ def cmd_reconcile(args) -> int:
     tracking = sorted({c["tracking_issue"]["number"] for c in snap.contributions.values()}
                       | {i["number"] for i in issues})
     comments = [] if args.offline else collect.command_comments(api, tracking, args.since)
+    issue_snapshots = {} if args.offline else collect.tracking_issues(api, snap.contributions.values(), issues)
     users, provisioning = _command_lookups(api, snap, comments) if not args.offline else ({}, {})
     from .common import INTAKE_LABEL
     acceptances = {} if args.offline else collect.label_acceptances(
@@ -270,7 +275,7 @@ def cmd_reconcile(args) -> int:
     out = reconcile.tick(api, snap, policy=policy, now=datetime.now(timezone.utc), publications=pubs,
                          pressure=_pressure(policy), issues=issues, comments=comments, observe=not args.offline,
                          dispatcher_runs=runs, queue_works=queue, users=users, provisioning=provisioning,
-                         acceptances=acceptances)
+                         acceptances=acceptances, tracking_issues=issue_snapshots)
     for kind, rec in out.staged:
         store.stage(kind, rec)
     written = store.write_staged()

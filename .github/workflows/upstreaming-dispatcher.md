@@ -13,6 +13,7 @@ permissions:
   issues: read
 engine:
   id: pi
+  version: "1.5.0"
 model: anthropic/claude-haiku-5-5
 network:
   allowed: []

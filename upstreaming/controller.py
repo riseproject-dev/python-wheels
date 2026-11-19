@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import capacity, intake, lifecycle, recovery
+from . import capacity, collect, intake, lifecycle, recovery
 from .commands import Command, URGENT
 from .common import contribution_file_id
 
@@ -29,6 +29,7 @@ from .common import contribution_file_id
 class Inputs:
     now: datetime
     issues: list[dict] = field(default_factory=list)          # intake issues, freshly fetched
+    tracking_issues: dict[int, dict] = field(default_factory=dict)  # every live issue's fresh description
     comments: list[dict] = field(default_factory=list)        # {"issue_number", "comment", "event_body"}
     pressure: capacity.Pressure | None = None
     verified_prs: dict[str, dict] = field(default_factory=dict)  # url -> verified PR resource
@@ -223,6 +224,10 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
             "requested_at": now,
             "deadline_at": (inputs.now + timedelta(hours=WORK_DEADLINE_HOURS)).isoformat(),
             "dispatched_run_id": None})
+        issue = inputs.tracking_issues.get(c["tracking_issue"]["number"]) or next(
+            (i for i in inputs.issues if i["number"] == c["tracking_issue"]["number"]), None)
+        if issue is not None:
+            claimed["active_work"]["tracking_issue"] = collect.tracking_issue_context(issue, c["tracking_issue"])
         if kind == "investigation" and claimed["phase"] == "queued":
             claimed["phase"] = "investigation"
         by_id[c["contribution_id"]] = claimed

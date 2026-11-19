@@ -1,21 +1,16 @@
 Upstream-Status: To upstream [Local reproduction validated; upstream submission requires separate authorization]
 
 diff --git a/actions/setup/js/upload_artifact.cjs b/actions/setup/js/upload_artifact.cjs
-index b9553d6..fefed59 100644
+index b9553d6..a74f933 100644
 --- a/actions/setup/js/upload_artifact.cjs
 +++ b/actions/setup/js/upload_artifact.cjs
-@@ -55,6 +55,7 @@ const {
-   claimIdentity,
-   assertClaimIdentity,
-   receiptMatchesClaim,
+@@ -57,0 +58,3 @@ const {
 +  withClaimResourceEffects,
- } = require("./work_queue_claim_scope.cjs");
- const { expectedGitHubHost } = require("./work_queue_host.cjs");
- const privateDeliveryReceipts = new WeakMap();
-@@ -712,19 +713,33 @@ async function main(config = {}) {
-           uploadOpts.skipArchive = true;
-         }
-         const repository = process.env.GITHUB_REPOSITORY || "";
++  createClaimResourceVerification,
++  withClaimResourceVerification,
+@@ -703,0 +707 @@ async function main(config = {}) {
++    let authorityResource;
+@@ -714,0 +719,10 @@ async function main(config = {}) {
 +        const uploadNativeArtifact = async () => {
 +          const effect = recordClaimEffect({ kind: "artifact", repository, outcome: "unknown" });
 +          const result = await client.uploadArtifact(artifactName, absoluteFiles, stagingDirectory(), uploadOpts);
@@ -26,12 +21,7 @@ index b9553d6..fefed59 100644
 +          return result;
 +        };
 +        let uploadResult;
-         if (factoryClaim) {
-           if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error(`${ERR_VALIDATION}: Artifact upload requires the original native repository in owner/repo format`);
-           const [owner, repo] = repository.split("/");
-           const { data: nativeRepository } = await github.rest.repos.get({ owner, repo });
-           if (nativeRepository.full_name !== repository || !/^[1-9][0-9]*$/.test(String(nativeRepository.id)))
-             throw new Error(`${ERR_VALIDATION}: Artifact upload repository identity differs from its native target; scoped effects remain blocked`);
+@@ -721,7 +735,12 @@ async function main(config = {}) {
 -          await assertClaimAuthorized({ ...message, repo: repository }, { effect: true, resource: { repository, host: expectedGitHubHost(), repository_id: String(nativeRepository.id), run_id: process.env.GITHUB_RUN_ID } });
 -        }
 -        const effect = recordClaimEffect({ kind: "artifact", repository, outcome: "unknown" });
@@ -44,12 +34,28 @@ index b9553d6..fefed59 100644
 +          // protected adapter frame, retaining immutable repository selectors
 +          // and the independent exact Claim/run binding checks.
 +          const target = { repository, host: expectedGitHubHost(), repository_id: String(nativeRepository.id), run_id: process.env.GITHUB_RUN_ID };
++          authorityResource = target;
 +          uploadResult = await withClaimResourceEffects([target], ["upload_artifact"], async () => {
 +            await assertClaimAuthorized({ ...message, repo: repository }, { effect: true, resource: target });
 +            return uploadNativeArtifact();
 +          });
 +        } else {
 +          uploadResult = await uploadNativeArtifact();
-         }
-         artifactId = uploadResult.id;
-         trustedDigest = uploadResult.digest;
+@@ -816,0 +836 @@ async function main(config = {}) {
++        authorityResource,
+@@ -823 +843,2 @@ async function main(config = {}) {
+-async function verifyArtifactDelivery({ claim, result, github }) {
++async function verifyArtifactDelivery(options) {
++  const { claim, result, github } = options;
+@@ -837 +858,4 @@ async function verifyArtifactDelivery({ claim, result, github }) {
+-  return {
++  // Artifact descriptors contain name/digest metadata, not authorization
++  // selectors. Register the independently verified native repository/run
++  // target in the existing private receipt frame used by Claim finalization.
++  const proof = createClaimResourceVerification({
+@@ -840,0 +865 @@ async function verifyArtifactDelivery({ claim, result, github }) {
++    authority_resource: await require("./work_queue_effect_resource.cjs").resolveRepositoryTarget(github, receipt.authorityResource),
+@@ -842 +867,2 @@ async function verifyArtifactDelivery({ claim, result, github }) {
+-  };
++  });
++  return withClaimResourceVerification(proof, () => proof, { authorize: options.authorize, context: options.context, github });

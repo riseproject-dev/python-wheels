@@ -139,8 +139,8 @@ because a push touching `docs/**` deploys the website.
 
 ## Onboarding a project (the whole loop)
 
-Every project goes through the same steps; numpy (#15, fork
-`riseproject-upstreaming/numpy`) is the reference run.
+Every project goes through the same steps. Project-specific evidence and
+pilot details are kept in lifecycle state and diagnostic artifacts, not here.
 
 1. **Request.** Add the `upstreaming-request` label to the project's
    *Package build request* issue. The next controller tick creates the
@@ -157,15 +157,15 @@ Every project goes through the same steps; numpy (#15, fork
    You become the primary owner, `<login>` the backup. Optional
    `paths=".github/workflows/*,pyproject.toml"` narrows or widens the patch
    surface (default `.github/workflows/*`). Phase becomes `provisioning`.
-4. **Provision the fork** (a human step: the App cannot fork projects it is
-   not installed on):
+4. **Provision the fork through trusted upstreaming workflows only.** The
+   current operating policy forbids direct writes or direct CI dispatches in
+   `riseproject-upstreaming/*`. The historical
+   `provision_fork.sh` human helper must not be used under this policy. General
+   workflow-only fork creation still needs a supported provisioning identity
+   (the writer App cannot fork an upstream where it is not installed).
 
-   ```sh
-   upstreaming/provision_fork.sh OWNER/REPO [BASE_REF]
-   ```
+   Once the workflow has provisioned the verified fork and `riscv64` base:
 
-   It forks into `riseproject-upstreaming/REPO`, creates `riscv64` at the
-   upstream base, and keeps the fork's Actions token read-only. Then:
 
    ```text
    /upstreaming provision revision=N+1
@@ -181,6 +181,10 @@ Every project goes through the same steps; numpy (#15, fork
    controller records CI evidence for the exact head and asks for repairs
    while it fails. Passing means every required riscv64 job executed
    natively and a riscv64 wheel artifact was uploaded.
+
+Investigator inputs, mandatory history/dependency/report research and the trusted
+pre-Completion gate: [`INVESTIGATION.md`](INVESTIGATION.md). Weekly runtime,
+compiler and action updates: [`dependencies/README.md`](dependencies/README.md).
 
 ## Commands on a tracking issue
 

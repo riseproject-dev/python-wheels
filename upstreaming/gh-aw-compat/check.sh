@@ -11,7 +11,7 @@ git clone --quiet --depth 1 --branch v1.2.2 --filter=blob:none --sparse \
     https://github.com/github/gh-aw.git "$tmp/source"
 [ "$(git -C "$tmp/source" rev-parse HEAD)" = 399a445fe2d8926c616b54b1b82a16b5b2be4445 ]
 git -C "$tmp/source" sparse-checkout set actions/setup/js specs/work-queue
-python3 "$root/upstreaming/gh_aw_compat.py" "$tmp/source/actions/setup/js"
+uv run --no-project python "$root/upstreaming/gh_aw_compat.py" "$tmp/source/actions/setup/js"
 cp "$root/upstreaming/gh-aw-compat/tests/upload_artifact_work_queue.test.cjs" \
     "$tmp/source/actions/setup/js/upload_artifact_work_queue.test.cjs"
 cd "$tmp/source/actions/setup/js"
