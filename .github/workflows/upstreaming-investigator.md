@@ -291,6 +291,27 @@ jobs:
           path: notification/outcome.json
           if-no-files-found: ignore
           retention-days: 30
+  continuation:
+    needs: [safe_outputs, record, notify]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: control-token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-dev
+          repositories: python-wheels
+          permission-contents: read
+          permission-actions: write
+      - name: Continue reconciliation after the investigator is terminal
+        env:
+          GH_TOKEN: ${{ steps.control-token.outputs.token }}
+        run: gh workflow run upstreaming-controller.yml --repo "$GITHUB_REPOSITORY" --ref main
 timeout-minutes: 90
 max-turns: 300
 # Only the read-only investigator gets unrestricted research access.
