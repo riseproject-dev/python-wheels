@@ -78,8 +78,14 @@ workflow provisioning. These provisioning changes are not yet deployed or tested
 against real fork permissions.
 
 The additive, versioned investigator-profile migration in the same native pool
-was approved by the operator and is implemented locally as
-`upstreaming-investigator-v2`. The native on-demand `PoolInstall` copies installed
+was deployed as `upstreaming-investigator-v2`. Its live run completed extensive
+research and staged a schema-valid artifact, but strict DIFC rejected the unlabeled
+internal claim-finish tool after GitHub MCP supplied `none` integrity data. The
+trusted completeness gate failed closed: no Completion or Result was accepted.
+The operator approved an additive v3 route. V3 keeps GitHub MCP at `approved`
+integrity and requires the read-only web extension to cover filtered, untrusted
+history. It is implemented locally but not deployed. The v2 cancelled Claim and
+available retry Work remain in native history. The native on-demand `PoolInstall` The native on-demand `PoolInstall` copies installed
 profiles and pool limits before adding the default-revision worker. Existing
 profiles, Work and pending delivery history are preserved; no new queue or ref
 is introduced. Live registration remains unverified.

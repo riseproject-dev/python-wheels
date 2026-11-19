@@ -28,10 +28,11 @@ POOL = "upstreaming"
 # Two worker profiles in one pool: investigations (read and report, cheaper
 # model, no publish job) and patch work (stronger model, trusted publish job).
 WORKER_PROFILE = "upstreaming-worker"
-INVESTIGATOR_PROFILE = "upstreaming-investigator-v2"
+INVESTIGATOR_PROFILE = "upstreaming-investigator-v3"
 PROFILE_WORKFLOWS = {WORKER_PROFILE: ".github/workflows/upstreaming-worker.lock.yml",
                      "upstreaming-investigator": ".github/workflows/upstreaming-investigator.lock.yml",
-                     INVESTIGATOR_PROFILE: ".github/workflows/upstreaming-investigator-v2.lock.yml"}
+                     "upstreaming-investigator-v2": ".github/workflows/upstreaming-investigator-v2.lock.yml",
+                     INVESTIGATOR_PROFILE: ".github/workflows/upstreaming-investigator-v3.lock.yml"}
 PROPOSAL_ARTIFACT = "upstreaming-out"
 
 WRITE_TASKS = {"development_patch", "development_repair", "upstream_revision"}

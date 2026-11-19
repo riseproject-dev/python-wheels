@@ -104,8 +104,8 @@ The repository also gets:
 - The gh-aw workflows, compiled with gh-aw v1.2.2
   (`upstreaming/check_gh_aw.sh` verifies the locks). Two worker profiles
   share the `upstreaming` pool; `work.profile_for` routes each task:
-  - `upstreaming-investigator-v2.md` / `.lock.yml`: new investigations
-  - `upstreaming-investigator.md` / `.lock.yml`: retained legacy profile history
+  - `upstreaming-investigator-v3.md` / `.lock.yml`: new investigations
+  - `upstreaming-investigator-v2.md` and `upstreaming-investigator.md`: retained profile history
   - `upstreaming-provision.yml`: trusted fork creation, settings and branch setup
     (`anthropic/claude-sonnet-5-5`). Read and report only; its trusted
     `record` job checks the verified Result and hands the dossier to the
@@ -147,8 +147,9 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
 1. **Request.** Add the `upstreaming-request` label to the project's
    *Package build request* issue. The next controller tick creates the
    contribution in `queued` and, unless paused, requests an investigation.
-2. **Investigation.** The dispatcher launches `upstreaming-investigator-v2` in
-   the same native pool, preserving the installed legacy profile and Work history.
+2. **Investigation.** The dispatcher launches `upstreaming-investigator-v3` in
+   the same native pool, preserving installed profiles and Work history. GitHub
+   MCP stays at approved integrity; read-only web tools cover untrusted history.
    Its dossier is recorded as evidence and the contribution waits in
    `investigation` / `waiting_human` (`review_dossier`).
 3. **Approve the scope.** After reading the dossier:
