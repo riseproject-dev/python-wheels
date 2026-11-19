@@ -86,7 +86,7 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
     if not head or head["head"] != op["target"]["expected_head"]:
         raise DevPRError("development branch head changed")
     configured = provisioning.configure_inherited_workflows(
-        provisioning.WriteApi(token=token), repo["full_name"], repo["default_branch"])
+        provisioning.WriteApi(token=token), repo["full_name"], DEV_REF)
     base_ref = record["upstream"]["base_ref"]
     owner = repo["full_name"].split("/", 1)[0]
     query = urllib.parse.urlencode({"state": "open", "head": f"{owner}:{DEV_REF}", "base": base_ref, "per_page": 100})

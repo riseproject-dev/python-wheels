@@ -355,9 +355,15 @@ and analogous changes in the proposal diagnosis.
    such as `inputs.upload`, add `github.event_name == 'push'`, or otherwise alter
    non-riscv64 behavior. If PR CI builds a wheel but intentionally does not upload
    it, leave that policy unchanged and record the acceptance limitation for a
-   separate trusted probe. Add a separate `{debug}` trigger/guard adjustment only
-   when no PR-compatible CI trigger exists, and explain the repository history
-   that justifies it. If the project already builds riscv64 wheels upstream, a
+   separate trusted probe. If the same workflow also contains an OIDC, Twine or
+   `pypa/gh-action-pypi-publish` publication job, keep the build/test workflow and
+   add a separate `{debug}` commit setting that publication job to the literal
+   `if: false`. Do not add credentials, change release behavior, or disable the
+   whole workflow. Trusted setup enables the workflow only after verifying every
+   publication-capable job is unreachable. Remove this debug commit before
+   handoff. Add a separate `{debug}` trigger/guard adjustment only when no
+   PR-compatible CI trigger exists, and explain the repository history that
+   justifies it. If the project already builds riscv64 wheels upstream, a
    necessary `{debug}` guard adjustment alone can be the whole series.
 4. Baseline code is `rv64gc`. Optional RVV only behind Linux `riscv_hwprobe`
    (`RISCV_HWPROBE_KEY_IMA_EXT_0` / `RISCV_HWPROBE_IMA_V`) with an `rv64gc`

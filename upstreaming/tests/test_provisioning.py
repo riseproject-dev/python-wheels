@@ -90,6 +90,14 @@ class Api:
 
 
 class TestProvisioning(unittest.TestCase):
+    def test_literal_false_publication_job_is_safe_but_active_publisher_is_not(self):
+        workflow = {"permissions": {"contents": "read"}, "jobs": {"build": {"steps": []},
+                    "publish": {"if": False, "permissions": {"id-token": "write"},
+                                "steps": [{"uses": "pypa/gh-action-pypi-publish@v1"}]}}}
+        self.assertFalse(provisioning._workflow_unsafe(workflow, "jobs: {}"))
+        workflow["jobs"]["publish"].pop("if")
+        self.assertTrue(provisioning._workflow_unsafe(workflow, "jobs: {}"))
+
     def test_create_and_exact_base_without_project_execution(self):
         rec, op = request()
         api = Api(exists=False)

@@ -151,7 +151,13 @@ enabled; only the GitHub research transport changes. If PR creation was confirme
 was repaired, the controller records a separate `dev_pr_update` CI-bootstrap
 operation. That operation may enable safe workflows and reopen only the exact
 recorded marked PR, once, to emit the normal event without rewriting operation
-history. Repair Work now carries bounded summaries for its durable reason
+history. For a workflow that mixes build CI with OIDC/package publication, initial
+provisioning keeps the inherited workflow disabled. The worker adds a separate
+`{debug}` commit with literal `if: false` on the publication job. The development
+PR workflow parses the `riscv64` version, enables build/test CI only after proving
+the publication job unreachable, and cleanup removes that debug commit before
+handoff. An unsafe workflow already in `disabled_fork` or another non-active
+state needs no redundant disable API call. Repair Work now carries bounded summaries for its durable reason
 evidence, so exact operator review or CI feedback reaches the worker rather than
 being represented only by an opaque ID.
 
