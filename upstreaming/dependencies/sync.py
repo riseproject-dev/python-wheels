@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOWS = ("upstreaming-investigator", "upstreaming-investigator-v2", "upstreaming-investigator-v3", "upstreaming-worker", "upstreaming-dispatcher")
+WORKFLOWS = ("upstreaming-investigator", "upstreaming-worker", "upstreaming-dispatcher")
 EXTENSIONS = ("pi-web-access", "pi-subagents")
 
 
@@ -42,7 +42,7 @@ def synchronize(root: Path, write: bool = False) -> list[str]:
                                 lambda m: m[1] + json.dumps(versions["@earendil-works/pi-coding-agent"]), source)
         if count != 1:
             raise ValueError(f"{path}: expected exactly one explicit Pi version")
-        if name in ("upstreaming-investigator", "upstreaming-investigator-v2", "upstreaming-investigator-v3"):
+        if name == "upstreaming-investigator":
             for extension in EXTENSIONS:
                 target, count = re.subn(r"npm:" + re.escape(extension) + r"@[^\s]+",
                                         "npm:" + extension + "@" + versions[extension], target)

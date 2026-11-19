@@ -13,11 +13,11 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-for w in upstreaming-worker upstreaming-investigator upstreaming-investigator-v2 upstreaming-investigator-v3 upstreaming-dispatcher; do
+for w in upstreaming-worker upstreaming-investigator upstreaming-dispatcher; do
     cp ".github/workflows/$w.lock.yml" "$tmp/$w.lock.yml.committed"
 done
-"$aw" compile upstreaming-worker upstreaming-investigator upstreaming-investigator-v2 upstreaming-investigator-v3 upstreaming-dispatcher --no-check-update >/dev/null
-for w in upstreaming-worker upstreaming-investigator upstreaming-investigator-v2 upstreaming-investigator-v3 upstreaming-dispatcher; do
+"$aw" compile upstreaming-worker upstreaming-investigator upstreaming-dispatcher --no-check-update >/dev/null
+for w in upstreaming-worker upstreaming-investigator upstreaming-dispatcher; do
     cmp -s "$tmp/$w.lock.yml.committed" ".github/workflows/$w.lock.yml" \
         || { echo "$w.lock.yml is stale; recompile with gh-aw v1.2.2" >&2; exit 1; }
 done
