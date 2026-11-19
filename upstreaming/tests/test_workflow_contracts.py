@@ -72,6 +72,14 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("upstreaming.dossier_comment", notify_text)
         self.assertIn("upstreaming-publication", notify_text)
 
+    def test_investigation_retry_also_publishes_verified_comment(self):
+        retry = yaml.safe_load((WF / "upstreaming-publish-retry.yml").read_text())
+        notify = retry["jobs"]["notify"]
+        self.assertEqual(notify["needs"], "publish")
+        self.assertEqual(notify["permissions"]["issues"], "write")
+        self.assertIn("upstreaming.dossier_comment", str(notify))
+        self.assertIn("upstreaming-publication", str(notify))
+
     def test_authored_python_ci_invocations_use_uv(self):
         for path in sorted(WF.glob("upstreaming-*")):
             if path.name.endswith(".lock.yml") or path.suffix not in (".md", ".yml"):

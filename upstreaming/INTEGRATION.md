@@ -93,10 +93,19 @@ contract bootstrapped. Live authenticated GitHub research succeeded without
 anonymous rate-limit failures, the agent's file preflight passed, artifact staging
 and claim-finish intent both succeeded. The trusted gate then exposed a local
 namespace bug: it hashed pretty pipeline JSON rather than gh-aw's compact,
-key-sorted native Claim identity. The staged directory matched the native codec;
-no Result or tracking comment was accepted. The correction uses the exact native
-codec and installs `uv` in the agent job for the required preflight. Another
-development reset and live run remain required.
+key-sorted native Claim identity. The staged directory matched the native codec; the correction now uses that exact
+codec and installs `uv` in the agent job for the required preflight.
+
+The next live run completed the gate, native Completion and delivery. Its trusted
+`record` job resolved the Result metadata but received HTTP 401 while following
+the artifact API's cross-origin blob redirect, so it emitted `infra_error`; the
+`notify` job correctly published nothing. Python's default redirect handler
+forwarded the bearer token to blob storage despite the collector's contrary
+assumption. Current local code permits only the expected HTTPS GitHub/Azure blob
+origins and strips Authorization on cross-origin redirects. A live read-only test
+downloaded the verified artifact ZIP successfully. After deployment, a
+publish-only retry can record this existing Result and run the dependent comment
+job without another model call.
 
 Previously merged implementation:
 

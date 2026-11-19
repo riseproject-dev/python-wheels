@@ -162,3 +162,43 @@ jobs:
             in/worker-run-id
           if-no-files-found: ignore
           retention-days: 30
+
+  notify:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          path: control
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: upstreaming-publication
+          path: publication
+      - name: Publish or discover a retried verified dossier comment
+        working-directory: control
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$(jq -r .status ../publication/outcome.json)" = investigation ] || { echo "verified investigation unavailable; no comment"; exit 0; }
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.dossier_comment \
+              --dossier ../publication/dossier.json --proposal ../publication/proposal.json \
+              --task ../publication/task.json --result ../publication/result.json \
+              --out ../notification/outcome.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: upstreaming-notification
+          path: notification/outcome.json
+          if-no-files-found: ignore
+          retention-days: 30

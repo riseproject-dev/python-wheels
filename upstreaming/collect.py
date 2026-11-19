@@ -33,11 +33,26 @@ class CollectError(RuntimeError):
     pass
 
 
+class _ArtifactRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow GitHub's artifact redirect without leaking its bearer token."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if (old.scheme, old.netloc) != (new.scheme, new.netloc):
+            host = (new.hostname or "").lower()
+            if new.scheme != "https" or not (host.endswith(".blob.core.windows.net") or
+                                               host.endswith(".githubusercontent.com")):
+                raise CollectError("refusing artifact redirect to an unexpected origin")
+            redirected.remove_header("Authorization")
+        return redirected
+
+
 class Api:
     def __init__(self, token: str | None = None, base: str = API, opener=None):
         self.token = token if token is not None else (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"))
         self.base = base
-        self._open = opener or urllib.request.urlopen
+        self._open = opener or urllib.request.build_opener(_ArtifactRedirect()).open
 
     def _request(self, url: str) -> tuple[Any, dict]:
         req = urllib.request.Request(url, method="GET", headers={
