@@ -121,6 +121,17 @@ not a direct target-workflow dispatch, starts fork CI. The schedule fallback is
 reduced to five minutes because GitHub may suppress deeply chained
 `workflow_run` events.
 
+Live PR creation succeeded, but no fork workflows ran: a fresh public fork's
+Actions inventory was empty even though workflow files existed on the default
+branch. Provisioning had therefore scanned nothing. Current local code uses the
+default-branch contents directory as the authoritative bounded inventory,
+parses every workflow as data, explicitly enables safe CI and disables
+privileged/publication workflows. A development-PR retry enables safe workflows
+and closes/reopens an already marked PR only when enablement changed, producing
+the normal `reopened` event. Controller artifact collection also treats
+transient per-run API failures as deferred evidence rather than aborting the
+entire reconciliation tick.
+
 Previously merged implementation:
 
 - The native artifact patch now separates artifact descriptors from private

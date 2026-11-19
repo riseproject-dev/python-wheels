@@ -55,8 +55,10 @@ class Api:
         if path == f"/repos/{FORK}/actions/permissions":
             return self.actions
         if path == f"/repos/{FORK}/actions/workflows?per_page=100":
-            return {"total_count": 2, "workflows": [{"id": 5, "path": ".github/workflows/wheels.yml"},
-                                                     {"id": 6, "path": ".github/workflows/publish.yml"}]}
+            return {"total_count": 0, "workflows": []}
+        if path == f"/repos/{FORK}/contents/.github/workflows?ref=main":
+            return [{"type": "file", "name": "wheels.yml", "path": ".github/workflows/wheels.yml"},
+                    {"type": "file", "name": "publish.yml", "path": ".github/workflows/publish.yml"}]
         if path.startswith(f"/repos/{FORK}/contents/"):
             text = "name: Wheel tests\npermissions: {contents: read}\njobs: {}\n"
             if "publish.yml" in path:
@@ -93,6 +95,7 @@ class TestProvisioning(unittest.TestCase):
         self.assertIn(("POST", f"/repos/{UP}/forks", {"organization": "riseproject-upstreaming", "name": "proj", "default_branch_only": True}), api.writes)
         self.assertIn(("POST", f"/repos/{FORK}/git/refs", {"ref": "refs/heads/riscv64", "sha": SHA_C}), api.writes)
         self.assertIn(".github/workflows/publish.yml", outcome["disabled_workflows"])
+        self.assertIn(".github/workflows/wheels.yml", outcome["enabled_workflows"])
         self.assertFalse(any(path in (f"/repos/{FORK}/actions/permissions",
                                       f"/repos/{FORK}/actions/permissions/workflow")
                              for _, path, _ in api.writes))

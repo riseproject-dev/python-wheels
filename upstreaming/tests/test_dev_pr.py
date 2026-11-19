@@ -35,6 +35,7 @@ class FakeApi:
     def __init__(self, rec, op, existing=False):
         self.rec, self.op, self.existing = rec, op, existing
         self.writes = []
+        self.workflow_active = existing
         self.pr = {"id": 77, "number": 4, "html_url": "https://github.com/riseproject-upstreaming/proj/pull/4",
                    "state": "open", "body": dev_pr.body(rec, op),
                    "head": {"sha": SHA_B, "ref": "riscv64", "repo": {"id": 9}},
@@ -46,14 +47,32 @@ class FakeApi:
                     "fork": True, "parent": {"id": 1, "full_name": "example/proj"}}
         if path == f"/repos/{FORK}/branches/riscv64":
             return {"commit": {"sha": SHA_B, "commit": {"tree": {"sha": "d" * 40}}, "parents": []}}
+        if path == f"/repos/{FORK}/contents/.github/workflows?ref=main":
+            return [{"type": "file", "name": "build.yml", "path": ".github/workflows/build.yml"}]
+        if path == f"/repos/{FORK}/contents/.github/workflows/build.yml?ref=main":
+            import base64
+            text = "name: CI\npermissions: {contents: read}\njobs: {}\n"
+            return {"type": "file", "encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+        if path == f"/repos/{FORK}/actions/workflows?per_page=100":
+            return {"total_count": int(self.workflow_active),
+                    "workflows": ([{"path": ".github/workflows/build.yml", "state": "active"}] if self.workflow_active else [])}
         if path.startswith(f"/repos/{FORK}/pulls?"):
             return [self.pr] if self.existing else []
         if path == f"/repos/{FORK}/pulls/4":
             return self.pr
         raise AssertionError(path)
 
-    def write(self, path, value):
-        self.writes.append((path, value)); return self.pr
+    def write(self, method, path, value):
+        self.writes.append((method, path, value))
+        if path.endswith("/enable"):
+            self.workflow_active = True
+        return {}
+
+    def mutate(self, method, path, value):
+        self.writes.append((method, path, value))
+        if method == "PATCH":
+            self.pr["state"] = value["state"]
+        return self.pr
 
 
 class TestDevelopmentPR(unittest.TestCase):
@@ -99,17 +118,19 @@ class TestDevelopmentPR(unittest.TestCase):
     def test_create_and_read_back_exact_same_fork_pr(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); rec, op = records(root); api = FakeApi(rec, op)
-            with patch("upstreaming.dev_pr.Api", return_value=api):
+            with patch("upstreaming.dev_pr.Api", return_value=api), \
+                 patch("upstreaming.dev_pr.provisioning.WriteApi", return_value=api):
                 receipt = dev_pr.publish(root, op["operation_id"], "token", "99")
             self.assertEqual((receipt["pr_number"], receipt["head_sha"]), (4, SHA_B))
-            self.assertEqual(len(api.writes), 1)
-            self.assertEqual(api.writes[0][1]["head"], "riscv64")
-            self.assertEqual(api.writes[0][1]["base"], "main")
+            pr_write = next(call for call in api.writes if call[0] == "POST")
+            self.assertEqual(pr_write[2]["head"], "riscv64")
+            self.assertEqual(pr_write[2]["base"], "main")
 
     def test_existing_marked_pr_is_reused_without_duplicate(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); rec, op = records(root); api = FakeApi(rec, op, existing=True)
-            with patch("upstreaming.dev_pr.Api", return_value=api):
+            with patch("upstreaming.dev_pr.Api", return_value=api), \
+                 patch("upstreaming.dev_pr.provisioning.WriteApi", return_value=api):
                 receipt = dev_pr.publish(root, op["operation_id"], "token", "100")
             self.assertEqual(receipt["pr_number"], 4)
             self.assertEqual(api.writes, [])

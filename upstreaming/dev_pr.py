@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import collect, schemas
+from . import collect, provisioning, schemas
 from .common import CONTROL_REPO, DEV_REF, contribution_file_id
 
 
@@ -56,10 +56,12 @@ def load_request(root: Path, operation_id: str) -> tuple[dict, dict]:
 
 
 class Api(collect.Api):
-    def write(self, path: str, value: dict) -> dict:
-        if not path.startswith("/repos/") or not path.endswith("/pulls") or ".." in path:
+    def mutate(self, method: str, path: str, value: dict) -> dict:
+        create = method == "POST" and path.endswith("/pulls")
+        update = method == "PATCH" and re.search(r"/pulls/[0-9]+$", path)
+        if not path.startswith("/repos/") or ".." in path or not (create or update):
             raise DevPRError("unsupported development PR API operation")
-        req = urllib.request.Request(self.base + path, data=json.dumps(value).encode(), method="POST",
+        req = urllib.request.Request(self.base + path, data=json.dumps(value).encode(), method=method,
                                      headers={"Authorization": f"Bearer {self.token}",
                                               "Accept": "application/vnd.github+json",
                                               "Content-Type": "application/json",
@@ -83,6 +85,8 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
     head = collect.branch_head(api, repo["full_name"], DEV_REF)
     if not head or head["head"] != op["target"]["expected_head"]:
         raise DevPRError("development branch head changed")
+    configured = provisioning.configure_inherited_workflows(
+        provisioning.WriteApi(token=token), repo["full_name"], repo["default_branch"])
     base_ref = record["upstream"]["base_ref"]
     owner = repo["full_name"].split("/", 1)[0]
     query = urllib.parse.urlencode({"state": "open", "head": f"{owner}:{DEV_REF}", "base": base_ref, "per_page": 100})
@@ -93,7 +97,7 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
     if len(matching) > 1 or unrelated:
         raise DevPRError("existing development-head PR is ambiguous or unrelated")
     expected_body = body(record, op)
-    pr = matching[0] if matching else api.write(f"/repos/{repo['full_name']}/pulls", {
+    pr = matching[0] if matching else api.mutate("POST", f"/repos/{repo['full_name']}/pulls", {
         "title": "CI: develop riscv64 wheel support",
         "head": DEV_REF,
         "base": base_ref,
@@ -101,6 +105,9 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
         "draft": False,
         "maintainer_can_modify": False,
     })
+    if matching and configured["enabled"]:
+        api.mutate("PATCH", f"/repos/{repo['full_name']}/pulls/{pr['number']}", {"state": "closed"})
+        pr = api.mutate("PATCH", f"/repos/{repo['full_name']}/pulls/{pr['number']}", {"state": "open"})
     observed = api.get(f"/repos/{repo['full_name']}/pulls/{pr['number']}")
     if observed.get("state") != "open" or observed.get("body") != expected_body \
             or (observed.get("head") or {}).get("sha") != op["target"]["expected_head"] \
@@ -112,6 +119,7 @@ def publish(root: Path, operation_id: str, token: str, run_id: str) -> dict:
             "repository": repo["full_name"], "repository_id": repo["id"],
             "pr_id": observed["id"], "pr_number": observed["number"], "pr_url": observed["html_url"],
             "head_sha": op["target"]["expected_head"], "base_ref": base_ref,
+            "enabled_workflows": configured["enabled"], "disabled_workflows": configured["disabled"],
             "development_pr_run_id": int(run_id)}
 
 
