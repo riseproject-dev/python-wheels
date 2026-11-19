@@ -64,6 +64,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **691** — Splitting a non-relocatable native-deps build into its own job breaks CMake
   `find_package()` for the later build job unless both jobs agree on the same literal
   absolute install path (the meshioplusplus / netCDF case).
+- **714** — Pointing `auditwheel repair` at a dep-wheel's `.so` via `LD_LIBRARY_PATH` so it
+  can be *located* makes it get *vendored* too, unless `--exclude` says otherwise — two
+  loaded copies of a native runtime with its own internal registries corrupts them both
+  (the pyside6-essentials/shiboken6 case).
 - **702** — A build-time cross-toolchain downloader's own host-arch match list can simply be
   stale against the toolchain project's *own* current release matrix — check the toolchain's
   own CI/releases directly and bypass via an existing path/URL override, no patch needed (the
@@ -1030,3 +1034,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        *binary*'s own downloader lacking a riscv64 entry) — there the fix was exploiting an
        existing PATH-search fallback because the target binary's upstream truly ships no
        riscv64 asset; here the fix is a path override because the SDK's upstream already does.
+
+714. **Pointing `auditwheel repair` at a dep-wheel's `.so` via `LD_LIBRARY_PATH` so it can be
+     *located* makes it get *vendored* too, unless `--exclude` says otherwise (the
+     pyside6-essentials/shiboken6 case).** pyside6_essentials's extension modules carry an
+     `$ORIGIN/../shiboken6/` RPATH, valid once pip-installed next to the separately-published
+     `shiboken6` wheel. But `auditwheel repair` inspects the extracted wheel tree in
+     isolation, where that relative RPATH does not resolve, so it cannot find
+     `libshiboken6.abi3.so.6.11` and fails outright (gotcha 17's "could not be located" case).
+     Exporting `LD_LIBRARY_PATH` to point at the already pip-installed `shiboken6` wheel's own
+     copy of that `.so` fixes the "could not be located" failure — but with no `--exclude`,
+     auditwheel then does what it always does with a NEEDED library it *can* locate and that
+     isn't on the manylinux policy allowlist: it vendors a private copy into the wheel being
+     repaired and rewrites that wheel's own `.so`s to link against the copy instead.
+     - **The result is two independently-loaded copies of the same native runtime in one
+       process**, not one shared instance: the `shiboken6` wheel's copy (the one Python's
+       `import shiboken6.Shiboken` actually loads) and the vendored copy baked into
+       `pyside6_essentials` (the one its own `QtCore.abi3.so` etc. now link against). Every
+       piece of process-global C++ state libshiboken keeps — the enum-type registry, the
+       "have I initialized yet" flag `init_enum()` guards with — exists twice and the two
+       copies never see each other's writes.
+     - **The crash lands far from the cause.** `from PySide6 import QtCore` aborted with
+       `Fatal Python error: libshiboken: could not init enum` plus a `RecursionError:
+       maximum recursion depth exceeded` reported alongside it — not a riscv64 ABI fault and
+       not a Python-version mismatch (Alpine ships this exact shiboken6/PySide6 minor version
+       on riscv64 via ordinary distro packaging). `could not init enum` is
+       `sbkenum.cpp`'s `init_enum()` hitting `Py_FatalError` because its own
+       `PyImport_ImportModule("shiboken6.Shiboken")` sanity re-check failed, which only
+       happens here because the *other* loaded copy of libshiboken has already wedged the
+       interpreter into a bad enough state (hence the pending `RecursionError`) for that
+       import to fail. Chase the two-copies evidence instead of the printed message: check
+       the repaired wheel's `*.libs/` (or equivalent auditwheel-vendored dir) for a second,
+       renamed `libshiboken6*.so` before treating this as an upstream Qt/shiboken bug.
+     - **Fix: `--exclude libshiboken6.abi3.so.6.11` on the `auditwheel repair` call**, same as
+       gotcha 17's general dep-wheel rule — once excluded, the wheel keeps relying on the real
+       `shiboken6` install via its RPATH instead of a private, independently-stateful copy.
+       Keep the `LD_LIBRARY_PATH` export too: auditwheel still needs to resolve the path to
+       check it, `--exclude` only stops it from being grafted in.

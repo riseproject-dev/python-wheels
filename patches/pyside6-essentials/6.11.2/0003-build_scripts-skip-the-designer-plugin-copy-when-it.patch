@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 16 Nov 2026 00:00:00 +0000
+Subject: [PATCH] build_scripts: skip the designer plugin copy when it was
+ not built
+
+Upstream-Status: To upstream [no Gerrit account to submit to Qt's code review]
+
+prepare_standalone_package_linux() unconditionally copies
+{install_dir}/plugins/designer into the wheel's Qt/plugins/designer,
+with no existence guard (unlike every other optional copydir() call in
+this same function, which pass force=False). On this build the PySide
+Designer custom-widget plugin component isn't produced -- Rocky 10's
+qt6-qt*-devel packages carry Designer's headers/libs but not its
+runtime application pieces, same gap --no-qt-tools already works
+around for the bundled assistant/designer/linguist executables -- so
+plugins/designer never exists under install/, and the build failed
+with:
+
+  setup.py/prepare_packages:  [Errno 2] No such file or directory:
+  '.../install/plugins/designer'
+
+Pass force=False, same as the adjacent qt_translations_dir and
+shiboken6 docs/html copies in this file, so a missing optional
+component is skipped (logged) instead of aborting the build. The
+Designer plugin is only consumed by the standalone Designer *app* to
+load custom PySide widgets, not by `import PySide6.QtDesigner` itself.
+
+diff --git a/build_scripts/platforms/linux.py b/build_scripts/platforms/linux.py
+index 32ad9da..464a8ca 100644
+--- a/build_scripts/platforms/linux.py
++++ b/build_scripts/platforms/linux.py
+@@ -101,6 +101,7 @@ def prepare_standalone_package_linux(pyside_build, _vars, cross_build=False, is
+                     plugins_target / "designer",
+                     _filter=["*.so"],
+                     recursive=False,
++                    force=False,
+                     _vars=_vars)
+
+         copied_plugins = pyside_build.get_shared_libraries_in_path_recursively(
+--
+2.43.0

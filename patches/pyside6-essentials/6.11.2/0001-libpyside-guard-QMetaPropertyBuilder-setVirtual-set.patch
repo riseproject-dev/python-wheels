@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 25 Oct 2026 00:00:00 +0000
+Subject: [PATCH] libpyside: guard QMetaPropertyBuilder::setVirtual/setOverride
+ for Qt < 6.11
+
+Upstream-Status: Inappropriate [our image ships Qt 6.10.1, not the 6.11.x pyside-setup 6.11.2 expects]
+
+MetaObjectBuilderPrivate::addProperty() calls
+QMetaPropertyBuilder::setVirtual()/setOverride(), which Qt added in
+6.11 (alongside the PropertyFlag::Virtual/Override property flags).
+As documented in this package's PR description, the manylinux_riscv64
+image only has Rocky 10's Qt6 AppStream packages, which are Qt 6.10.1,
+so these two calls fail to compile:
+
+  dynamicqmetaobject.cpp:352:17: error: 'class QMetaPropertyBuilder' has
+  no member named 'setVirtual'; did you mean 'setFinal'?
+  dynamicqmetaobject.cpp:353:17: error: 'class QMetaPropertyBuilder' has
+  no member named 'setOverride'
+
+Guard both calls with a QT_VERSION check so the module still builds
+against 6.10.1; QProperty's VIRTUAL/OVERRIDE qualifiers (QML-only,
+cf. QTBUG-115656) simply won't be propagated onto the QMetaObject
+under the downleveled Qt, same as every other 6.11-only surface this
+build already exposes as 6.10 per the PR description.
+
+diff --git a/sources/pyside6/libpyside/dynamicqmetaobject.cpp b/sources/pyside6/libpyside/dynamicqmetaobject.cpp
+index 0000000..0000000 100644
+--- a/sources/pyside6/libpyside/dynamicqmetaobject.cpp
++++ b/sources/pyside6/libpyside/dynamicqmetaobject.cpp
+@@ -349,8 +349,10 @@ int MetaObjectBuilderPrivate::addProperty(const QByteArray &propertyName,
+     newProperty.setUser(flags.testFlag(PySide::Property::PropertyFlag::User));
+     newProperty.setConstant(flags.testFlag(PySide::Property::PropertyFlag::Constant));
+     newProperty.setFinal(flags.testFlag(PySide::Property::PropertyFlag::Final));
++#if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0)
+     newProperty.setVirtual(flags.testFlag(PySide::Property::PropertyFlag::Virtual));
+     newProperty.setOverride(flags.testFlag(PySide::Property::PropertyFlag::Override));
++#endif
+
+     index = newProperty.index() + m_baseObject->propertyCount();
+     m_dirty = true;
+--
+2.43.0
