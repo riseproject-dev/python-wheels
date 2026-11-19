@@ -202,11 +202,19 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
                   "digests": {"artifact": (outcome.get("artifact") or {}).get("digest") or ""}}
             staged.append(("evidence", ev))
         new["dossier_evidence_id"] = eid
+        decision = (dossier.get("proposal") or {}).get("decision") if isinstance(dossier, dict) else None
         if not eid:
             new["activity"] = "waiting_human"
             new["pending_human_action"] = {"kind": "investigation_without_dossier", "requested_at": now,
                                            "reminded_at": None, "escalated_at": None}
-        elif dossier["proposal"]["decision"] == "park":
+        elif decision not in ("develop", "park"):
+            new["phase"] = "investigation"
+            new["activity"] = "idle"
+            new["pending_human_action"] = None
+            new["revision"] += 1
+            staged.append(("events", lifecycle._event(rec, new, "dossier_contract_stale", "observation",
+                                                       str(worker_run_id or eid), now, True)))
+        elif decision == "park":
             new["previous_phase"] = new["phase"]
             new["phase"] = "parked"
             new["activity"] = "idle"
@@ -289,8 +297,34 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
         provision_report.append({"contribution": cid, "status": "provisioned"})
     out.report["provisions"] = provision_report
 
-    # 1. Publication outcomes from finished workers.
-    pubs_report = []
+    # 1. Publication outcomes from finished workers. A development reset or an
+    # infrastructure retry can leave multiple artifacts for the same immutable
+    # contribution revision. Fold only the newest artifact; never let an older
+    # outcome overwrite or crash a later verified Result.
+    latest: dict[tuple[str, int], tuple[tuple[int, int], dict]] = {}
+    superseded = []
+    for pub in publications:
+        task = pub.get("task") or {}
+        cid, revision = task.get("contribution_id"), task.get("revision")
+        if not isinstance(cid, str) or not isinstance(revision, int):
+            continue
+        def numeric(value):
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+        rank = (numeric(pub.get("publication_artifact_id")), numeric(pub.get("worker_run_id")))
+        key = (cid, revision)
+        prior = latest.get(key)
+        if prior is None or rank > prior[0]:
+            if prior is not None:
+                superseded.append(prior[1])
+            latest[key] = (rank, pub)
+        else:
+            superseded.append(pub)
+    publications = [item[1] for item in latest.values()]
+    pubs_report = [{"contribution": (pub.get("task") or {}).get("contribution_id"),
+                    "ignored": "superseded publication artifact"} for pub in superseded]
     for pub in publications:
         cid = (pub.get("task") or {}).get("contribution_id")
         if cid not in by_cid:

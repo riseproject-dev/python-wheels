@@ -95,8 +95,10 @@ The repository also gets:
   validation and the state-only trigger audit on PRs and pushes.
 - `.github/workflows/upstreaming-controller.yml`: `observe` (read-only
   report) and `reconcile` (state writer, active only when `read_only` is
-  false). `workflow_dispatch` only; the schedule and issue triggers are
-  commented out until the rollout stage is approved.
+  false). Label and command events trigger immediate ticks. Completion of an
+  investigator, worker, provisioning or publish-retry workflow triggers the
+  next tick, and a 15-minute schedule is the recovery fallback. State-only
+  commits do not match any trigger, preventing recursion.
 - `.github/workflows/upstreaming-image.yml`: rebuilds and publishes the
   reproduction image weekly, on changes to `upstreaming/image/`, and on demand.
 - `.github/workflows/upstreaming-publish-retry.yml`: publish-only retry of

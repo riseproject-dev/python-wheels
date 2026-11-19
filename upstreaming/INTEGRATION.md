@@ -83,6 +83,13 @@ workflow environments. `park` stops work without a human prompt; an authorized
 `force-develop` command can override it with an exact revision, class, paths and
 reason. Human approval remains mandatory at upstream handoff.
 
+The remaining orchestration gap was automatic continuation: rollout-disabled
+controller triggers left a completed investigation in `agent_running` until a
+manual tick. Current local workflow changes trigger reconciliation when an
+investigator, worker, provisioning or publish-retry workflow completes, plus on
+request labels and commands. A 15-minute schedule is the recovery fallback.
+State-only commits do not trigger the controller, so the chain cannot recurse.
+
 Workflow-only fork provisioning is deployed but real creation/token/settings
 permissions remain unverified.
 

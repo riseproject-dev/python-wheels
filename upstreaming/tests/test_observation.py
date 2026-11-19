@@ -214,7 +214,8 @@ class TestTriggers(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         findings = triggers.audit(root / ".github/workflows", ["upstreaming-state/contributions/x.json"])
         self.assertEqual([f.workflow for f in findings if f.triggered], [])
-        self.assertEqual(triggers.workflow_run_consumers(root / ".github/workflows"), [])
+        self.assertEqual(triggers.workflow_run_consumers(root / ".github/workflows"),
+                         ["upstreaming-controller.yml"])
 
 
 class TestTick(unittest.TestCase):
@@ -297,8 +298,9 @@ class TestTick(unittest.TestCase):
                "worker_run_id": "7", "publication_artifact_id": 3,
                "dossier": dossier(), "proposal": {"diagnosis": "Bounded wheel integration work is actionable."},
                "artifact": {"digest": "sha256:" + "0" * 64}}
+        legacy = dict(pub, publication_artifact_id=2, worker_run_id="6", dossier={"legacy": "missing decision"})
         snap = reconcile.Snapshot(contributions={"c": rec}, operations={}, consumed={}, projects={}, evidence={})
-        out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T, publications=[pub],
+        out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T, publications=[legacy, pub],
                              pressure=capacity.Pressure(ok=True), observe=False)
         ev = [r for k, r in out.staged if k == "evidence"]
         self.assertEqual(ev[0]["kind"], "dossier")
@@ -310,6 +312,8 @@ class TestTick(unittest.TestCase):
         self.assertEqual(final["scope_paths"], [".github/workflows/*"])
         self.assertIsNone(final["pending_human_action"])
         self.assertEqual(len(out.report["provision_requests"]), 1)
+        self.assertTrue(any(item.get("ignored") == "superseded publication artifact"
+                            for item in out.report["publications"]))
         self.assertEqual(out.report["requested_effects"], [])
 
     def test_investigation_can_park_without_human_gate(self):
