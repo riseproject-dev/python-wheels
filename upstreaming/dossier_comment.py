@@ -68,7 +68,7 @@ def render(dossier: dict, task: dict, result: dict) -> str:
 
 def request(method: str, path: str, token: str, body: dict | None = None):
     prefix = f"/repos/{CONTROL_REPO}/issues/"
-    if not token or not path.startswith(prefix) or ".." in path:
+    if method not in ("GET", "POST") or not token or not path.startswith(prefix) or ".." in path:
         raise CommentError("invalid comment API request")
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request("https://api.github.com" + path, data=data, method=method,
@@ -81,7 +81,7 @@ def request(method: str, path: str, token: str, body: dict | None = None):
         raise CommentError(f"comment API HTTP {exc.code}") from None
     if len(raw) > 2 * 1024 * 1024:
         raise CommentError("oversized comment API response")
-    return json.loads(raw)
+    return json.loads(raw) if raw else None
 
 
 def trusted_runtime(env: dict[str, str]) -> bool:
@@ -90,7 +90,8 @@ def trusted_runtime(env: dict[str, str]) -> bool:
         and env.get("GITHUB_WORKFLOW") in ("Upstreaming investigator", "Upstreaming publish retry")
 
 
-def publish(dossier: dict, proposal: dict, task: dict, result: dict, token: str, run_id: str) -> dict:
+def publish(dossier: dict, proposal: dict, task: dict, result: dict, token: str, run_id: str,
+            expected_author: str | None = None) -> dict:
     validate(dossier, proposal, task)
     for key in ("work_id", "claim_id", "artifact_id", "digest"):
         if not result.get(key):
@@ -102,10 +103,11 @@ def publish(dossier: dict, proposal: dict, task: dict, result: dict, token: str,
     matches = [comment for comment in comments if identity in (comment.get("body") or "")]
     if len(matches) > 1:
         raise CommentError("multiple comments have the exact Result marker")
+    created = not matches
     comment = matches[0] if matches else request("POST", f"/repos/{CONTROL_REPO}/issues/{number}/comments", token, {"body": body})
     observed = request("GET", f"/repos/{CONTROL_REPO}/issues/comments/{comment['id']}", token)
-    if observed.get("body") != body:
-        raise CommentError("comment readback does not match verified Result")
+    if observed.get("body") != body or created and expected_author and (observed.get("user") or {}).get("login") != expected_author:
+        raise CommentError("comment readback does not match verified Result and App author")
     return {"schema_version": 1, "status": "published", "contribution_id": task["contribution_id"],
             "revision": task["revision"], "work_id": result["work_id"], "claim_id": result["claim_id"],
             "artifact_id": result["artifact_id"], "comment_id": observed["id"],
@@ -123,6 +125,7 @@ if __name__ == "__main__":
     if not trusted_runtime(os.environ):
         raise CommentError("dossier comments require a trusted upstreaming Result workflow")
     values = [json.loads(getattr(args, name).read_text()) for name in ("dossier", "proposal", "task", "result")]
-    receipt = publish(*values, os.environ.get("GH_TOKEN", ""), os.environ["GITHUB_RUN_ID"])
+    receipt = publish(*values, os.environ.get("GH_TOKEN", ""), os.environ["GITHUB_RUN_ID"],
+                      os.environ.get("UPSTREAMING_COMMENT_AUTHOR") or None)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(receipt, indent=2))

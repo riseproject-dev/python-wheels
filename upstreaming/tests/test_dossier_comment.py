@@ -39,6 +39,25 @@ class TestDossierComment(unittest.TestCase):
         with self.assertRaises(dossier_comment.CommentError):
             dossier_comment.publish(dossier(), proposal(), self.task(), result, "token", "9")
 
+    def test_new_comment_requires_app_author_but_existing_comment_is_not_rewritten(self):
+        result = self.result(); body = dossier_comment.render(dossier(), self.task(), result)
+        new_comment = {"id": 45, "body": body, "html_url": "https://github.com/x", "user": {"login": "riseproject-dev[bot]"}}
+        def create(method, path, token, payload=None):
+            return [] if path.endswith("?per_page=100") else new_comment
+        with patch("upstreaming.dossier_comment.request", side_effect=create):
+            receipt = dossier_comment.publish(dossier(), proposal(), self.task(), result, "token", "99",
+                                              "riseproject-dev[bot]")
+        self.assertEqual(receipt["comment_id"], 45)
+        old_comment = dict(new_comment, id=44, user={"login": "github-actions[bot]"})
+        calls = []
+        def existing(method, path, token, payload=None):
+            calls.append(method)
+            return [old_comment] if path.endswith("?per_page=100") else old_comment
+        with patch("upstreaming.dossier_comment.request", side_effect=existing):
+            dossier_comment.publish(dossier(), proposal(), self.task(), result, "token", "99",
+                                    "riseproject-dev[bot]")
+        self.assertNotIn("POST", calls)
+
     def test_existing_exact_result_comment_is_reused(self):
         result = self.result()
         body = dossier_comment.render(dossier(), self.task(), result)
