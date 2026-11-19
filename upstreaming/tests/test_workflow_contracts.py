@@ -115,6 +115,8 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("`inputs.upload`", text)
         self.assertIn("commit history", text)
         self.assertIn("rejected/superseded approaches", text)
+        self.assertIn("RISC-V GitHub Runners [1]", text)
+        self.assertIn("[1]: https://ci.riseproject.dev/", text)
 
     def test_development_writers_do_not_wait_for_environment_review(self):
         worker = source("upstreaming-worker")
