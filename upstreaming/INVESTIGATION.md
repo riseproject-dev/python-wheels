@@ -60,23 +60,29 @@ PR, CI, documentation and maintainer-review research cannot be skipped.
 native Claim reconciliation can write Completion. It downloads staging from the
 same run, reads only bounded JSON at the exact Claim namespace, rejects symlinks,
 checks task/revision/head and issue-digest identity, and validates the dossier and
-proposal. Agent files are never executed. An incomplete dossier fails the job
-before Completion or upload. Explicit cancellation can proceed without a dossier
-but cannot smuggle a completed intent. The trusted record job checks the verified
-artifact again before accepting its dossier as evidence.
+proposal. The proposal includes a required `develop` or `park` decision. A
+`develop` decision supplies one admission class and 1..32 validated exact paths
+or final-component globs. A `park` decision requires no class and no paths. Agent
+files are never executed. An incomplete dossier fails the job before Completion
+or upload. Explicit cancellation can proceed without a dossier but cannot smuggle
+a completed intent. The trusted record job checks the verified artifact again
+before accepting its dossier as evidence.
 
 This is a completeness/provenance-shape check, not semantic proof that every
 claim is true or that the model actually followed every link. Model-authored
-coverage and graph evidence remain untrusted and require review. The native
-Result proves artifact delivery, not the accuracy of research.
+coverage and graph evidence remain model judgment. Mechanical path and operation
+gates bound development, while semantic human review occurs at upstream handoff.
+The native Result proves artifact delivery, not the accuracy of research.
 
-## Deployment blockers
+## Automatic lifecycle decision
 
-Adding Issues, extensions and the graph MCP changes the investigator's native
-worker contract. The installed queue requires a quiescent, supported policy
-update for changed authority; pending delivery barriers prevent that update.
-The earlier unverified deliveries must be resolved through supported native
-verification, not by resetting the queue or fabricating Results.
+A verified `develop` dossier moves directly to workflow-only fork provisioning
+and bounded `riscv64` development. It does not create a scope-review prompt or
+require named owners. A verified `park` dossier becomes idle and launches no
+writer. An authorized human can override a parked result with a stale-proof
+`force-develop` command that supplies the class, bounded paths and rationale.
+Human approval is otherwise deferred until the exact clean head is ready for
+upstream handoff.
 
 The patch-development worker's detector remains unchanged. The separate Pi-only
 detection incompatibility must not be silently resolved by disabling its detector

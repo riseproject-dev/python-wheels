@@ -14,7 +14,8 @@ UP = "example/proj"
 
 
 def request():
-    rec = contribution(phase="provisioning", activity="waiting_human", dossier_evidence_id="dossier-1", fork=None)
+    rec = contribution(phase="provisioning", activity="waiting_human", dossier_evidence_id="dossier-1",
+                       scope_paths=[".github/workflows/*"], fork=None)
     op = recovery.plan(contribution_id=rec["contribution_id"], revision=rec["revision"], kind="fork_provision",
                        policy_version="test", reason_ids=["dossier-1"],
                        target={"repository": FORK, "repository_id": None, "ref": "riscv64", "base_sha": SHA_C, "expected_head": None},
@@ -124,6 +125,7 @@ class TestProvisioning(unittest.TestCase):
     def test_controller_records_intent_once_and_no_model_for_provisioning(self):
         rec, _ = request()
         rec["active_operation_id"] = None
+        rec["owners"] = {"primary": None, "backup": None, "submitter": None, "handoff_reviewer": None}
         args = dict(operations={}, consumed={}, projects={}, policy=policy(read_only=False),
                     inputs=controller.Inputs(now=datetime.fromisoformat(NOW), pressure=capacity.Pressure(ok=True)))
         tick = controller.tick(contributions={"c": rec}, **args)

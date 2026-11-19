@@ -188,8 +188,8 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
     elif status == "rejected":
         new["activity"] = "idle" if fclass == "stale" else "fix_needed"
     elif status == "investigation":
-        # The dossier is recorded as evidence; scope approval is a human
-        # decision (/upstreaming approve-scope), so wait for it.
+        # The dossier is recorded as evidence. Its validated decision either
+        # enters automatic provisioning or parks without launching a writer.
         dossier = outcome.get("dossier")
         eid = None
         if isinstance(dossier, dict):
@@ -201,10 +201,29 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
                   "limitations": [], "data": dossier,
                   "digests": {"artifact": (outcome.get("artifact") or {}).get("digest") or ""}}
             staged.append(("evidence", ev))
-        new["activity"] = "waiting_human"
-        new["pending_human_action"] = {"kind": "review_dossier" if eid else "investigation_without_dossier",
-                                       "requested_at": now, "reminded_at": None, "escalated_at": None}
         new["dossier_evidence_id"] = eid
+        if not eid:
+            new["activity"] = "waiting_human"
+            new["pending_human_action"] = {"kind": "investigation_without_dossier", "requested_at": now,
+                                           "reminded_at": None, "escalated_at": None}
+        elif dossier["proposal"]["decision"] == "park":
+            new["previous_phase"] = new["phase"]
+            new["phase"] = "parked"
+            new["activity"] = "idle"
+            new["parked_reason"] = dossier["proposal"]["rationale"][:2000]
+            new["pending_human_action"] = None
+            new["revision"] += 1
+            staged.append(("events", lifecycle._event(rec, new, "dossier_parked", "observation",
+                                                       str(worker_run_id or eid), now, True)))
+        else:
+            new["phase"] = "provisioning"
+            new["activity"] = "idle"
+            new["admission_class"] = dossier["proposal"]["admission_class"]
+            new["scope_paths"] = list(dossier["proposal"]["allowed_paths"])
+            new["pending_human_action"] = None
+            new["revision"] += 1
+            staged.append(("events", lifecycle._event(rec, new, "dossier_develop", "observation",
+                                                       str(worker_run_id or eid), now, True)))
     new["updated_at"] = now
     staged.append(("contributions", new))
     return new, staged

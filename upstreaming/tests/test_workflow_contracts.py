@@ -72,6 +72,14 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("upstreaming.dossier_comment", notify_text)
         self.assertIn("upstreaming-publication", notify_text)
 
+    def test_development_writers_do_not_wait_for_environment_review(self):
+        worker = source("upstreaming-worker")
+        self.assertNotIn("environment", worker["jobs"]["publish"])
+        for name in ("upstreaming-provision.yml", "upstreaming-publish-retry.yml"):
+            workflow = yaml.safe_load((WF / name).read_text())
+            for job in workflow["jobs"].values():
+                self.assertNotIn("environment", job, name)
+
     def test_investigation_retry_also_publishes_verified_comment(self):
         retry = yaml.safe_load((WF / "upstreaming-publish-retry.yml").read_text())
         notify = retry["jobs"]["notify"]

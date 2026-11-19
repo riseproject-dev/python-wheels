@@ -61,6 +61,11 @@ GRAMMAR: dict[str, dict[str, str]] = {
                       "class": r"configuration_integration|architecture_correctness|optimized_backend",
                       "backup": r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})",
                       "paths": r"[A-Za-z0-9_.*/?\[\]{},-]{1,500}"},
+    # Explicit human override for an automatically parked dossier. Development
+    # remains automated after this stale-proof bounded-scope decision.
+    "force-develop": {"contribution": _ID, "revision": _INT,
+                      "class": r"configuration_integration|architecture_correctness|optimized_backend",
+                      "paths": r"[A-Za-z0-9_.*/?\[\]{},-]{1,500}", "reason": _REASON},
     # Provisioning -> development: verify a human-created fork, its riscv64
     # branch and the upstream base, then record them (trusted code reads them).
     "provision": {"contribution": _ID, "revision": _INT},

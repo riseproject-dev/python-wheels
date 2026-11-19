@@ -287,26 +287,51 @@ class TestTick(unittest.TestCase):
         final = [r for k, r in out.staged if k == "contributions"][-1]
         self.assertEqual((final["activity"], final["active_work"]), ("waiting_human", None))
 
-    def test_investigation_outcome_records_dossier_and_waits(self):
+    def test_investigation_outcome_auto_admits_development(self):
         from upstreaming import reconcile
+        from upstreaming.tests.test_dossier_gate import dossier
         rec = contribution(phase="investigation", activity="agent_running")
         rec["active_work"] = {"dedupe_key": "k", "task": "investigation", "revision": 0,
                               "requested_at": NOW, "deadline_at": NOW}
         pub = {"status": "investigation", "task": {"contribution_id": rec["contribution_id"], "revision": 0},
                "worker_run_id": "7", "publication_artifact_id": 3,
-               "dossier": {"build_backend": "meson-python"}, "proposal": {"diagnosis": "numpy builds with meson"},
+               "dossier": dossier(), "proposal": {"diagnosis": "Bounded wheel integration work is actionable."},
                "artifact": {"digest": "sha256:" + "0" * 64}}
         snap = reconcile.Snapshot(contributions={"c": rec}, operations={}, consumed={}, projects={}, evidence={})
         out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T, publications=[pub],
                              pressure=capacity.Pressure(ok=True), observe=False)
         ev = [r for k, r in out.staged if k == "evidence"]
         self.assertEqual(ev[0]["kind"], "dossier")
-        self.assertEqual(ev[0]["data"], {"build_backend": "meson-python"})
+        self.assertEqual(ev[0]["data"], dossier())
         final = [r for k, r in out.staged if k == "contributions"][-1]
         self.assertEqual(final["dossier_evidence_id"], ev[0]["evidence_id"])
-        self.assertEqual((final["activity"], final["active_work"]), ("waiting_human", None))
-        self.assertEqual(final["pending_human_action"]["kind"], "review_dossier")
+        self.assertEqual((final["phase"], final["activity"], final["revision"]), ("provisioning", "waiting_capacity", 1))
+        self.assertEqual(final["admission_class"], "configuration_integration")
+        self.assertEqual(final["scope_paths"], [".github/workflows/*"])
+        self.assertIsNone(final["pending_human_action"])
+        self.assertEqual(len(out.report["provision_requests"]), 1)
         self.assertEqual(out.report["requested_effects"], [])
+
+    def test_investigation_can_park_without_human_gate(self):
+        from upstreaming import reconcile
+        from upstreaming.tests.test_dossier_gate import dossier
+        rec = contribution(phase="investigation", activity="agent_running")
+        rec["active_work"] = {"dedupe_key": "k", "task": "investigation", "revision": 0,
+                              "requested_at": NOW, "deadline_at": NOW}
+        research = dossier()
+        research["proposal"].update(decision="park", admission_class=None, allowed_paths=[],
+                                    rationale="No concrete upstream patch is currently actionable; retain verified evidence and wait for a new prerequisite.")
+        pub = {"status": "investigation", "task": {"contribution_id": rec["contribution_id"], "revision": 0},
+               "worker_run_id": "8", "publication_artifact_id": 4, "dossier": research,
+               "proposal": {"diagnosis": "No actionable patch."}, "artifact": {"digest": "sha256:" + "1" * 64}}
+        snap = reconcile.Snapshot(contributions={"c": rec}, operations={}, consumed={}, projects={}, evidence={})
+        out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T, publications=[pub],
+                             pressure=capacity.Pressure(ok=True), observe=False)
+        final = [r for k, r in out.staged if k == "contributions"][-1]
+        self.assertEqual((final["phase"], final["activity"], final["active_work"], final["revision"]),
+                         ("parked", "idle", None, 1))
+        self.assertIn("No concrete upstream patch", final["parked_reason"])
+        self.assertEqual(out.report["provision_requests"], [])
 
     def test_command_resolves_contribution_from_issue(self):
         rec = contribution(activity="waiting_ci")

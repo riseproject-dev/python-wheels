@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 from . import schemas
-from .common import sha256_text
+from .common import sha256_text, validate_scope_paths
 
 RESEARCH_CATEGORIES = (
     "tracking_issue", "upstream_issues", "upstream_pull_requests", "ci_history",
@@ -56,6 +56,12 @@ def validate(dossier: dict, proposal: dict, task: dict) -> None:
         raise DossierError("absent ecosystem report needs documented discovery and justification")
     if issue["url"] not in {s["url"] for s in dossier["research"]["tracking_issue"]["sources"]}:
         raise DossierError("tracking-issue research must cite the original issue URL")
+    decision = dossier["proposal"]
+    if decision["decision"] == "develop":
+        try:
+            validate_scope_paths(decision["allowed_paths"])
+        except ValueError as exc:
+            raise DossierError(str(exc)) from None
 
 
 def _read(root: Path, relative: Path, limit: int = 256 * 1024) -> str:

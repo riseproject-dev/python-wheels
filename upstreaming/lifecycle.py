@@ -21,7 +21,7 @@ from typing import Any
 
 from . import schemas
 from .commands import Command, URGENT
-from .common import DEV_REF
+from .common import DEV_REF, validate_scope_paths
 
 PHASES = (
     "queued", "investigation", "provisioning", "development", "handoff",
@@ -305,6 +305,22 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
         rec["activity"] = "idle"
         _bump(rec)
         bumped = True
+    elif v == "force-develop":
+        if phase != "parked":
+            return _reject(record, f"force-develop needs phase parked, not {phase}")
+        paths = [g for g in a["paths"].split(",") if g]
+        try:
+            validate_scope_paths(paths)
+        except ValueError as exc:
+            return _reject(record, str(exc))
+        rec["phase"] = "provisioning"
+        rec["activity"] = "idle"
+        rec["parked_reason"] = None
+        rec["admission_class"] = a["class"]
+        rec["scope_paths"] = paths
+        rec["pending_human_action"] = None
+        _bump(rec)
+        bumped = True
     elif v == "approve-scope":
         if phase != "investigation":
             return _reject(record, f"approve-scope needs phase investigation, not {phase}")
@@ -457,9 +473,6 @@ def new_contribution(*, contribution_id: str, project_id: str, issue: dict, upst
 
 def write_admission(record: dict) -> str | None:
     """Gate before any write-capable work is submitted for a contribution."""
-    owners = record["owners"]
-    if not owners.get("primary") or not owners.get("backup"):
-        return "primary and backup RISE owners are required before write admission"
     if not record.get("admission_class"):
         return "admission class not approved"
     if not record.get("fork") or not record["fork"].get("repository_id"):

@@ -405,7 +405,22 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   skipped. The `ecosystem_report` research category may be `not_applicable`
   only after verifying no matching report exists. If one exists, the separate
   `ecosystem_report` object records its URL/revision, support status, used
-  findings, and current corroboration/conflicts. Preserve the facts needed to
+  findings, and current corroboration/conflicts.
+
+  The `proposal` object MUST include:
+  - `decision`: `develop` when a concrete bounded patch can advance official
+    riscv64 wheel support, otherwise `park`;
+  - `rationale`: a source-grounded explanation of that decision;
+  - `admission_class`: one of `configuration_integration`,
+    `architecture_correctness`, or `optimized_backend` for `develop`, and null
+    for `park`;
+  - `allowed_paths`: 1..32 exact relative paths or directory globs with a
+    single final wildcard component for `develop`, and an empty list for
+    `park`. Never use `*`, `**`, absolute paths, `.git`, or `..`.
+
+  A `develop` decision automatically provisions the fork and starts development;
+  it does not wait for scope approval. A `park` decision stops work but can be
+  overridden later by an authorized `force-develop` command. Preserve the facts needed to
   approve scope, with evidence:
   - release coverage: which platforms and architectures the latest release
     ships wheels for on PyPI, and whether riscv64 is already there;

@@ -69,6 +69,20 @@ def canonical_json(data: Any) -> str:
     return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
 
 
+def validate_scope_paths(paths: list[str]) -> list[str]:
+    """Validate exact relative paths or one final-component glob."""
+    if not paths or len(paths) > 32:
+        raise ValueError("scope needs 1..32 paths")
+    for allowed in paths:
+        path = Path(allowed)
+        if len(allowed) > 200 or path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] == ".git":
+            raise ValueError(f"unsafe scope path: {allowed}")
+        wildcard_parts = [part for part in path.parts if any(ch in part for ch in "*?[]")]
+        if wildcard_parts and (len(path.parts) < 2 or wildcard_parts != [path.parts[-1]] or "**" in path.parts[-1]):
+            raise ValueError(f"scope wildcard must be one final component: {allowed}")
+    return paths
+
+
 def normalize_distribution(name: str) -> str:
     """PEP 503 name normalization."""
     return re.sub(r"[-_.]+", "-", name).lower()
