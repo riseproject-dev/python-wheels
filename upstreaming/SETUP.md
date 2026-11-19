@@ -44,6 +44,14 @@ Automatic writes remain gated by trusted code:
 - retries reuse the same worker Result and operation. They do not invoke a model;
 - no job receives production package credentials.
 
+`riseproject-upstreaming` is intentionally an empty shell organization used only
+for contribution forks. It has no package/index secrets, publishing environments,
+repository variables or configured external OIDC relying-party trust, and these
+must not be added. Existing upstream publication steps may execute and fail for
+the fork identity; success is evidence of an unexpectedly broad upstream trust
+policy and must be reported. This does not relax controls on GitHub repository
+mutation permissions.
+
 The writer App must be installed on `riseproject-upstreaming` and have the
 repository-creation permission plus Administration, Contents, Workflows, Actions
 and Pull requests write permissions needed by the trusted setup and publisher

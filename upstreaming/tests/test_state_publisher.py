@@ -142,15 +142,21 @@ class TestPublisherValidation(unittest.TestCase):
     def test_forbidden_workflow_content(self):
         for content, what in [
             ("on: pull_request_target\n", "pull_request_target"),
-            ("permissions:\n  id-token: write\n", "OIDC"),
             ("env:\n  T: ${{ secrets.PYPI_TOKEN }}\n", "secret"),
             ("run: echo \"${{ github.event.issue.body }}\"\n", "untrusted"),
-            ("- uses: pypa/gh-action-pypi-publish@release/v1\n", "publication"),
         ]:
             with self.subTest(what):
                 git(self.repo, "reset", "-q", "--hard", self.base)
                 c = commit_files(self.repo, {".github/workflows/wheels.yml": "on: [push]\n" + content})
                 self.assertTrue(any(what in p for p in self.validate(c).problems), what)
+
+    def test_credentialless_fork_does_not_reject_oidc_or_publish_syntax(self):
+        content = ("on: [push]\npermissions:\n  id-token: write\nsteps:\n"
+                   "  - uses: pypa/gh-action-pypi-publish@release/v1\n"
+                   "  - run: twine upload dist/*\n")
+        c = commit_files(self.repo, {".github/workflows/wheels.yml": content})
+        problems = self.validate(c).problems
+        self.assertFalse(any("OIDC" in p or "publication" in p for p in problems))
 
     def test_debug_commits_and_upstream_facing(self):
         commit_files(self.repo, {".github/workflows/wheels.yml": "on: [push]\n# fork\n"},
