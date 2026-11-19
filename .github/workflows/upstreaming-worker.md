@@ -304,8 +304,8 @@ You cannot push, open PRs, comment or change any repository. A trusted job
 re-applies your series in a fresh repository, validates it against the
 approved scope and pushes it to `riscv64` itself. Anything outside
 `allowed_paths`, any `{debug}` commit when `upstream_facing` is true, any
-`pull_request_target`, `id-token: write`, new secret, interpolation of untrusted event text
-into scripts or package publication step is rejected.
+`pull_request_target`, new secret, or interpolation of untrusted event text into
+scripts is rejected.
 
 ## Mandatory change-history research
 
@@ -355,16 +355,20 @@ and analogous changes in the proposal diagnosis.
    such as `inputs.upload`, add `github.event_name == 'push'`, or otherwise alter
    non-riscv64 behavior. If PR CI builds a wheel but intentionally does not upload
    it, leave that policy unchanged and record the acceptance limitation for a
-   separate trusted probe. If the same workflow also contains an OIDC, Twine or
-   `pypa/gh-action-pypi-publish` publication job, keep the build/test workflow and
-   add a separate `{debug}` commit setting that publication job to the literal
-   `if: false`. Do not add credentials, change release behavior, or disable the
-   whole workflow. Trusted setup enables the workflow only after verifying every
-   publication-capable job is unreachable. Remove this debug commit before
-   handoff. Add a separate `{debug}` trigger/guard adjustment only when no
-   PR-compatible CI trigger exists, and explain the repository history that
-   justifies it. If the project already builds riscv64 wheels upstream, a
-   necessary `{debug}` guard adjustment alone can be the whole series.
+   separate trusted probe. `riseproject-upstreaming` is a credentialless,
+   configuration-free shell organization used only to hold contribution forks.
+   It has no package secrets, publishing environments, repository variables or
+   configured external OIDC trust, and none will be added. Do not change or
+   disable `id-token: write`, Twine, or package-publisher actions merely because
+   they exist: publication should fail out of the box for the fork identity. A
+   successful external publication would demonstrate that the upstream relying
+   party already trusts an equivalently broad identity and must be reported, not
+   hidden with a source patch. Repository-mutating GitHub permissions and
+   `pull_request_target` remain forbidden because they can mutate the fork itself.
+   Add a separate `{debug}` trigger/guard adjustment only when no PR-compatible
+   CI trigger exists, and explain the repository history that justifies it. If
+   the project already builds riscv64 wheels upstream, a necessary `{debug}`
+   guard adjustment alone can be the whole series.
 4. Baseline code is `rv64gc`. Optional RVV only behind Linux `riscv_hwprobe`
    (`RISCV_HWPROBE_KEY_IMA_EXT_0` / `RISCV_HWPROBE_IMA_V`) with an `rv64gc`
    fallback. No global `-march=...v...` or `-march=native`.
@@ -377,7 +381,8 @@ and analogous changes in the proposal diagnosis.
 7. Do not ask questions upstream. If scope or maintainer intent is unclear,
    use `outcome: "needs_clarification"` with the options and your
    recommendation in `diagnosis`.
-8. Commit messages follow the upstream project's conventions. Never mention
+8. Commit structure and history updates follow the upstream project's documented
+   and observed conventions. Never mention
    AI tools or add AI attribution trailers. When the patch adds or relies on the
    `ubuntu-24.04-riscv` native runner, the commit body must mention
    `RISC-V GitHub Runners [1]` and end with this reference line exactly:
