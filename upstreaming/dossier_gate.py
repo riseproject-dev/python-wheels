@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 from . import schemas
-from .common import canonical_json, sha256_text
+from .common import sha256_text
 
 RESEARCH_CATEGORIES = (
     "tracking_issue", "upstream_issues", "upstream_pull_requests", "ci_history",
@@ -92,7 +92,11 @@ def check_stage(assignment: dict, staging: Path, finish_root: Path) -> str:
         return "cancelled: no completed investigation admitted"
     identity = {"dispatch_id": assignment["dispatch_id"], "claim_id": member["claim_id"],
                 "work_id": member["work_id"], "claim_handle": member["handle"]}
-    namespace = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+    # gh-aw's native codec is compact, recursively key-sorted JSON. The broader
+    # pipeline canonical_json format is intentionally pretty-printed and is not
+    # the Claim artifact namespace codec.
+    native = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    namespace = hashlib.sha256(native.encode()).hexdigest()
     base = Path("claims") / namespace / "upstreaming-out"
     dossier = json.loads(_read(staging, base / "dossier.json"))
     proposal = json.loads(_read(staging, base / "proposal.json"))

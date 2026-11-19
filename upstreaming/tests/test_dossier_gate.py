@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from upstreaming import capacity, collect, controller, dossier_gate, schemas, work
-from upstreaming.common import canonical_json, sha256_text
+from upstreaming.common import sha256_text
 from upstreaming.tests.helpers import NOW, contribution, policy
 from datetime import datetime
 
@@ -124,7 +124,8 @@ class TestDossierCompleteness(unittest.TestCase):
     def test_exact_claim_staging_and_cancellation(self):
         assignment = {"version": 3, "dispatch_id": "d1", "claims": [{"claim_id": "c1", "work_id": "w1", "handle": "h1", "work": task()}]}
         identity = {"dispatch_id": "d1", "claim_id": "c1", "work_id": "w1", "claim_handle": "h1"}
-        ns = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+        ns = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(ns, "7a521a54e115fee86af74f06e7e1636613643950ecc9f57a6e82039311a49d94")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             stage = root / "claims" / ns / "upstreaming-out"
