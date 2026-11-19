@@ -45,9 +45,10 @@ Automatic writes remain gated by trusted code:
 - no job receives production package credentials.
 
 The writer App must be installed on `riseproject-upstreaming` and have the
-repository-creation permission plus Contents, Workflows, Actions and Pull
-requests write permissions needed by the trusted setup and publisher jobs.
-Each repository token is narrowed to the one verified fork.
+repository-creation permission plus Administration, Contents, Workflows, Actions
+and Pull requests write permissions needed by the trusted setup and publisher
+jobs. Administration is requested only on the token narrowed to the one verified
+fork; it configures and verifies Actions defaults before branch creation.
 
 The App private key is an organization secret used elsewhere in this repository,
 so an environment would not provide exclusive secret isolation. The exact-token,
