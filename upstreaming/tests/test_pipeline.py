@@ -309,7 +309,7 @@ class TestDispatchRecovery(unittest.TestCase):
     def test_plan_replays_committed_request_with_profile_per_task(self):
         req = work.request_from_active(self.rec)
         n = work.node(req, self.rec, control_repo_id="1", allowed_paths=["x"])
-        self.assertEqual((n["worker_profile"], n["graph_id"]), ("upstreaming-investigator-v2", self.gid))
+        self.assertEqual((n["worker_profile"], n["graph_id"]), ("upstreaming-investigator-v3", self.gid))
         # Identical across replays (the queue admits an identical node once).
         self.assertEqual(n, work.node(work.request_from_active(self.rec), self.rec, control_repo_id="1",
                                       allowed_paths=["x"]))
