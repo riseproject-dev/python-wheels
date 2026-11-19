@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,50 +46,32 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build dulwich ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      DULWICH_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout dulwich ${{ env.DULWICH_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: dulwich/dulwich
-          ref: dulwich-${{ env.DULWICH_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's extras minus paramiko/colordiff (unexercised by tests/) and
-          # patiencediff (no riscv64 wheel; test_patch skips without it).
-          CIBW_TEST_EXTRAS: merge,fastimport,https,range_diff
-          # test_signature expects the signing CLIs upstream's runners have.
-          CIBW_BEFORE_TEST_LINUX: dnf -y install openssh-clients gnupg2-smime
-          CIBW_TEST_SOURCES: tests testdata docs
-          # The suite resolves testdata/ and the source tree relative to the dulwich
-          # package dir, so the installed wheel goes where the checkout's would be.
-          # test_local_modifications_ioerror cannot fail as root: mode 0 still reads.
-          CIBW_TEST_COMMAND: >-
-            cp -a "$(python -c 'import dulwich, os; print(os.path.dirname(dulwich.__file__))')" dulwich &&
-            python -c "import dulwich._objects, dulwich._pack, dulwich._diff_tree" &&
-            python -c "import sys, unittest, tests; flat = lambda s: [t for x in s for t in (flat(x) if isinstance(x, unittest.TestSuite) else [x])]; sys.exit(not unittest.TextTestRunner().run(unittest.TestSuite(t for t in flat(tests.test_suite()) if not t.id().endswith('.test_local_modifications_ioerror'))).wasSuccessful())"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dulwich-${{ env.DULWICH_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: dulwich
+      version: ${{ matrix.version }}
+      repository: dulwich/dulwich
+      ref: dulwich-${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Upstream's extras minus paramiko/colordiff (unexercised by tests/) and
+      # patiencediff (no riscv64 wheel; test_patch skips without it).
+      cibw-test-extras: merge,fastimport,https,range_diff
+      # test_signature expects the signing CLIs upstream's runners have.
+      cibw-before-test-linux: dnf -y install openssh-clients gnupg2-smime
+      cibw-test-sources: tests testdata docs
+      # The suite resolves testdata/ and the source tree relative to the dulwich
+      # package dir, so the installed wheel goes where the checkout's would be.
+      # test_local_modifications_ioerror cannot fail as root: mode 0 still reads.
+      cibw-test-command: >-
+        cp -a "$(python -c 'import dulwich, os; print(os.path.dirname(dulwich.__file__))')" dulwich &&
+        python -c "import dulwich._objects, dulwich._pack, dulwich._diff_tree" &&
+        python -c "import sys, unittest, tests; flat = lambda s: [t for x in s for t in (flat(x) if isinstance(x, unittest.TestSuite) else [x])]; sys.exit(not unittest.TextTestRunner().run(unittest.TestSuite(t for t in flat(tests.test_suite()) if not t.id().endswith('.test_local_modifications_ioerror'))).wasSuccessful())"
+      timeout-minutes: 180
 
   publish:
     name: Publish dulwich ${{ matrix.version }}

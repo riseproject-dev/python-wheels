@@ -35,10 +35,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -50,49 +46,31 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build scout-apm ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      SCOUT_APM_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout scout_apm_python v${{ env.SCOUT_APM_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: scoutapp/scout_apm_python
-          ref: v${{ env.SCOUT_APM_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # _objtrace is Extension(optional=True) with a pure fallback, so assert the .so
-          # loaded before running its tests (CLAUDE.md gotcha 20). On 3.14t/3.15t it re-enables
-          # the GIL, as upstream's wheels do; pytest.ini's filterwarnings=error would fail on that.
-          CIBW_TEST_SOURCES: tests pytest.ini
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-cov
-          CIBW_TEST_COMMAND: >-
-            python -c "from scout_apm.core import objtrace; assert objtrace.is_extension"
-            && python -m pytest --confcutdir=tests/unit/core
-            -W "ignore:The global interpreter lock (GIL) has been enabled:RuntimeWarning"
-            tests/unit/core/test_objtrace.py -v
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: scout-apm-${{ env.SCOUT_APM_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: scout-apm
+      version: ${{ matrix.version }}
+      repository: scoutapp/scout_apm_python
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-musllinux-riscv64-image: quay.io/pypa/musllinux_1_2_riscv64
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # _objtrace is Extension(optional=True) with a pure fallback, so assert the .so
+      # loaded before running its tests (CLAUDE.md gotcha 20). On 3.14t/3.15t it re-enables
+      # the GIL, as upstream's wheels do; pytest.ini's filterwarnings=error would fail on that.
+      cibw-test-sources: tests pytest.ini
+      cibw-test-requires: pytest pytest-asyncio pytest-cov
+      cibw-test-command: >-
+        python -c "from scout_apm.core import objtrace; assert objtrace.is_extension"
+        && python -m pytest --confcutdir=tests/unit/core
+        -W "ignore:The global interpreter lock (GIL) has been enabled:RuntimeWarning"
+        tests/unit/core/test_objtrace.py -v
+      timeout-minutes: 60
 
   publish:
     name: Publish scout-apm ${{ matrix.version }}

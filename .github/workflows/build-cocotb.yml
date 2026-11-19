@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,50 +45,32 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cocotb ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      COCOTB_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout cocotb ${{ env.COCOTB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: cocotb/cocotb
-          ref: v${{ env.COCOTB_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cocotb_build_libs.py links -static-libstdc++ on every Linux extension;
-          # the manylinux riscv64 image doesn't ship libstdc++.a (gotcha 77).
-          CIBW_BEFORE_ALL_LINUX: dnf -y install libstdc++-static
-          # No simulator (Icarus/Verilator/GHDL/...) is available in the manylinux
-          # image, so the simulator-driving half of upstream's suite can't run here.
-          # Run the same simulator-agnostic subset upstream's own release process
-          # runs before publishing (noxfile.py release_test_nosim): stage the
-          # pytest suite (gotcha 25/36) and deselect every simulator_required test.
-          # 2.1.0's test_ipython_support.py imports pexpect at collection time even
-          # though it's simulator_required and gets deselected below.
-          CIBW_TEST_REQUIRES: pytest>=6 pexpect
-          CIBW_TEST_SOURCES: tests/pytest pyproject.toml
-          CIBW_TEST_COMMAND: python -m pytest -v -k "not simulator_required" tests/pytest
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cocotb-${{ env.COCOTB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: cocotb
+      version: ${{ matrix.version }}
+      repository: cocotb/cocotb
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # cocotb_build_libs.py links -static-libstdc++ on every Linux extension;
+      # the manylinux riscv64 image doesn't ship libstdc++.a (gotcha 77).
+      cibw-before-all-linux: dnf -y install libstdc++-static
+      # No simulator (Icarus/Verilator/GHDL/...) is available in the manylinux
+      # image, so the simulator-driving half of upstream's suite can't run here.
+      # Run the same simulator-agnostic subset upstream's own release process
+      # runs before publishing (noxfile.py release_test_nosim): stage the
+      # pytest suite (gotcha 25/36) and deselect every simulator_required test.
+      # 2.1.0's test_ipython_support.py imports pexpect at collection time even
+      # though it's simulator_required and gets deselected below.
+      cibw-test-requires: pytest>=6 pexpect
+      cibw-test-sources: tests/pytest pyproject.toml
+      cibw-test-command: python -m pytest -v -k "not simulator_required" tests/pytest
+      timeout-minutes: 60
 
   publish:
     name: Publish cocotb ${{ matrix.version }}

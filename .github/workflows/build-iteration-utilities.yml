@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,41 +46,23 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build iteration-utilities ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      ITERATION_UTILITIES_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout iteration_utilities v${{ env.ITERATION_UTILITIES_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: MSeifert04/iteration_utilities
-          ref: v${{ env.ITERATION_UTILITIES_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import iteration_utilities; assert iteration_utilities._iteration_utilities.__file__.endswith('.so'), iteration_utilities._iteration_utilities.__file__"
-            && python -m pytest {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: iteration-utilities-${{ env.ITERATION_UTILITIES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: iteration-utilities
+      version: ${{ matrix.version }}
+      repository: MSeifert04/iteration_utilities
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-test-requires: pytest
+      cibw-test-command: >-
+        python -c "import iteration_utilities; assert iteration_utilities._iteration_utilities.__file__.endswith('.so'), iteration_utilities._iteration_utilities.__file__"
+        && python -m pytest {package}/tests
+      timeout-minutes: 60
 
   publish:
     name: Publish iteration-utilities ${{ matrix.version }}

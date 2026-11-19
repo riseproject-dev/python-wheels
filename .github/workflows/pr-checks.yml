@@ -133,6 +133,67 @@ jobs:
         with:
           enable-cache: false
 
+      - name: Validate the reusable cibuildwheel interface
+        run: |
+          uv run --quiet --with pyyaml python - <<'PY'
+          from pathlib import Path
+          import re
+          import yaml
+
+          used_environment = set()
+          used_arguments = set()
+          for path in Path(".github/workflows").glob("*.yml"):
+              if path.name == "_build-cibuildwheel.yml":
+                  continue
+              workflow = yaml.safe_load(path.read_text())
+              for job in workflow.get("jobs", {}).values():
+                  if not isinstance(job, dict):
+                      continue
+                  for step in job.get("steps", []) or []:
+                      if not isinstance(step, dict):
+                          continue
+                      if not str(step.get("uses", "")).startswith("pypa/cibuildwheel@"):
+                          continue
+                      used_arguments.update((step.get("with") or {}).keys())
+                      used_environment.update(
+                          key for key in (step.get("env") or {}) if key.startswith("CIBW_")
+                      )
+
+          shared = Path(".github/workflows/_build-cibuildwheel.yml").read_text()
+          inputs = set(re.findall(r"^      (cibw-[a-z0-9-]+):$", shared, re.MULTILINE))
+          configured_environment = set(
+              re.findall(r"^          (CIBW_[A-Z0-9_]+): \$\{\{ inputs\[", shared, re.MULTILINE)
+          )
+          exported_environment = set(
+              re.findall(r'^              "(CIBW_[A-Z0-9_]+)",$', shared, re.MULTILINE)
+          )
+
+          def input_name(key):
+              return "cibw-" + key.removeprefix("CIBW_").lower().replace("_", "-")
+
+          errors = []
+          for key in sorted(used_environment):
+              expected = input_name(key)
+              if expected not in inputs:
+                  errors.append(f"{key} has no {expected} workflow_call input")
+              if key not in configured_environment:
+                  errors.append(f"{key} is not mapped into the configuration step")
+              if key not in exported_environment:
+                  errors.append(f"{key} is not exported for the cibuildwheel action")
+
+          supported_arguments = {"package-dir", "output-dir", "config-file", "extras", "only"}
+          if unexpected := used_arguments - supported_arguments:
+              errors.append(f"unsupported cibuildwheel action arguments: {sorted(unexpected)}")
+          for argument in sorted(used_arguments - {"only"}):
+              expected = f"cibw-{argument}"
+              if expected not in inputs:
+                  errors.append(f"cibuildwheel argument {argument} has no {expected} input")
+
+          if errors:
+              raise SystemExit("\n".join(errors))
+          print(f"Validated {len(used_environment)} CIBW_* keys and {len(used_arguments)} action arguments")
+          PY
+
       - name: Validate changed docs/packages/*.yaml and their build workflows
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

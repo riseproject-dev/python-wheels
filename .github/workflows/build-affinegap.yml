@@ -36,9 +36,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -50,43 +47,27 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build affinegap ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      AFFINEGAP_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout affinegap v${{ env.AFFINEGAP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: datamade/affinegap
-          ref: v${{ env.AFFINEGAP_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # affinegap's tests/ ships with no tests/__init__.py (upstream never added
-          # one), so `unittest discover` with a separate top-level dir (-t "{project}")
-          # fails importing the start dir: "ImportError: Start directory is not
-          # importable: '.../tests'" (reproduces on any host, no riscv64/QEMU needed).
-          # Letting -t default to the start dir itself avoids that import check.
-          CIBW_TEST_COMMAND: >-
-            python -c "import affinegap.affinegap as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m unittest discover -s "{project}/tests"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: affinegap-${{ env.AFFINEGAP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: affinegap
+      version: ${{ matrix.version }}
+      repository: datamade/affinegap
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # affinegap's tests/ ships with no tests/__init__.py (upstream never added
+      # one), so `unittest discover` with a separate top-level dir (-t "{project}")
+      # fails importing the start dir: "ImportError: Start directory is not
+      # importable: '.../tests'" (reproduces on any host, no riscv64/QEMU needed).
+      # Letting -t default to the start dir itself avoids that import check.
+      cibw-test-command: >-
+        python -c "import affinegap.affinegap as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -m unittest discover -s "{project}/tests"
+      timeout-minutes: 30
 
   publish:
     name: Publish affinegap ${{ matrix.version }}

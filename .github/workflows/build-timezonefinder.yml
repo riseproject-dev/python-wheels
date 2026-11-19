@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -53,59 +50,42 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build timezonefinder ${{ matrix.version }} cp311-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
-    env:
-      TIMEZONEFINDER_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout timezonefinder ${{ env.TIMEZONEFINDER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: jannikmi/timezonefinder
-          ref: ${{ env.TIMEZONEFINDER_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # Upstream sets py_limited_api in setup.py from cibuildwheel's own
-          # BUILD_ABI3 override (`[[tool.cibuildwheel.overrides]] select = "*"`),
-          # so building on the oldest interpreter it claims (cp311) and letting
-          # cibuildwheel reuse+retest that one wheel on cp312-cp314 matches
-          # upstream's own single `cp311-*` build (gotcha 96).
-          CIBW_BUILD: >-
-            cp311-manylinux_riscv64 cp312-manylinux_riscv64
-            cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: pip
-          # Replaces (not merges into) upstream's [tool.cibuildwheel] environment
-          # overrides, so BUILD_ABI3 (needed for the abi3 tag) is repeated here
-          # alongside our registry (gotcha 107). h3 and numpy have no riscv64
-          # wheel for cp311 on our registry yet, so cp311 skips the test below;
-          # PIP_ONLY_BINARY keeps pip on our registry's cffi/numpy/h3 builds
-          # rather than a newer sourceless PyPI release (gotcha 30).
-          CIBW_ENVIRONMENT: >-
-            BUILD_ABI3=true
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=cffi,numpy,h3
-          # Upstream's own repair-wheel-command also runs abi3audit via uvx,
-          # which the riscv64 image doesn't carry; cibuildwheel's own default
-          # audit-command already abi3audits every abi3-tagged wheel natively
-          # after this repair step runs, so drop the uvx layer here.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
-          CIBW_TEST_SKIP: cp311-*
-          CIBW_TEST_COMMAND: >-
-            python -c "from timezonefinder import TimezoneFinder; tf = TimezoneFinder(); result = tf.timezone_at(lat=40.5, lng=11.7); assert result == 'Etc/GMT-1', result"
-            && python -c "from timezonefinder.utils import clang_extension_loaded; assert clang_extension_loaded"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: timezonefinder-${{ env.TIMEZONEFINDER_VERSION }}-cp311-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: timezonefinder
+      version: ${{ matrix.version }}
+      repository: jannikmi/timezonefinder
+      ref: ${{ matrix.version }}
+      artifact-tag: cp311-abi3-manylinux_riscv64
+      # Upstream sets py_limited_api in setup.py from cibuildwheel's own
+      # BUILD_ABI3 override (`[[tool.cibuildwheel.overrides]] select = "*"`),
+      # so building on the oldest interpreter it claims (cp311) and letting
+      # cibuildwheel reuse+retest that one wheel on cp312-cp314 matches
+      # upstream's own single `cp311-*` build (gotcha 96).
+      cibw-build: >-
+        cp311-manylinux_riscv64 cp312-manylinux_riscv64
+        cp313-manylinux_riscv64 cp314-manylinux_riscv64
+      cibw-build-frontend: pip
+      # Replaces (not merges into) upstream's [tool.cibuildwheel] environment
+      # overrides, so BUILD_ABI3 (needed for the abi3 tag) is repeated here
+      # alongside our registry (gotcha 107). h3 and numpy have no riscv64
+      # wheel for cp311 on our registry yet, so cp311 skips the test below;
+      # PIP_ONLY_BINARY keeps pip on our registry's cffi/numpy/h3 builds
+      # rather than a newer sourceless PyPI release (gotcha 30).
+      cibw-environment: >-
+        BUILD_ABI3=true
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        PIP_ONLY_BINARY=cffi,numpy,h3
+      # Upstream's own repair-wheel-command also runs abi3audit via uvx,
+      # which the riscv64 image doesn't carry; cibuildwheel's own default
+      # audit-command already abi3audits every abi3-tagged wheel natively
+      # after this repair step runs, so drop the uvx layer here.
+      cibw-repair-wheel-command-linux: auditwheel repair -w {dest_dir} {wheel}
+      cibw-test-skip: cp311-*
+      cibw-test-command: >-
+        python -c "from timezonefinder import TimezoneFinder; tf = TimezoneFinder(); result = tf.timezone_at(lat=40.5, lng=11.7); assert result == 'Etc/GMT-1', result"
+        && python -c "from timezonefinder.utils import clang_extension_loaded; assert clang_extension_loaded"
+      timeout-minutes: 90
 
   publish:
     name: Publish timezonefinder ${{ matrix.version }}

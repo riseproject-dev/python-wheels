@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,60 +46,42 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build aiokafka ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      AIOKAFKA_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout aiokafka v${{ env.AIOKAFKA_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: aio-libs/aiokafka
-          ref: v${{ env.AIOKAFKA_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # 0.15.0 dropped requirements-cython.txt (Cython is a [build-system] requirement in
-          # pyproject.toml now, which the isolated build installs itself), so only install it
-          # from the file for the versions that still ship it.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            if [ -f requirements-cython.txt ]; then pip install -r requirements-cython.txt; fi
-            && yum install -y zlib-devel
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The repo-root aiokafka/ would otherwise shadow the installed wheel's
-          # compiled extension; stage only the suite and its pytest config.
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          # Pin to upstream's own requirements-ci.txt versions: newer pytest turns
-          # test_requests.py's generator-based parametrize into a hard failure under
-          # this project's `filterwarnings = ["error"]`. gssapi is skipped - it needs
-          # krb5 headers and is only exercised by the docker-backed SASL tests below.
-          CIBW_TEST_REQUIRES: >-
-            pytest==9.0.2 pytest-asyncio==1.3.0 pytest-cov==7.0.0 pytest-mock==3.15.1
-            docker cramjam
-          # cp314t: the Cython extensions use single-phase init, so 3.14t re-enables
-          # the GIL on import and warns; fatal under filterwarnings=["error"] (gotcha 127).
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=cramjam PYTHON_GIL=1
-          # No --docker-image: upstream's own wheel-test jobs run this same way, since
-          # none of them have a Kafka broker either. Tests needing one skip themselves.
-          CIBW_TEST_COMMAND: python -m pytest tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: aiokafka-${{ env.AIOKAFKA_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: aiokafka
+      version: ${{ matrix.version }}
+      repository: aio-libs/aiokafka
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # 0.15.0 dropped requirements-cython.txt (Cython is a [build-system] requirement in
+      # pyproject.toml now, which the isolated build installs itself), so only install it
+      # from the file for the versions that still ship it.
+      cibw-before-build-linux: >-
+        if [ -f requirements-cython.txt ]; then pip install -r requirements-cython.txt; fi
+        && yum install -y zlib-devel
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # The repo-root aiokafka/ would otherwise shadow the installed wheel's
+      # compiled extension; stage only the suite and its pytest config.
+      cibw-test-sources: tests pyproject.toml
+      # Pin to upstream's own requirements-ci.txt versions: newer pytest turns
+      # test_requests.py's generator-based parametrize into a hard failure under
+      # this project's `filterwarnings = ["error"]`. gssapi is skipped - it needs
+      # krb5 headers and is only exercised by the docker-backed SASL tests below.
+      cibw-test-requires: >-
+        pytest==9.0.2 pytest-asyncio==1.3.0 pytest-cov==7.0.0 pytest-mock==3.15.1
+        docker cramjam
+      # cp314t: the Cython extensions use single-phase init, so 3.14t re-enables
+      # the GIL on import and warns; fatal under filterwarnings=["error"] (gotcha 127).
+      cibw-test-environment: PIP_ONLY_BINARY=cramjam PYTHON_GIL=1
+      # No --docker-image: upstream's own wheel-test jobs run this same way, since
+      # none of them have a Kafka broker either. Tests needing one skip themselves.
+      cibw-test-command: python -m pytest tests
+      timeout-minutes: 60
 
   publish:
     name: Publish aiokafka ${{ matrix.version }}

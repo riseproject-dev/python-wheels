@@ -34,10 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,49 +45,31 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build picows ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # uvloop has no musllinux riscv64 wheel on the registry (same situation as
         # build-aiofastnet.yml); skip tests on that leg rather than compile it from sdist.
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      PICOWS_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout picows v${{ env.PICOWS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: tarasko/picows
-          ref: v${{ env.PICOWS_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT_LINUX: CFLAGS="$CFLAGS -O2 -g0 -DNDEBUG" PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: >-
-            pytest pytest-asyncio async_timeout tiny-proxy websockets
-            ${{ matrix.platform == 'manylinux' && 'uvloop' || '' }}
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_SKIP: ${{ case(matrix.platform == 'musllinux', '*', '') }}
-          # test_proxy_dns_resolution dials the real wss://echo.websocket.org; too flaky/
-          # network-dependent for this runner (same reasoning as docs/packages/uvloop.yaml's warning).
-          CIBW_TEST_COMMAND: pytest -v tests -k "not test_proxy_dns_resolution"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: picows-${{ env.PICOWS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: picows
+      version: ${{ matrix.version }}
+      repository: tarasko/picows
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-musllinux-riscv64-image: quay.io/pypa/musllinux_1_2_riscv64
+      cibw-environment-linux: CFLAGS="$CFLAGS -O2 -g0 -DNDEBUG" PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      cibw-test-requires: >-
+        pytest pytest-asyncio async_timeout tiny-proxy websockets
+        ${{ matrix.platform == 'manylinux' && 'uvloop' || '' }}
+      cibw-test-sources: tests pyproject.toml
+      cibw-test-skip: ${{ case(matrix.platform == 'musllinux', '*', '') }}
+      # test_proxy_dns_resolution dials the real wss://echo.websocket.org; too flaky/
+      # network-dependent for this runner (same reasoning as docs/packages/uvloop.yaml's warning).
+      cibw-test-command: pytest -v tests -k "not test_proxy_dns_resolution"
+      timeout-minutes: 60
 
   publish:
     name: Publish picows ${{ matrix.version }}

@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,54 +46,36 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build indexed-zstd ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      INDEXED_ZSTD_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout indexed_zstd v${{ env.INDEXED_ZSTD_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: martinellimarco/indexed_zstd
-          ref: v${{ env.INDEXED_ZSTD_VERSION }}
-          # libzstd-seek (linked at build time, and whose gen_seekable test
-          # helper upstream's own test suite depends on) is a submodule.
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y libzstd-devel cmake &&
-            cmake -S {package}/indexed_zstd/libzstd-seek -B {package}/indexed_zstd/libzstd-seek/build -DBUILD_TESTS=ON &&
-            cmake --build {package}/indexed_zstd/libzstd-seek/build --target gen_seekable
-          CIBW_ENVIRONMENT_LINUX: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=cython
-          CIBW_TEST_REQUIRES: pytest
-          # test-sources are staged from the host checkout (gotcha 104), so the
-          # gen_seekable that before_all built inside the container's /project is
-          # never copied into test_cwd; point tests/conftest.py at it explicitly.
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: >-
-            python3 -c "import indexed_zstd" &&
-            GEN_SEEKABLE={package}/indexed_zstd/libzstd-seek/build/tests/gen_seekable
-            python3 -m pytest tests -v -m "not heavy and not reference"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: indexed-zstd-${{ env.INDEXED_ZSTD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: indexed-zstd
+      version: ${{ matrix.version }}
+      # libzstd-seek (linked at build time, and whose gen_seekable test
+      # helper upstream's own test suite depends on) is a submodule.
+      repository: martinellimarco/indexed_zstd
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      checkout-submodules: recursive
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-before-all-linux: >-
+        dnf install -y libzstd-devel cmake &&
+        cmake -S {package}/indexed_zstd/libzstd-seek -B {package}/indexed_zstd/libzstd-seek/build -DBUILD_TESTS=ON &&
+        cmake --build {package}/indexed_zstd/libzstd-seek/build --target gen_seekable
+      cibw-environment-linux: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=cython
+      cibw-test-requires: pytest
+      # test-sources are staged from the host checkout (gotcha 104), so the
+      # gen_seekable that before_all built inside the container's /project is
+      # never copied into test_cwd; point tests/conftest.py at it explicitly.
+      cibw-test-sources: tests pyproject.toml
+      cibw-test-command: >-
+        python3 -c "import indexed_zstd" &&
+        GEN_SEEKABLE={package}/indexed_zstd/libzstd-seek/build/tests/gen_seekable
+        python3 -m pytest tests -v -m "not heavy and not reference"
+      timeout-minutes: 60
 
   publish:
     name: Publish indexed-zstd ${{ matrix.version }}

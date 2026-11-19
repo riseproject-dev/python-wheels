@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,48 +45,30 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fastcluster ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      FASTCLUSTER_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout fastcluster v${{ env.FASTCLUSTER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: dmuellner/fastcluster
-          ref: v${{ env.FASTCLUSTER_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is both a build and a runtime requirement, and only our registry
-          # has it for riscv64; only-binary keeps a newer PyPI release from winning
-          # the resolution and then compiling from sdist. scipy is test-only, same
-          # registry-only situation.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy
-          # Upstream's own test job: pytest against the bundled tests/, with scipy
-          # available for the reference distance computations.
-          CIBW_TEST_REQUIRES: pytest scipy>=1.15
-          CIBW_TEST_COMMAND: pytest -s {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fastcluster-${{ env.FASTCLUSTER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: fastcluster
+      version: ${{ matrix.version }}
+      repository: dmuellner/fastcluster
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # numpy is both a build and a runtime requirement, and only our registry
+      # has it for riscv64; only-binary keeps a newer PyPI release from winning
+      # the resolution and then compiling from sdist. scipy is test-only, same
+      # registry-only situation.
+      cibw-environment: >-
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        PIP_ONLY_BINARY=numpy,scipy
+      # Upstream's own test job: pytest against the bundled tests/, with scipy
+      # available for the reference distance computations.
+      cibw-test-requires: pytest scipy>=1.15
+      cibw-test-command: pytest -s {package}/tests
+      timeout-minutes: 60
 
   publish:
     name: Publish fastcluster ${{ matrix.version }}

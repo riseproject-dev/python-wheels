@@ -35,13 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # Upstream cuts releases without git tags, so pin the release commit: this is
-  # "Bump Atheris to 3.1.0", whose Python sources are byte-identical to the 3.1.0
-  # PyPI wheels. Update it alongside ATHERIS_VERSION.
-  ATHERIS_REF: 352d5f29d811e0b51807ca57ed5551dd08ece528
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -53,55 +46,40 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build atheris ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      ATHERIS_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout atheris ${{ env.ATHERIS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: google/atheris
-          ref: ${{ env.ATHERIS_REF }}
-          persist-credentials: false
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream builds libFuzzer from an LLVM 16 snapshot that predates riscv64
-          # libFuzzer (added in LLVM 17); Rocky 10's compiler-rt ships it prebuilt.
-          CIBW_BEFORE_ALL: dnf install -y compiler-rt
-          CIBW_ENVIRONMENT: >-
-            LIBFUZZER_LIB=/usr/lib/clang/21/lib/riscv64-redhat-linux-gnu/libclang_rt.fuzzer_no_main.a
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_BEFORE_BUILD: pip install setuptools pybind11
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_TEST_REQUIRES: PyInstaller
-          CIBW_TEST_SOURCES: src
-          # pyinstaller_coverage_test.py needs a shared libpython to build a
-          # onefile executable ("Python was built without a shared library");
-          # this image's cp312/cp313/cp314 don't ship one. Every other test
-          # exercises atheris itself and stays in the loop.
-          CIBW_TEST_COMMAND: >-
-            cd src && for t in *_test.py; do
-            [ "$t" = "pyinstaller_coverage_test.py" ] && continue;
-            echo "Running test: $t" && python "$t" || exit 1; done
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: atheris-${{ env.ATHERIS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: atheris
+      version: ${{ matrix.version }}
+      repository: google/atheris
+      ref: 352d5f29d811e0b51807ca57ed5551dd08ece528
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Upstream cuts releases without git tags, so pin the release commit: this is
+      # "Bump Atheris to 3.1.0", whose Python sources are byte-identical to the 3.1.0
+      # PyPI wheels. Update it alongside the package version.
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Upstream builds libFuzzer from an LLVM 16 snapshot that predates riscv64
+      # libFuzzer (added in LLVM 17); Rocky 10's compiler-rt ships it prebuilt.
+      cibw-before-all: dnf install -y compiler-rt
+      cibw-environment: >-
+        LIBFUZZER_LIB=/usr/lib/clang/21/lib/riscv64-redhat-linux-gnu/libclang_rt.fuzzer_no_main.a
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      cibw-before-build: pip install setuptools pybind11
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-test-requires: PyInstaller
+      cibw-test-sources: src
+      # pyinstaller_coverage_test.py needs a shared libpython to build a
+      # onefile executable ("Python was built without a shared library");
+      # this image's cp312/cp313/cp314 don't ship one. Every other test
+      # exercises atheris itself and stays in the loop.
+      cibw-test-command: >-
+        cd src && for t in *_test.py; do
+        [ "$t" = "pyinstaller_coverage_test.py" ] && continue;
+        echo "Running test: $t" && python "$t" || exit 1; done
+      timeout-minutes: 90
 
   publish:
     name: Publish atheris ${{ matrix.version }}

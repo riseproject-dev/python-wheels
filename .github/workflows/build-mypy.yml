@@ -36,9 +36,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -50,53 +47,36 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mypy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    # mypy self-compiles ~230 modules at -O3 (~40min alone on fast hardware), then runs its full test suite; both are much slower on the riscv runner.
-    # 720 was not enough for 2.4.0 (cp312/cp313/cp314 take 11-12 h; cp314t was cancelled at ~98% of its tests), hence 1080.
-    timeout-minutes: 1080
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      MYPY_VERSION: ${{ matrix.version }}
-
-    steps:
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: mypy
+      version: ${{ matrix.version }}
+      # mypy self-compiles ~230 modules at -O3 (~40min alone on fast hardware), then runs its full test suite; both are much slower on the riscv runner.
+      # 720 was not enough for 2.4.0 (cp312/cp313/cp314 take 11-12 h; cp314t was cancelled at ~98% of its tests), hence 1080.
       # Tag is v-prefixed; the wheel version (mypy/version.py) is the plain MYPY_VERSION.
-      - name: Checkout mypy ${{ env.MYPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: python/mypy
-          ref: v${{ env.MYPY_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: build
-          # MYPY_USE_MYPYC=1 is the mypyc opt-in; without it setup.py silently ships a pure-Python wheel. Opt/debug levels match upstream's release build.
-          CIBW_ENVIRONMENT: >-
-            MYPY_USE_MYPYC=1
-            MYPYC_OPT_LEVEL=3
-            MYPYC_DEBUG_LEVEL=0
-          CIBW_BEFORE_TEST: pip install -r {project}/test-requirements.txt
-          # Upstream's wheel test: run mypy.test + mypyc.test against the installed compiled wheel from a temp cwd, with mypy's pytest config copied beside the install and the test-data prefix pointed back at the checkout.
-          CIBW_TEST_COMMAND: >-
-            DIR=$(python -c 'import mypy, os; dn = os.path.dirname; print(dn(dn(mypy.__path__[0])))')
-            && cp '{project}/pyproject.toml' '{project}/conftest.py' "$DIR"
-            && MYPY_TEST_DIR=$(python -c 'import mypy.test; print(mypy.test.__path__[0])')
-            && MYPYC_TEST_DIR=$(python -c 'import mypyc.test; print(mypyc.test.__path__[0])')
-            && MYPY_TEST_PREFIX='{project}' pytest "$MYPY_TEST_DIR" "$MYPYC_TEST_DIR" -k 'not test_external'
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mypy-${{ env.MYPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      repository: python/mypy
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build-frontend: build
+      # MYPY_USE_MYPYC=1 is the mypyc opt-in; without it setup.py silently ships a pure-Python wheel. Opt/debug levels match upstream's release build.
+      cibw-environment: >-
+        MYPY_USE_MYPYC=1
+        MYPYC_OPT_LEVEL=3
+        MYPYC_DEBUG_LEVEL=0
+      cibw-before-test: pip install -r {project}/test-requirements.txt
+      # Upstream's wheel test: run mypy.test + mypyc.test against the installed compiled wheel from a temp cwd, with mypy's pytest config copied beside the install and the test-data prefix pointed back at the checkout.
+      cibw-test-command: >-
+        DIR=$(python -c 'import mypy, os; dn = os.path.dirname; print(dn(dn(mypy.__path__[0])))')
+        && cp '{project}/pyproject.toml' '{project}/conftest.py' "$DIR"
+        && MYPY_TEST_DIR=$(python -c 'import mypy.test; print(mypy.test.__path__[0])')
+        && MYPYC_TEST_DIR=$(python -c 'import mypyc.test; print(mypyc.test.__path__[0])')
+        && MYPY_TEST_PREFIX='{project}' pytest "$MYPY_TEST_DIR" "$MYPYC_TEST_DIR" -k 'not test_external'
+      timeout-minutes: 1080
 
   publish:
     name: Publish mypy ${{ matrix.version }}

@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,39 +46,23 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build editdistance ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      EDITDISTANCE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout editdistance v${{ env.EDITDISTANCE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: roy-ht/editdistance
-          ref: v${{ env.EDITDISTANCE_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import editdistance.bycython as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest {project}/test
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: editdistance-${{ env.EDITDISTANCE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: editdistance
+      version: ${{ matrix.version }}
+      repository: roy-ht/editdistance
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-test-requires: pytest
+      cibw-test-command: >-
+        python -c "import editdistance.bycython as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -m pytest {project}/test
+      timeout-minutes: 60
 
   publish:
     name: Publish editdistance ${{ matrix.version }}

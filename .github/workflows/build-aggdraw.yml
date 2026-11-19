@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,47 +46,29 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build aggdraw ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      AGGDRAW_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout aggdraw v${{ env.AGGDRAW_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: pytroll/aggdraw
-          ref: v${{ env.AGGDRAW_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's own before-build is `yum install -y freetype-devel`; the riscv64
-          # image is Rocky-based, so dnf replaces yum. freetype-devel ships in Rocky's
-          # own repos (no EPEL/CRB needed).
-          CIBW_BEFORE_BUILD_LINUX: dnf install -y freetype-devel
-          CIBW_TEST_REQUIRES: numpy pillow pytest
-          CIBW_TEST_COMMAND: python {project}/selftest.py
-          # Pillow (a test/runtime dep) ships no riscv64 wheel on public PyPI; ours is
-          # what the test env installs. PIP_ONLY_BINARY keeps pip from falling back to
-          # building it from source.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=Pillow
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: aggdraw-${{ env.AGGDRAW_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: aggdraw
+      version: ${{ matrix.version }}
+      repository: pytroll/aggdraw
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Upstream's own before-build is `yum install -y freetype-devel`; the riscv64
+      # image is Rocky-based, so dnf replaces yum. freetype-devel ships in Rocky's
+      # own repos (no EPEL/CRB needed).
+      cibw-before-build-linux: dnf install -y freetype-devel
+      cibw-test-requires: numpy pillow pytest
+      cibw-test-command: python {project}/selftest.py
+      # Pillow (a test/runtime dep) ships no riscv64 wheel on public PyPI; ours is
+      # what the test env installs. PIP_ONLY_BINARY keeps pip from falling back to
+      # building it from source.
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=Pillow
+      timeout-minutes: 90
 
   publish:
     name: Publish aggdraw ${{ matrix.version }}

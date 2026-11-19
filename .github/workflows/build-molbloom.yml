@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,59 +46,40 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build molbloom ${{ matrix.version }} manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
-    env:
-      MOLBLOOM_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout molbloom v${{ env.MOLBLOOM_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: whitead/molbloom
-          ref: v${{ env.MOLBLOOM_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-musllinux_*"
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # molbloom imports rdkit at module import time; rdkit's own riscv64
-          # wheels on our registry only go back to cp312 (same floor as numpy
-          # and Pillow, rdkit's own runtime deps), so cp311 builds but isn't tested.
-          CIBW_TEST_SKIP: "cp311-*"
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pillow,rdkit
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          # test_example/test_common/test_alot/test_fpr/test_all_catalogs each
-          # also exercise the "zinc20"/"zinc-instock"/"surechembl" catalogs,
-          # which _load_big_filter() downloads from Dropbox on first use
-          # (hundreds of MB, outside GitHub); kept to the bundled
-          # zinc-instock-mini catalog so CI doesn't fetch gigabytes from a
-          # third-party host on every run.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest {project}/tests
-            --deselect tests/test_molbloom.py::test_example
-            --deselect tests/test_molbloom.py::test_common
-            --deselect tests/test_molbloom.py::test_alot
-            --deselect tests/test_molbloom.py::test_fpr
-            --deselect tests/test_molbloom.py::test_all_catalogs
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: molbloom-${{ env.MOLBLOOM_VERSION }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: molbloom
+      version: ${{ matrix.version }}
+      repository: whitead/molbloom
+      ref: v${{ matrix.version }}
+      artifact-tag: manylinux_riscv64
+      cibw-build: "cp311-* cp312-* cp313-*"
+      cibw-skip: "*-musllinux_*"
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # molbloom imports rdkit at module import time; rdkit's own riscv64
+      # wheels on our registry only go back to cp312 (same floor as numpy
+      # and Pillow, rdkit's own runtime deps), so cp311 builds but isn't tested.
+      cibw-test-skip: "cp311-*"
+      cibw-test-environment: PIP_ONLY_BINARY=numpy,pillow,rdkit
+      cibw-test-requires: pytest
+      cibw-test-sources: tests
+      # test_example/test_common/test_alot/test_fpr/test_all_catalogs each
+      # also exercise the "zinc20"/"zinc-instock"/"surechembl" catalogs,
+      # which _load_big_filter() downloads from Dropbox on first use
+      # (hundreds of MB, outside GitHub); kept to the bundled
+      # zinc-instock-mini catalog so CI doesn't fetch gigabytes from a
+      # third-party host on every run.
+      cibw-test-command: >-
+        python -m pytest {project}/tests
+        --deselect tests/test_molbloom.py::test_example
+        --deselect tests/test_molbloom.py::test_common
+        --deselect tests/test_molbloom.py::test_alot
+        --deselect tests/test_molbloom.py::test_fpr
+        --deselect tests/test_molbloom.py::test_all_catalogs
 
   publish:
     name: Publish molbloom ${{ matrix.version }}

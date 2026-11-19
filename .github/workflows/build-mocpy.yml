@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,56 +46,38 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mocpy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      MOCPY_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout mocpy ${{ env.MOCPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: cds-astro/mocpy
-          ref: v${{ env.MOCPY_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # musllinux is dropped: numpy, a hard runtime dependency, has no musllinux riscv64 wheel.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # MPLBACKEND stands in for upstream's root conftest.py, which only selects Agg.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_ONLY_BINARY=:all:
-            MPLBACKEND=Agg
-          CIBW_TEST_REQUIRES: pytest pytest-mock requests regions cdshealpix matplotlib networkx
-          CIBW_TEST_SOURCES: resources
-          # test_read_fits_file finds resources/ through the source-checkout layout (__file__ parents), absent from a wheel.
-          # from_vizier / from_ivorn (tests and MOC.* doctests) and test_stmoc_from_url fetch from VizieR/CDS over the
-          # network, which the riscv64 runners cannot reach.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest -v --pyargs mocpy --doctest-modules
-            -o doctest_optionflags=NORMALIZE_WHITESPACE
-            -k 'not test_read_fits_file and not from_vizier and not from_ivorn and not test_stmoc_from_url'
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mocpy-${{ env.MOCPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: mocpy
+      version: ${{ matrix.version }}
+      repository: cds-astro/mocpy
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # musllinux is dropped: numpy, a hard runtime dependency, has no musllinux riscv64 wheel.
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-before-all-linux: >-
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: >-
+        PATH="$PATH:$HOME/.cargo/bin"
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # MPLBACKEND stands in for upstream's root conftest.py, which only selects Agg.
+      cibw-test-environment: >-
+        PIP_ONLY_BINARY=:all:
+        MPLBACKEND=Agg
+      cibw-test-requires: pytest pytest-mock requests regions cdshealpix matplotlib networkx
+      cibw-test-sources: resources
+      # test_read_fits_file finds resources/ through the source-checkout layout (__file__ parents), absent from a wheel.
+      # from_vizier / from_ivorn (tests and MOC.* doctests) and test_stmoc_from_url fetch from VizieR/CDS over the
+      # network, which the riscv64 runners cannot reach.
+      cibw-test-command: >-
+        python -m pytest -v --pyargs mocpy --doctest-modules
+        -o doctest_optionflags=NORMALIZE_WHITESPACE
+        -k 'not test_read_fits_file and not from_vizier and not from_ivorn and not test_stmoc_from_url'
+      timeout-minutes: 90
 
   publish:
     name: Publish mocpy ${{ matrix.version }}
