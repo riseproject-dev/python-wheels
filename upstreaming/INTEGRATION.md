@@ -125,12 +125,24 @@ Live PR creation succeeded, but no fork workflows ran: a fresh public fork's
 Actions inventory was empty even though workflow files existed on the default
 branch. Provisioning had therefore scanned nothing. Current local code uses the
 default-branch contents directory as the authoritative bounded inventory,
-parses every workflow as data, explicitly enables safe CI and disables
-privileged/publication workflows. A development-PR retry enables safe workflows
-and closes/reopens an already marked PR only when enablement changed, producing
-the normal `reopened` event. Controller artifact collection also treats
+parses every workflow as data. When files exist but GitHub reports no registered
+workflows, it reapplies the repository Actions switch with the one-fork
+Administration token and requires registration before proceeding. It then
+explicitly enables safe CI and disables privileged/publication workflows. A
+development-PR retry enables safe workflows and closes/reopens an already marked
+PR only when enablement changed, producing the normal `reopened` event. Controller artifact collection also treats
 transient per-run API failures as deferred evidence rather than aborting the
 entire reconciliation tick.
+
+Patch review also exposed two unrelated fork-debug changes: adding a
+`push: riscv64` trigger despite an existing base-matching `pull_request` trigger,
+and broadening `inputs.upload` with `github.event_name == 'push'`. The worker
+contract now explicitly forbids both patterns and any unrelated event, upload,
+retention or release behavior change. It also requires per-file commit history,
+issue/PR/review research and policy evidence before editing changelogs or other
+policy-sensitive files. Existing PR CI that builds but intentionally does not
+upload artifacts is left unchanged; any extra acceptance evidence belongs in a
+separate trusted probe.
 
 Previously merged implementation:
 

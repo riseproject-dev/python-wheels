@@ -31,6 +31,7 @@ class Api:
         self.parent = 1
         self.defaults = {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}
         self.actions = {"enabled": True, "allowed_actions": "all"}
+        self.workflows_registered = False
         self.deny_settings = False
 
     def fork(self):
@@ -55,7 +56,10 @@ class Api:
         if path == f"/repos/{FORK}/actions/permissions":
             return self.actions
         if path == f"/repos/{FORK}/actions/workflows?per_page=100":
-            return {"total_count": 0, "workflows": []}
+            workflows = ([{"path": ".github/workflows/wheels.yml", "state": "disabled_manually"},
+                          {"path": ".github/workflows/publish.yml", "state": "active"}]
+                         if self.workflows_registered else [])
+            return {"total_count": len(workflows), "workflows": workflows}
         if path == f"/repos/{FORK}/contents/.github/workflows?ref=main":
             return [{"type": "file", "name": "wheels.yml", "path": ".github/workflows/wheels.yml"},
                     {"type": "file", "name": "publish.yml", "path": ".github/workflows/publish.yml"}]
@@ -78,7 +82,10 @@ class Api:
         if path == f"/repos/{FORK}/actions/permissions/workflow":
             self.defaults = dict(body)
         if path == f"/repos/{FORK}/actions/permissions":
+            was_enabled = self.actions.get("enabled")
             self.actions = dict(body)
+            if was_enabled is False and body.get("enabled") is True:
+                self.workflows_registered = True
         return {}
 
 
@@ -96,9 +103,11 @@ class TestProvisioning(unittest.TestCase):
         self.assertIn(("POST", f"/repos/{FORK}/git/refs", {"ref": "refs/heads/riscv64", "sha": SHA_C}), api.writes)
         self.assertIn(".github/workflows/publish.yml", outcome["disabled_workflows"])
         self.assertIn(".github/workflows/wheels.yml", outcome["enabled_workflows"])
-        self.assertFalse(any(path in (f"/repos/{FORK}/actions/permissions",
-                                      f"/repos/{FORK}/actions/permissions/workflow")
+        self.assertFalse(any(path == f"/repos/{FORK}/actions/permissions/workflow"
                              for _, path, _ in api.writes))
+        toggles = [body["enabled"] for method, path, body in api.writes
+                   if path == f"/repos/{FORK}/actions/permissions"]
+        self.assertEqual(toggles, [False, True])
 
     def test_existing_fork_is_adopted_not_claimed_as_created(self):
         rec, op = request()

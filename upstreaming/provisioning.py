@@ -136,6 +136,16 @@ def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[s
     inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
     if inventory.get("total_count", 0) > 100:
         raise ProvisionError("Actions workflow inventory exceeds bounded setup scan")
+    if not inventory.get("workflows") and entries:
+        # GitHub can leave inherited workflows unregistered on a fresh public
+        # fork even when repository Actions is enabled. Reapply the repository
+        # Actions switch with the one-fork Administration token, then require
+        # the files to appear before opening/reopening a PR.
+        api.write("PUT", f"/repos/{fork}/actions/permissions", {"enabled": False, "allowed_actions": "all"})
+        api.write("PUT", f"/repos/{fork}/actions/permissions", {"enabled": True, "allowed_actions": "all"})
+        inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
+        if not inventory.get("workflows"):
+            raise ProvisionError("fork workflows remain unregistered after Actions re-enable")
     states = {wf.get("path"): wf.get("state") for wf in inventory.get("workflows", [])}
     names = [entry.get("name") for entry in entries if entry.get("type") == "file"]
     if len(names) != len(set(names)):

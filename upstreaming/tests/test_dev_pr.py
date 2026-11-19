@@ -36,6 +36,8 @@ class FakeApi:
         self.rec, self.op, self.existing = rec, op, existing
         self.writes = []
         self.workflow_active = existing
+        self.workflows_registered = existing
+        self.actions_enabled = True
         self.pr = {"id": 77, "number": 4, "html_url": "https://github.com/riseproject-upstreaming/proj/pull/4",
                    "state": "open", "body": dev_pr.body(rec, op),
                    "head": {"sha": SHA_B, "ref": "riscv64", "repo": {"id": 9}},
@@ -54,8 +56,10 @@ class FakeApi:
             text = "name: CI\npermissions: {contents: read}\njobs: {}\n"
             return {"type": "file", "encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
         if path == f"/repos/{FORK}/actions/workflows?per_page=100":
-            return {"total_count": int(self.workflow_active),
-                    "workflows": ([{"path": ".github/workflows/build.yml", "state": "active"}] if self.workflow_active else [])}
+            workflows = ([{"path": ".github/workflows/build.yml",
+                           "state": "active" if self.workflow_active else "disabled_manually"}]
+                         if self.workflows_registered else [])
+            return {"total_count": len(workflows), "workflows": workflows}
         if path.startswith(f"/repos/{FORK}/pulls?"):
             return [self.pr] if self.existing else []
         if path == f"/repos/{FORK}/pulls/4":
@@ -64,6 +68,11 @@ class FakeApi:
 
     def write(self, method, path, value):
         self.writes.append((method, path, value))
+        if path.endswith("/actions/permissions"):
+            was_enabled = self.actions_enabled
+            self.actions_enabled = value["enabled"]
+            if was_enabled is False and self.actions_enabled is True:
+                self.workflows_registered = True
         if path.endswith("/enable"):
             self.workflow_active = True
         return {}
