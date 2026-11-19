@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,49 +46,33 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build lmdb ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      LMDB_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout py-lmdb ${{ env.LMDB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: jnwatson/py-lmdb
-          ref: py-lmdb_${{ env.LMDB_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cffi is a build requirement and has no riscv64 wheel on public PyPI.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # lmdb/__init__.py silently falls back to the pure-Python cffi binding
-          # when the compiled extension is missing.
-          CIBW_TEST_ENVIRONMENT: LMDB_FORCE_CPYTHON=1
-          # pyproject.toml carries the mdb_layout marker and the addopts that
-          # deselect it from the default run, from tests/mdb_layout_test.py
-          # onward (2.1.1 predates both and runs everything in one pass).
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import lmdb.cpython as c; assert c.__file__.endswith('.so'), c.__file__" &&
-            python -m pytest tests &&
-            (test ! -f tests/mdb_layout_test.py || python -m pytest -m mdb_layout tests)
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: lmdb-${{ env.LMDB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: lmdb
+      version: ${{ matrix.version }}
+      repository: jnwatson/py-lmdb
+      ref: py-lmdb_${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # cffi is a build requirement and has no riscv64 wheel on public PyPI.
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # lmdb/__init__.py silently falls back to the pure-Python cffi binding
+      # when the compiled extension is missing.
+      cibw-test-environment: LMDB_FORCE_CPYTHON=1
+      # pyproject.toml carries the mdb_layout marker and the addopts that
+      # deselect it from the default run, from tests/mdb_layout_test.py
+      # onward (2.1.1 predates both and runs everything in one pass).
+      cibw-test-sources: tests pyproject.toml
+      cibw-test-requires: pytest
+      cibw-test-command: >-
+        python -c "import lmdb.cpython as c; assert c.__file__.endswith('.so'), c.__file__" &&
+        python -m pytest tests &&
+        (test ! -f tests/mdb_layout_test.py || python -m pytest -m mdb_layout tests)
+      timeout-minutes: 90
 
   publish:
     name: Publish lmdb ${{ matrix.version }}

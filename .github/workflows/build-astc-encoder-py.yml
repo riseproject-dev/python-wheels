@@ -36,15 +36,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # Upstream cuts releases without git tags, so pin the release commit: this is
-  # "chore(release): bump 0.1.12", whose tree is byte-identical to the 0.1.12
-  # PyPI sdist (checked against src/, setup.py, pyproject.toml, and the pinned
-  # src/astc-encoder submodule commit). Update alongside ASTC_ENCODER_PY_VERSION.
-  ASTC_ENCODER_PY_REF: c0ba64c050a50646b09d80c0217ff546b18e72f8
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -56,8 +47,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build astc-encoder-py ${{ matrix.version }} cp312-abi3-${{ matrix.libc }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -96,40 +85,27 @@ jobs:
               decomp = ctx.decompress(comp, out, swizzle);
               assert len(decomp.data) == w * h * 4, len(decomp.data);
               print('astc_encoder OK: compressed', len(comp), 'decompressed', len(decomp.data))"
-
-    env:
-      ASTC_ENCODER_PY_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout astc-encoder-py ${{ env.ASTC_ENCODER_PY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: K0lb3/astc-encoder-py
-          ref: ${{ env.ASTC_ENCODER_PY_REF }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: >-
-            cp312-${{ matrix.libc }}_riscv64
-            cp313-${{ matrix.libc }}_riscv64
-            cp314-${{ matrix.libc }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_EXTRAS: ${{ matrix.test_extras }}
-          CIBW_TEST_COMMAND: ${{ matrix.test_command }}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: astc-encoder-py-${{ env.ASTC_ENCODER_PY_VERSION }}-cp312-abi3-${{ matrix.libc }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: astc-encoder-py
+      version: ${{ matrix.version }}
+      repository: K0lb3/astc-encoder-py
+      ref: c0ba64c050a50646b09d80c0217ff546b18e72f8
+      artifact-tag: cp312-abi3-${{ matrix.libc }}_riscv64
+      checkout-submodules: true
+      # Upstream cuts releases without git tags, so pin the release commit: this is
+      # "chore(release): bump 0.1.12", whose tree is byte-identical to the 0.1.12
+      # PyPI sdist (checked against src/, setup.py, pyproject.toml, and the pinned
+      # src/astc-encoder submodule commit). Update alongside the package version.
+      cibw-build: >-
+        cp312-${{ matrix.libc }}_riscv64
+        cp313-${{ matrix.libc }}_riscv64
+        cp314-${{ matrix.libc }}_riscv64
+      cibw-musllinux-riscv64-image: quay.io/pypa/musllinux_1_2_riscv64
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      cibw-test-extras: ${{ matrix.test_extras }}
+      cibw-test-command: ${{ matrix.test_command }}
+      timeout-minutes: 90
 
   publish:
     name: Publish astc-encoder-py ${{ matrix.version }}

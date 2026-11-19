@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,71 +46,53 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build adbc-driver-manager ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      ADBC_VERSION: ${{ matrix.version }}
-
-    steps:
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: adbc-driver-manager
+      version: ${{ matrix.version }}
       # The monorepo has no tag that literally embeds the PyPI version (releases are
       # tagged with a sequential counter, e.g. this version is "apache-arrow-adbc-24"),
       # but the Go module release tag (go/adbc/v<version>) always points at the same
       # commit and does embed it, so it doubles as a version->ref lookup.
-      - name: Checkout apache/arrow-adbc v${{ env.ADBC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: apache/arrow-adbc
-          ref: go/adbc/v${{ env.ADBC_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python/adbc_driver_manager
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # pandas/pyarrow riscv64 wheels only exist on our own registry.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The [dbapi] test install pulls pandas; PyPI's newest pandas has no
-          # riscv64 wheel and its sdist fails to build (meson/xsimd), so install it
-          # wheel-only, with the registry visible, and let pip back off to a release
-          # that has one. CIBW_ENVIRONMENT does not reach the test stage.
-          # The registry has no free-threaded (cp314t) pandas wheel at all, so that
-          # leg cannot go wheel-only: it caps pandas below 3.1 instead (the 3.1 sdist
-          # is the one that fails to build) and builds the 3.0 sdist, as 1.12.0 did.
-          # The cap has to reach the `wheel[dbapi]` install itself, which runs before
-          # CIBW_TEST_REQUIRES and would otherwise pick pandas 3.1: a pip constraints
-          # file, written by before-test (which runs ahead of that install).
-          CIBW_BEFORE_TEST: ${{ matrix.python == 'cp314t' && 'echo "pandas<3.1" > /tmp/pandas-constraint.txt' || '' }}
-          # Same story for pyarrow: unpinned resolution reaches a version with no
-          # riscv64 wheel here and its sdist fails (CMake can't find_package(Arrow),
-          # since the Arrow C++ library isn't installed in this test env) - wheel-only
-          # lets pip back off to a published riscv64 build. The registry does have a
-          # cp314t pyarrow wheel, unlike pandas, so that leg can go wheel-only for it.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.python == 'cp314t' && 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_CONSTRAINT=/tmp/pandas-constraint.txt PIP_ONLY_BINARY=pyarrow' || 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas,pyarrow' }}
-          CIBW_TEST_EXTRAS: dbapi
-          CIBW_TEST_REQUIRES: ${{ matrix.python == 'cp314t' && 'pytest>=9 pandas<3.1' || 'pytest>=9' }}
-          CIBW_TEST_SOURCES: python/adbc_driver_manager/tests python/adbc_driver_manager/pyproject.toml
-          # Mirrors upstream's own python_util.sh test_packages(): the driver_manager
-          # wheel ships no actual drivers, so its "sqlite"-marked tests (which dynamically
-          # load adbc_driver_sqlite) can't run here; "duckdb" isn't used by this
-          # component's own tests but upstream excludes it too, so match that.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest python/adbc_driver_manager/tests
-            -k "not sqlite and not duckdb"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: adbc-driver-manager-${{ env.ADBC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      repository: apache/arrow-adbc
+      ref: go/adbc/v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-package-dir: python/adbc_driver_manager
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # pandas/pyarrow riscv64 wheels only exist on our own registry.
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # The [dbapi] test install pulls pandas; PyPI's newest pandas has no
+      # riscv64 wheel and its sdist fails to build (meson/xsimd), so install it
+      # wheel-only, with the registry visible, and let pip back off to a release
+      # that has one. CIBW_ENVIRONMENT does not reach the test stage.
+      # The registry has no free-threaded (cp314t) pandas wheel at all, so that
+      # leg cannot go wheel-only: it caps pandas below 3.1 instead (the 3.1 sdist
+      # is the one that fails to build) and builds the 3.0 sdist, as 1.12.0 did.
+      # The cap has to reach the `wheel[dbapi]` install itself, which runs before
+      # CIBW_TEST_REQUIRES and would otherwise pick pandas 3.1: a pip constraints
+      # file, written by before-test (which runs ahead of that install).
+      cibw-before-test: ${{ matrix.python == 'cp314t' && 'echo "pandas<3.1" > /tmp/pandas-constraint.txt' || '' }}
+      # Same story for pyarrow: unpinned resolution reaches a version with no
+      # riscv64 wheel here and its sdist fails (CMake can't find_package(Arrow),
+      # since the Arrow C++ library isn't installed in this test env) - wheel-only
+      # lets pip back off to a published riscv64 build. The registry does have a
+      # cp314t pyarrow wheel, unlike pandas, so that leg can go wheel-only for it.
+      cibw-test-environment: ${{ matrix.python == 'cp314t' && 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_CONSTRAINT=/tmp/pandas-constraint.txt PIP_ONLY_BINARY=pyarrow' || 'PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pandas,pyarrow' }}
+      cibw-test-extras: dbapi
+      cibw-test-requires: ${{ matrix.python == 'cp314t' && 'pytest>=9 pandas<3.1' || 'pytest>=9' }}
+      cibw-test-sources: python/adbc_driver_manager/tests python/adbc_driver_manager/pyproject.toml
+      # Mirrors upstream's own python_util.sh test_packages(): the driver_manager
+      # wheel ships no actual drivers, so its "sqlite"-marked tests (which dynamically
+      # load adbc_driver_sqlite) can't run here; "duckdb" isn't used by this
+      # component's own tests but upstream excludes it too, so match that.
+      cibw-test-command: >-
+        python -m pytest python/adbc_driver_manager/tests
+        -k "not sqlite and not duckdb"
+      timeout-minutes: 60
 
   publish:
     name: Publish adbc-driver-manager ${{ matrix.version }}

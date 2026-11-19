@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,44 +45,26 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build vispy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      VISPY_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout vispy v${{ env.VISPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: vispy/vispy
-          ref: v${{ env.VISPY_VERSION }}
-          fetch-depth: 0  # hatch-vcs derives the version from `git describe`
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a build- and runtime dependency; only our registry has it
-          # for riscv64, and PIP_ONLY_BINARY keeps a newer PyPI release from
-          # winning the resolution and then compiling from sdist.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: vispy-${{ env.VISPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: vispy
+      version: ${{ matrix.version }}
+      repository: vispy/vispy
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      checkout-fetch-depth: 0
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # numpy is a build- and runtime dependency; only our registry has it
+      # for riscv64, and PIP_ONLY_BINARY keeps a newer PyPI release from
+      # winning the resolution and then compiling from sdist.
+      cibw-environment: >-
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        PIP_ONLY_BINARY=numpy
+      timeout-minutes: 60
 
   publish:
     name: Publish vispy ${{ matrix.version }}

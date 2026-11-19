@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,53 +45,35 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build emcache ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      EMCACHE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout emcache v${{ env.EMCACHE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: emcache/emcache
-          ref: v${{ env.EMCACHE_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_BUILD: make -C vendor/murmur3 static && make cythonize
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Rocky 10's memcached stands in for upstream's compose.yaml service containers.
-          CIBW_BEFORE_TEST_LINUX: >-
-            dnf -y install memcached &&
-            memcached -d -u root -p 11211 &&
-            memcached -d -u root -p 11212 &&
-            memcached -d -u root -p 11213 --enable-ssl
-            -o ssl_chain_cert={project}/tests/acceptance/data/localhost.crt,ssl_key={project}/tests/acceptance/data/localhost.key &&
-            memcached -d -u root -p 11214 -S -Y {project}/tests/acceptance/data/auth_pwd.txt &&
-            memcached -d -u root -s /tmp/emcache.test1.sock &&
-            memcached -d -u root -s /tmp/emcache.test2.sock
-          CIBW_TEST_REQUIRES: pytest==8.2.2 pytest-mock==3.14.0 pytest-asyncio==0.23.8
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: python -m pytest -sv tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: emcache-${{ env.EMCACHE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: emcache
+      version: ${{ matrix.version }}
+      repository: emcache/emcache
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      checkout-submodules: true
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-before-build: make -C vendor/murmur3 static && make cythonize
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      # Rocky 10's memcached stands in for upstream's compose.yaml service containers.
+      cibw-before-test-linux: >-
+        dnf -y install memcached &&
+        memcached -d -u root -p 11211 &&
+        memcached -d -u root -p 11212 &&
+        memcached -d -u root -p 11213 --enable-ssl
+        -o ssl_chain_cert={project}/tests/acceptance/data/localhost.crt,ssl_key={project}/tests/acceptance/data/localhost.key &&
+        memcached -d -u root -p 11214 -S -Y {project}/tests/acceptance/data/auth_pwd.txt &&
+        memcached -d -u root -s /tmp/emcache.test1.sock &&
+        memcached -d -u root -s /tmp/emcache.test2.sock
+      cibw-test-requires: pytest==8.2.2 pytest-mock==3.14.0 pytest-asyncio==0.23.8
+      cibw-test-sources: tests pyproject.toml
+      cibw-test-command: python -m pytest -sv tests
+      timeout-minutes: 90
 
   publish:
     name: Publish emcache ${{ matrix.version }}

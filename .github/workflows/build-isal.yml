@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,46 +45,28 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build isal ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      ISAL_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout isal v${{ env.ISAL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: pycompression/python-isal
-          ref: v${{ env.ISAL_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: CFLAGS="-O3 -DNDEBUG"
-          CIBW_TEST_REQUIRES: pytest
-          # Mirrors upstream's own deploy-job CIBW_TEST_COMMAND_LINUX.
-          CIBW_TEST_COMMAND: >-
-            pytest -v {project}/tests/test_igzip.py
-            {project}/tests/test_gzip_compliance.py
-            {project}/tests/test_zlib_compliance.py
-            {project}/tests/test_igzip_lib.py
-            -k 'not test_compress_decompress'
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: isal-${{ env.ISAL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: isal
+      version: ${{ matrix.version }}
+      repository: pycompression/python-isal
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      checkout-submodules: true
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-environment: CFLAGS="-O3 -DNDEBUG"
+      cibw-test-requires: pytest
+      # Mirrors upstream's own deploy-job CIBW_TEST_COMMAND_LINUX.
+      cibw-test-command: >-
+        pytest -v {project}/tests/test_igzip.py
+        {project}/tests/test_gzip_compliance.py
+        {project}/tests/test_zlib_compliance.py
+        {project}/tests/test_igzip_lib.py
+        -k 'not test_compress_decompress'
 
   publish:
     name: Publish isal ${{ matrix.version }}

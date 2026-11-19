@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,51 +45,33 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build persistent ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      PERSISTENT_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout persistent ${{ env.PERSISTENT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: zopefoundation/persistent
-          ref: ${{ env.PERSISTENT_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cffi and zope.interface, needed to build and to import the extension,
-          # have no riscv64 wheel on public PyPI.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_EXTRAS: test
-          CIBW_TEST_ENVIRONMENT: ZOPE_INTERFACE_STRICT_IRO=1
-          # Upstream's two test steps (with and without the C extensions).
-          # setup.py swallows extension build failures (optional_build_ext), so
-          # PURE_PYTHON=0 — which makes the C import mandatory at runtime — is
-          # what proves the wheel is not pure Python. test_docs walks up from
-          # the installed (not checked-out) module to find docs/api/*.rst,
-          # which the wheel doesn't ship, so it is excluded.
-          CIBW_TEST_COMMAND: >-
-            PURE_PYTHON=0 python -m zope.testrunner --test-path={package}/src -m '!test_docs' &&
-            PURE_PYTHON=1 python -m zope.testrunner --test-path={package}/src -m '!test_docs'
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: persistent-${{ env.PERSISTENT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: persistent
+      version: ${{ matrix.version }}
+      repository: zopefoundation/persistent
+      ref: ${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # cffi and zope.interface, needed to build and to import the extension,
+      # have no riscv64 wheel on public PyPI.
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      cibw-test-extras: test
+      cibw-test-environment: ZOPE_INTERFACE_STRICT_IRO=1
+      # Upstream's two test steps (with and without the C extensions).
+      # setup.py swallows extension build failures (optional_build_ext), so
+      # PURE_PYTHON=0 - which makes the C import mandatory at runtime - is
+      # what proves the wheel is not pure Python. test_docs walks up from
+      # the installed (not checked-out) module to find docs/api/*.rst,
+      # which the wheel doesn't ship, so it is excluded.
+      cibw-test-command: >-
+        PURE_PYTHON=0 python -m zope.testrunner --test-path={package}/src -m '!test_docs' &&
+        PURE_PYTHON=1 python -m zope.testrunner --test-path={package}/src -m '!test_docs'
+      timeout-minutes: 60
 
   publish:
     name: Publish persistent ${{ matrix.version }}

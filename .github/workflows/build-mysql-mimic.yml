@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,42 +46,24 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build mysql-mimic ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      MYSQL_MIMIC_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout mysql-mimic v${{ env.MYSQL_MIMIC_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: kelsin/mysql-mimic
-          ref: v${{ env.MYSQL_MIMIC_VERSION }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: aiomysql mysql-connector-python freezegun greenlet pytest pytest-asyncio sqlalchemy
-          CIBW_TEST_SOURCES: tests tools
-          # Upstream's wheel check, plus the pytest suite its tests.yml runs from a checkout.
-          CIBW_TEST_COMMAND: python tools/check_mypyc.py && python -m pytest tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mysql-mimic-${{ env.MYSQL_MIMIC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: mysql-mimic
+      version: ${{ matrix.version }}
+      repository: kelsin/mysql-mimic
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      checkout-fetch-depth: 0
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-environment: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      cibw-test-requires: aiomysql mysql-connector-python freezegun greenlet pytest pytest-asyncio sqlalchemy
+      cibw-test-sources: tests tools
+      # Upstream's wheel check, plus the pytest suite its tests.yml runs from a checkout.
+      cibw-test-command: python tools/check_mypyc.py && python -m pytest tests
 
   publish:
     name: Publish mysql-mimic ${{ matrix.version }}

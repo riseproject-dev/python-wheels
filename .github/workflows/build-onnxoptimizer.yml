@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -50,59 +47,41 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build onnxoptimizer ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         # No riscv64 onnxruntime wheel on cp311; the rest of the suite still runs.
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      ONNXOPTIMIZER_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout onnxoptimizer v${{ env.ONNXOPTIMIZER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: onnx/optimizer
-          ref: v${{ env.ONNXOPTIMIZER_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          # The riscv64 manylinux image's own cmake (3.31.8) already satisfies
-          # CMakeLists.txt's cmake_minimum_required(3.22); upstream's
-          # CIBW_BEFORE_ALL_LINUX pip-installs a newer one only for its older
-          # manylinux_2_28 x86_64/aarch64 images.
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            CMAKE_ARGS="
-            -DONNX_USE_PROTOBUF_SHARED_LIBS=OFF
-            -DProtobuf_USE_STATIC_LIBS=ON
-            -DONNX_USE_LITE_PROTO=ON
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-            "
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_BEFORE_BUILD_LINUX: pip install protobuf
-          # Upstream's flake8p/mypy lint step and its onnxscript/torch/torchvision
-          # installs cover optional test paths guarded by try/except in
-          # onnxoptimizer/test/optimizer_test.py (onnxscript itself isn't even
-          # imported by any test); torch and torchvision have no riscv64 wheels, so
-          # those paths are left to skip rather than installed. onnxruntime does
-          # have a riscv64 wheel on our registry, but only from cp312 (matrix.onnxruntime).
-          CIBW_TEST_REQUIRES: pytest pytest-xdist ${{ case(matrix.python == 'cp311', '', matrix.python == 'cp312', 'onnxruntime', '') }}
-          CIBW_TEST_COMMAND: pytest {project}/onnxoptimizer/test/
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: onnxoptimizer-${{ env.ONNXOPTIMIZER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: onnxoptimizer
+      version: ${{ matrix.version }}
+      repository: onnx/optimizer
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      checkout-submodules: recursive
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # The riscv64 manylinux image's own cmake (3.31.8) already satisfies
+      # CMakeLists.txt's cmake_minimum_required(3.22); upstream's
+      # CIBW_BEFORE_ALL_LINUX pip-installs a newer one only for its older
+      # manylinux_2_28 x86_64/aarch64 images.
+      cibw-environment: >-
+        CMAKE_ARGS="
+        -DONNX_USE_PROTOBUF_SHARED_LIBS=OFF
+        -DProtobuf_USE_STATIC_LIBS=ON
+        -DONNX_USE_LITE_PROTO=ON
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        "
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+      cibw-before-build-linux: pip install protobuf
+      # Upstream's flake8p/mypy lint step and its onnxscript/torch/torchvision
+      # installs cover optional test paths guarded by try/except in
+      # onnxoptimizer/test/optimizer_test.py (onnxscript itself isn't even
+      # imported by any test); torch and torchvision have no riscv64 wheels, so
+      # those paths are left to skip rather than installed. onnxruntime does
+      # have a riscv64 wheel on our registry, but only from cp312 (matrix.onnxruntime).
+      cibw-test-requires: pytest pytest-xdist ${{ case(matrix.python == 'cp311', '', matrix.python == 'cp312', 'onnxruntime', '') }}
+      cibw-test-command: pytest {project}/onnxoptimizer/test/
 
   publish:
     name: Publish onnxoptimizer ${{ matrix.version }}

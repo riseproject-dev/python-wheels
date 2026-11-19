@@ -37,11 +37,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # Upstream tags drop the trailing patch zero (0.11 -> 0.11.0); move both together.
-  POLYLEVEN_REF: '0.11'
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -53,40 +48,25 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build polyleven ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      POLYLEVEN_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout polyleven ${{ env.POLYLEVEN_REF }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: fujimotos/polyleven
-          ref: ${{ env.POLYLEVEN_REF }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # The regression suite ships in the checkout, not in the sdist.
-          CIBW_TEST_SOURCES: test
-          CIBW_TEST_COMMAND: >-
-            python -c "import polyleven; assert polyleven.__file__.endswith('.so'), polyleven.__file__" &&
-            python -m unittest test/regression.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: polyleven-${{ env.POLYLEVEN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: polyleven
+      version: ${{ matrix.version }}
+      repository: fujimotos/polyleven
+      ref: '0.11'
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Upstream tags drop the trailing patch zero (0.11 -> 0.11.0); move both together.
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # The regression suite ships in the checkout, not in the sdist.
+      cibw-test-sources: test
+      cibw-test-command: >-
+        python -c "import polyleven; assert polyleven.__file__.endswith('.so'), polyleven.__file__" &&
+        python -m unittest test/regression.py
+      timeout-minutes: 60
 
   publish:
     name: Publish polyleven ${{ matrix.version }}

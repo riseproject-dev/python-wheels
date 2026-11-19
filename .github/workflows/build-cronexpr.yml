@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,50 +46,32 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cronexpr ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      CRONEXPR_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout pycronexpr v${{ env.CRONEXPR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: CodyRay/pycronexpr
-          ref: v${{ env.CRONEXPR_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # scikit-build-core fetches cmake/ninja from PyPI when missing on PATH, and CMake
-          # 4+ rejects supertinycron's CPM-fetched cmake_minimum_required(3.5) (gotcha 257).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            CMAKE_POLICY_VERSION_MINIMUM=3.5
-          CIBW_TEST_COMMAND: >-
-            python -c "import _ccronexpr as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -c "import cronexpr, unittest;
-            from datetime import datetime, timezone;
-            d = datetime(2024, 9, 4, tzinfo=timezone.utc);
-            assert cronexpr.next_fire('0 0 21 ? 1/2 TUE#1 *', d) == datetime(2024, 11, 5, 21, 0, tzinfo=timezone.utc);
-            assert cronexpr.prev_fire('0 0 21 ? 1/2 TUE#1 *', d) == datetime(2024, 9, 3, 21, 0, tzinfo=timezone.utc);
-            unittest.TestCase().assertRaises(ValueError, cronexpr.prev_fire, '* 35 * * *')"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cronexpr-${{ env.CRONEXPR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: cronexpr
+      version: ${{ matrix.version }}
+      repository: CodyRay/pycronexpr
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # scikit-build-core fetches cmake/ninja from PyPI when missing on PATH, and CMake
+      # 4+ rejects supertinycron's CPM-fetched cmake_minimum_required(3.5) (gotcha 257).
+      cibw-environment: >-
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        CMAKE_POLICY_VERSION_MINIMUM=3.5
+      cibw-test-command: >-
+        python -c "import _ccronexpr as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -c "import cronexpr, unittest;
+        from datetime import datetime, timezone;
+        d = datetime(2024, 9, 4, tzinfo=timezone.utc);
+        assert cronexpr.next_fire('0 0 21 ? 1/2 TUE#1 *', d) == datetime(2024, 11, 5, 21, 0, tzinfo=timezone.utc);
+        assert cronexpr.prev_fire('0 0 21 ? 1/2 TUE#1 *', d) == datetime(2024, 9, 3, 21, 0, tzinfo=timezone.utc);
+        unittest.TestCase().assertRaises(ValueError, cronexpr.prev_fire, '* 35 * * *')"
+      timeout-minutes: 60
 
   publish:
     name: Publish cronexpr ${{ matrix.version }}

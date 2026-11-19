@@ -39,10 +39,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -54,54 +50,37 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build opentype-sanitizer ${{ matrix.version }} py3-none-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    env:
-      OPENTYPE_SANITIZER_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout ots-python v${{ env.OPENTYPE_SANITIZER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: googlefonts/ots-python
-          ref: v${{ env.OPENTYPE_SANITIZER_VERSION }}
-          fetch-depth: 0
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # ots-python ships a repo-root build.py (its meson+ninja driver). cibuildwheel's
-          # default build-frontend ("build") runs `python -m build /project --wheel` with
-          # cwd=/project, so `python -m` puts /project at sys.path[0] and build.py shadows
-          # the real `build` package before it's ever imported (gotcha 102). Force the
-          # "pip" frontend instead: `python -m pip wheel` isn't shadowed and runs the PEP 517
-          # hooks from a clean sys.path, matching how upstream's own CI invokes cibuildwheel.
-          CIBW_BUILD_FRONTEND: "pip"
-          # setuptools 81 dropped mkpath()'s dry_run keyword, which setup.py's download command still passes (gotcha 256).
-          CIBW_BEFORE_ALL_LINUX: "echo 'setuptools<81' > /setuptools-constraint.txt"
-          CIBW_ENVIRONMENT: >-
-            PIP_CONSTRAINT=/setuptools-constraint.txt
-            PIP_BUILD_CONSTRAINT=/setuptools-constraint.txt
-          # One py2.py3-none wheel is built on cp312 and reused on every other interpreter.
-          CIBW_BUILD: "cp312-*"
-          CIBW_TEST_REQUIRES: "pytest"
-          CIBW_TEST_COMMAND: "pytest {project}/tests"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: opentype-sanitizer-${{ env.OPENTYPE_SANITIZER_VERSION }}-py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: opentype-sanitizer
+      version: ${{ matrix.version }}
+      repository: googlefonts/ots-python
+      ref: v${{ matrix.version }}
+      artifact-tag: py3-none-manylinux_riscv64
+      checkout-submodules: recursive
+      checkout-fetch-depth: 0
+      cibw-musllinux-riscv64-image: quay.io/pypa/musllinux_1_2_riscv64
+      # ots-python ships a repo-root build.py (its meson+ninja driver). cibuildwheel's
+      # default build-frontend ("build") runs `python -m build /project --wheel` with
+      # cwd=/project, so `python -m` puts /project at sys.path[0] and build.py shadows
+      # the real `build` package before it's ever imported (gotcha 102). Force the
+      # "pip" frontend instead: `python -m pip wheel` isn't shadowed and runs the PEP 517
+      # hooks from a clean sys.path, matching how upstream's own CI invokes cibuildwheel.
+      cibw-build-frontend: "pip"
+      # setuptools 81 dropped mkpath()'s dry_run keyword, which setup.py's download command still passes (gotcha 256).
+      cibw-before-all-linux: "echo 'setuptools<81' > /setuptools-constraint.txt"
+      cibw-environment: >-
+        PIP_CONSTRAINT=/setuptools-constraint.txt
+        PIP_BUILD_CONSTRAINT=/setuptools-constraint.txt
+      # One py2.py3-none wheel is built on cp312 and reused on every other interpreter.
+      cibw-build: "cp312-*"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest {project}/tests"
+      timeout-minutes: 120
 
   publish:
     name: Publish opentype-sanitizer ${{ matrix.version }}

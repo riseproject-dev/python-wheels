@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,52 +46,34 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build arize-phoenix-sqlean ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      ARIZE_PHOENIX_SQLEAN_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout Arize-ai/phoenix arize-phoenix-sqlean-v${{ env.ARIZE_PHOENIX_SQLEAN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: Arize-ai/phoenix
-          ref: arize-phoenix-sqlean-v${{ env.ARIZE_PHOENIX_SQLEAN_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: packages/phoenix-sqlean
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors upstream's own download-sources step: the SQLite
-          # amalgamation and sqlean extension sources aren't checked in,
-          # they're fetched at build time (Makefile).
-          CIBW_BEFORE_BUILD: >-
-            dnf install -y unzip patch perl-Digest-SHA &&
-            cd {package} && make prepare-src download-sqlite download-sqlean
-          CIBW_TEST_SOURCES: >-
-            packages/phoenix-sqlean/tests
-            packages/phoenix-sqlean/setup.py
-            packages/phoenix-sqlean/README.md
-          # tests/extensions.py imports setup.py (for SQLEAN_VERSION), which
-          # imports setuptools; the test venv doesn't have it otherwise.
-          CIBW_TEST_REQUIRES: setuptools
-          CIBW_TEST_COMMAND: cd packages/phoenix-sqlean && python -m tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: arize-phoenix-sqlean-${{ env.ARIZE_PHOENIX_SQLEAN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: arize-phoenix-sqlean
+      version: ${{ matrix.version }}
+      repository: Arize-ai/phoenix
+      ref: arize-phoenix-sqlean-v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-package-dir: packages/phoenix-sqlean
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Mirrors upstream's own download-sources step: the SQLite
+      # amalgamation and sqlean extension sources aren't checked in,
+      # they're fetched at build time (Makefile).
+      cibw-before-build: >-
+        dnf install -y unzip patch perl-Digest-SHA &&
+        cd {package} && make prepare-src download-sqlite download-sqlean
+      cibw-test-sources: >-
+        packages/phoenix-sqlean/tests
+        packages/phoenix-sqlean/setup.py
+        packages/phoenix-sqlean/README.md
+      # tests/extensions.py imports setup.py (for SQLEAN_VERSION), which
+      # imports setuptools; the test venv doesn't have it otherwise.
+      cibw-test-requires: setuptools
+      cibw-test-command: cd packages/phoenix-sqlean && python -m tests
+      timeout-minutes: 30
 
   publish:
     name: Publish arize-phoenix-sqlean ${{ matrix.version }}

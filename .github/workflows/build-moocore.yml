@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -53,45 +50,28 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build moocore ${{ matrix.version }} cp310-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
-    env:
-      MOOCORE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout moocore v${{ env.MOOCORE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: multi-objective/moocore
-          ref: v${{ env.MOOCORE_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python
-          output-dir: wheelhouse/
-        env:
-          # py_limited_api = "cp310" is a fixed constant (python/pyproject.toml),
-          # so the wheel must be built on cp310, the oldest interpreter the tag
-          # claims (gotcha 96); the rest just re-test that same wheel.
-          CIBW_BUILD: >-
-            cp310-manylinux_riscv64 cp311-manylinux_riscv64
-            cp312-manylinux_riscv64 cp313-manylinux_riscv64
-            cp314-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cffi, numpy and pandas have no riscv64 wheel on PyPI; PIP_ONLY_BINARY
-          # keeps pip on our registry's builds instead of a newer sourceless
-          # PyPI release, which would otherwise be built from sdist (gotcha 30).
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=cffi,numpy,pandas
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: moocore-${{ env.MOOCORE_VERSION }}-cp310-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: moocore
+      version: ${{ matrix.version }}
+      repository: multi-objective/moocore
+      ref: v${{ matrix.version }}
+      artifact-tag: cp310-abi3-manylinux_riscv64
+      cibw-package-dir: python
+      # py_limited_api = "cp310" is a fixed constant (python/pyproject.toml),
+      # so the wheel must be built on cp310, the oldest interpreter the tag
+      # claims (gotcha 96); the rest just re-test that same wheel.
+      cibw-build: >-
+        cp310-manylinux_riscv64 cp311-manylinux_riscv64
+        cp312-manylinux_riscv64 cp313-manylinux_riscv64
+        cp314-manylinux_riscv64
+      # cffi, numpy and pandas have no riscv64 wheel on PyPI; PIP_ONLY_BINARY
+      # keeps pip on our registry's builds instead of a newer sourceless
+      # PyPI release, which would otherwise be built from sdist (gotcha 30).
+      cibw-environment: >-
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        PIP_ONLY_BINARY=cffi,numpy,pandas
+      timeout-minutes: 60
 
   publish:
     name: Publish moocore ${{ matrix.version }}

@@ -35,9 +35,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -49,59 +46,41 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build aioesphomeapi ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      AIOESPHOMEAPI_VERSION: ${{ matrix.version }}
-
-    steps:
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: aioesphomeapi
+      version: ${{ matrix.version }}
       # Upstream pushed no v46.12.1 tag; its "Bump version to 46.12.1" commit is
       # what PyPI's 46.12.1 was released from.
-      - name: Checkout aioesphomeapi v${{ env.AIOESPHOMEAPI_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: esphome/aioesphomeapi
-          ref: ${{ env.AIOESPHOMEAPI_VERSION == '46.12.1' && '8d86534f49089f9bd80d50884be012c119700273' || format('v{0}', env.AIOESPHOMEAPI_VERSION) }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # Only manylinux: cryptography, a hard runtime dependency, has no musl
-          # riscv64 wheel, so a musllinux wheel could be neither installed nor tested.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream passes REQUIRE_CYTHON as a plain step env var, which never
-          # reaches the Linux build container. only-binary keeps pip off the
-          # sdists of the compiled dependencies, whose riscv64 wheels are ours.
-          CIBW_ENVIRONMENT: >-
-            REQUIRE_CYTHON=1
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=cffi,cryptography,protobuf,zeroconf
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_REQUIRES: 'pytest>=9.1.1,<10 pytest-asyncio==1.4.0'
-          # setup.py's build_ext swallows every compile error, so the extensions
-          # are only proven by the modules the installed wheel actually loads.
-          CIBW_TEST_COMMAND: >-
-            python -c "from aioesphomeapi import _sanitize, client_base, connection;
-            from aioesphomeapi._frame_helper import base, noise, noise_encryption, pack, packets, plain_text;
-            m = [_sanitize, client_base, connection, base, noise, noise_encryption, pack, packets, plain_text];
-            bad = [x.__name__ for x in m if not x.__file__.endswith('.so')];
-            assert not bad, bad" &&
-            python -m pytest --ignore=tests/benchmarks tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: aioesphomeapi-${{ env.AIOESPHOMEAPI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      repository: esphome/aioesphomeapi
+      ref: ${{ matrix.version == '46.12.1' && '8d86534f49089f9bd80d50884be012c119700273' || format('v{0}', matrix.version) }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Only manylinux: cryptography, a hard runtime dependency, has no musl
+      # riscv64 wheel, so a musllinux wheel could be neither installed nor tested.
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Upstream passes REQUIRE_CYTHON as a plain step env var, which never
+      # reaches the Linux build container. only-binary keeps pip off the
+      # sdists of the compiled dependencies, whose riscv64 wheels are ours.
+      cibw-environment: >-
+        REQUIRE_CYTHON=1
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        PIP_ONLY_BINARY=cffi,cryptography,protobuf,zeroconf
+      cibw-test-sources: tests pyproject.toml
+      cibw-test-requires: 'pytest>=9.1.1,<10 pytest-asyncio==1.4.0'
+      # setup.py's build_ext swallows every compile error, so the extensions
+      # are only proven by the modules the installed wheel actually loads.
+      cibw-test-command: >-
+        python -c "from aioesphomeapi import _sanitize, client_base, connection;
+        from aioesphomeapi._frame_helper import base, noise, noise_encryption, pack, packets, plain_text;
+        m = [_sanitize, client_base, connection, base, noise, noise_encryption, pack, packets, plain_text];
+        bad = [x.__name__ for x in m if not x.__file__.endswith('.so')];
+        assert not bad, bad" &&
+        python -m pytest --ignore=tests/benchmarks tests
+      timeout-minutes: 120
 
   publish:
     name: Publish aioesphomeapi ${{ matrix.version }}

@@ -34,9 +34,6 @@ concurrency:
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
@@ -48,52 +45,34 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pmdarima ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    env:
-      PMDARIMA_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout pmdarima v${{ env.PMDARIMA_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: alkaline-ml/pmdarima
-          ref: v${{ env.PMDARIMA_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # build_tools/get_tag.py only reads the version off GITHUB_REF when it looks
-          # like a tag ref; the container starts with no env, so it's set explicitly.
-          CIBW_ENVIRONMENT: >-
-            GITHUB_REF=refs/tags/v${{ env.PMDARIMA_VERSION }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas,scikit-learn,statsmodels
-          CIBW_BEFORE_TEST: pip install .[test]
-          # test_max_dur/test_subsequent_contexts time a 0.5s early-termination window
-          # and flake under CI load; pipeline6's True-True-X0 case hits a genuine 2.1.1
-          # bug against numpy>=2.5 (conf_ints comes back read-only, so pipeline.py's
-          # in-place inverse-transform assignment raises) - reproduces on every arch.
-          CIBW_TEST_COMMAND: >-
-            pytest --showlocals --durations=20 --pyargs pmdarima
-            -k "not test_max_dur and not test_subsequent_contexts and
-            not (test_pipeline_predict_inverse_transform and True-True-X0-pipeline6)"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pmdarima-${{ env.PMDARIMA_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: pmdarima
+      version: ${{ matrix.version }}
+      repository: alkaline-ml/pmdarima
+      ref: v${{ matrix.version }}
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # build_tools/get_tag.py only reads the version off GITHUB_REF when it looks
+      # like a tag ref; the container starts with no env, so it's set explicitly.
+      cibw-environment: >-
+        GITHUB_REF=refs/tags/v${{ matrix.version }}
+        PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        PIP_ONLY_BINARY=numpy,scipy,pandas,scikit-learn,statsmodels
+      cibw-before-test: pip install .[test]
+      # test_max_dur/test_subsequent_contexts time a 0.5s early-termination window
+      # and flake under CI load; pipeline6's True-True-X0 case hits a genuine 2.1.1
+      # bug against numpy>=2.5 (conf_ints comes back read-only, so pipeline.py's
+      # in-place inverse-transform assignment raises) - reproduces on every arch.
+      cibw-test-command: >-
+        pytest --showlocals --durations=20 --pyargs pmdarima
+        -k "not test_max_dur and not test_subsequent_contexts and
+        not (test_pipeline_predict_inverse_transform and True-True-X0-pipeline6)"
+      timeout-minutes: 720
 
   publish:
     name: Publish pmdarima ${{ matrix.version }}
