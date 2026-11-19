@@ -172,8 +172,9 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    writes or direct CI dispatches in `riseproject-upstreaming/*` are forbidden.
    The controller records a `fork_provision` intent and dispatches the trusted
    workflow. It creates or verifies the fork, initializes read-only CI, disables
-   inherited privileged/publication workflows, and creates the exact `riscv64`
-   base only if absent. Existing work is never reset. Creation uses a token that
+   parses the default-branch workflow files as a bounded data inventory,
+   explicitly enables safe CI, disables privileged/publication workflows, and
+   creates the exact `riscv64` base only if absent. Existing work is never reset. Creation uses a token that
    cannot write existing repositories; branch/settings operations use a separate
    single-fork token. Permission failures hold for review, without local fallback.
    After receipt verification and fresh fork/ref readback, the controller moves

@@ -126,18 +126,28 @@ def create_or_reuse(reader, creator, plan: dict) -> dict:
     return dict(plan, fork_id=result["id"], created=True)
 
 
-def disable_unsafe_workflows(api, fork: str) -> list[str]:
-    """Disable inherited privileged/publication workflows before opening a PR.
-    Parse data only; never run workflow contents in the credentialed job."""
-    workflows = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
-    if workflows.get("total_count", 0) > 100:
-        raise ProvisionError("workflow inventory exceeds bounded setup scan")
-    disabled = []
-    for wf in workflows.get("workflows", []):
-        path = wf["path"]
-        if not path.startswith(".github/workflows/") or ".." in path.split("/"):
+def configure_inherited_workflows(api, fork: str, default_branch: str) -> dict[str, list[str]]:
+    """Enable safe CI and disable privileged/publication workflows.
+    Contents are the authoritative inventory because a fresh public fork can
+    report zero Actions workflows until one is explicitly enabled."""
+    entries = api.get(f"/repos/{fork}/contents/.github/workflows?ref={urllib.parse.quote(default_branch)}")
+    if not isinstance(entries, list) or len(entries) > 100:
+        raise ProvisionError("workflow contents inventory is missing or exceeds bounded setup scan")
+    inventory = api.get(f"/repos/{fork}/actions/workflows?per_page=100")
+    if inventory.get("total_count", 0) > 100:
+        raise ProvisionError("Actions workflow inventory exceeds bounded setup scan")
+    states = {wf.get("path"): wf.get("state") for wf in inventory.get("workflows", [])}
+    names = [entry.get("name") for entry in entries if entry.get("type") == "file"]
+    if len(names) != len(set(names)):
+        raise ProvisionError("workflow filenames must be unique")
+    changed = {"enabled": [], "disabled": []}
+    for entry in entries:
+        path = entry.get("path")
+        if entry.get("type") != "file" or not isinstance(path, str) \
+                or not path.startswith(".github/workflows/") or ".." in path.split("/") \
+                or not path.endswith((".yml", ".yaml")):
             raise ProvisionError("unexpected inherited workflow path")
-        data = api.get(f"/repos/{fork}/contents/{urllib.parse.quote(path, safe='/')}")
+        data = api.get(f"/repos/{fork}/contents/{urllib.parse.quote(path, safe='/')}?ref={urllib.parse.quote(default_branch)}")
         if data.get("type") != "file" or data.get("encoding") != "base64":
             raise ProvisionError("workflow must be a regular data file")
         raw = base64.b64decode(data["content"])
@@ -154,10 +164,12 @@ def disable_unsafe_workflows(api, fork: str) -> list[str]:
                 unsafe = True
             elif any(permissions.get(k) == "write" for k in ("contents", "issues", "pull-requests", "administration", "workflows")):
                 unsafe = True
-        if unsafe:
-            api.write("PUT", f"/repos/{fork}/actions/workflows/{wf['id']}/disable", {})
-            disabled.append(path)
-    return disabled
+        desired, action = ("disabled_manually", "disable") if unsafe else ("active", "enable")
+        if states.get(path) != desired:
+            identifier = urllib.parse.quote(entry["name"], safe="")
+            api.write("PUT", f"/repos/{fork}/actions/workflows/{identifier}/{action}", {})
+            changed["disabled" if unsafe else "enabled"].append(path)
+    return changed
 
 
 def initialize(api, plan: dict) -> dict:
@@ -185,13 +197,14 @@ def initialize(api, plan: dict) -> dict:
             or permissions.get("can_approve_pull_request_reviews") \
             or actions.get("enabled") is not True or actions.get("allowed_actions") != "all":
         raise ProvisionError("fork Actions settings readback failed")
-    disabled = disable_unsafe_workflows(api, plan["fork"])
+    configured = configure_inherited_workflows(api, plan["fork"], fork["default_branch"])
     if head is None:
         api.write("POST", f"/repos/{plan['fork']}/git/refs", {"ref": "refs/heads/riscv64", "sha": plan["base_sha"]})
     observed = collect.branch_head(api, plan["fork"], "riscv64")
     if not observed or observed["head"] != (head["head"] if head else plan["base_sha"]):
         raise ProvisionError("fork provisioning branch readback failed")
-    return dict(plan, status="provisioned", head_sha=observed["head"], actions_read_only=True, disabled_workflows=disabled)
+    return dict(plan, status="provisioned", head_sha=observed["head"], actions_read_only=True,
+                enabled_workflows=configured["enabled"], disabled_workflows=configured["disabled"])
 
 
 def current_request(api, operation_id: str) -> tuple[dict, dict, dict]:

@@ -77,6 +77,8 @@ class TestWorkflowContracts(unittest.TestCase):
         token = next(step for step in workflow["jobs"]["create"]["steps"] if step.get("id") == "fork-token")
         self.assertEqual(token["with"]["permission-pull-requests"], "write")
         self.assertEqual(token["with"]["permission-contents"], "read")
+        self.assertEqual(token["with"]["permission-actions"], "write")
+        self.assertEqual(token["with"]["permission-administration"], "write")
         self.assertEqual(token["with"]["repositories"], "${{ steps.target.outputs.fork_name }}")
 
     def test_provisioning_administration_is_restricted_to_one_verified_fork(self):
