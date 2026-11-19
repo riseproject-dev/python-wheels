@@ -20,9 +20,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import capacity, collect, intake, lifecycle, recovery
+from . import capacity, collect, intake, lifecycle, recovery, schemas
 from .commands import Command, URGENT
-from .common import contribution_file_id
+from .common import INTAKE_LABEL, contribution_file_id
 
 
 @dataclass
@@ -141,6 +141,33 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
                     active_contribution_id=cid, updated_at=now)
         projects[project_id] = proj
         res.stage("projects", proj)
+
+    # Removing the intake label cancels only an accepted request that has not
+    # requested any Work yet. Once active_work exists, explicit lifecycle
+    # commands are required so an unlabeled event cannot silently stop work.
+    for cid, c in list(by_id.items()):
+        issue = inputs.tracking_issues.get(c["tracking_issue"]["number"])
+        labels = {label.get("name") if isinstance(label, dict) else label
+                  for label in (issue or {}).get("labels", [])}
+        unprocessed = c["phase"] == "queued" and c["activity"] == "idle" \
+            and not c.get("active_work") and not c.get("dossier_evidence_id") and not c.get("fork")
+        if issue is None or INTAKE_LABEL in labels or not unprocessed:
+            continue
+        changed = dict(c, phase="abandoned", activity="idle",
+                       terminal_reason=f"{INTAKE_LABEL} label removed before Work admission", updated_at=now)
+        schemas.validate("contribution", changed)
+        by_id[cid] = changed
+        active.pop(c["upstream"]["full_name"], None)
+        res.stage("contributions", changed)
+        res.stage("events", lifecycle._event(c, changed, "intake:label_removed", "observation",
+                                              f"issue-{c['tracking_issue']['id']}", now, False))
+        project = projects.get(c["project_id"])
+        if project and project.get("active_contribution_id") == cid:
+            project = dict(project, active_contribution_id=None, updated_at=now)
+            projects[c["project_id"]] = project
+            res.stage("projects", project)
+        rep["intake"].append({"issue": c["tracking_issue"]["number"], "decision": "cancelled",
+                              "detail": f"{INTAKE_LABEL} label removed before Work admission"})
 
     # Bind initially unspecified source identities/bases from trusted API data,
     # never from the model's dossier. Already-bound bases remain immutable.

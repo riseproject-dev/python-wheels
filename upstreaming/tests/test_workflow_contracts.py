@@ -120,6 +120,10 @@ class TestWorkflowContracts(unittest.TestCase):
             "Upstreaming publish retry"})
         self.assertEqual(triggers["workflow_run"]["types"], ["completed"])
         self.assertIn("labeled", triggers["issues"]["types"])
+        self.assertIn("unlabeled", triggers["issues"]["types"])
+        filter_if = controller["jobs"]["filter"]["if"]
+        self.assertIn("github.event.action == 'unlabeled'", filter_if)
+        self.assertIn("github.event.label.name == 'upstreaming-request'", filter_if)
         self.assertIn("created", triggers["issue_comment"]["types"])
         self.assertIn("github.event_name == 'workflow_run'", controller["jobs"]["filter"]["if"])
 
