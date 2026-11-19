@@ -10,18 +10,24 @@
 #            resulting state to main (one validated state-only commit) and
 #            launches the dispatcher if work was selected.
 #
-# The schedule and issue triggers stay commented out until the rollout
-# stage is approved; run it by hand with workflow_dispatch. See
-# upstreaming/INTEGRATION.md for the integration checks that gate writes.
+# Event chaining and the schedule keep the pipeline moving without human ticks.
+# State-only commits do not match any trigger, so reconciliation cannot recurse.
 name: Upstreaming controller
 
 on:
-  # schedule:
-  #   - cron: '*/15 * * * *'
-  # issues:
-  #   types: [opened, labeled, reopened]
-  # issue_comment:
-  #   types: [created, edited]
+  schedule:
+    - cron: '*/15 * * * *'
+  issues:
+    types: [opened, labeled, reopened]
+  issue_comment:
+    types: [created, edited]
+  workflow_run:
+    workflows:
+      - Upstreaming investigator
+      - Upstreaming worker
+      - Upstreaming fork provisioning
+      - Upstreaming publish retry
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
@@ -39,6 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_run' ||
       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'upstreaming-request')) ||
       (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/upstreaming '))
     steps:
