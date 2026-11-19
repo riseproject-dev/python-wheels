@@ -30,6 +30,7 @@ class Inputs:
     now: datetime
     issues: list[dict] = field(default_factory=list)          # intake issues, freshly fetched
     tracking_issues: dict[int, dict] = field(default_factory=dict)  # every live issue's fresh description
+    upstream_snapshots: dict[str, dict] = field(default_factory=dict)  # verified source ID / initial base
     comments: list[dict] = field(default_factory=list)        # {"issue_number", "comment", "event_body"}
     pressure: capacity.Pressure | None = None
     verified_prs: dict[str, dict] = field(default_factory=dict)  # url -> verified PR resource
@@ -141,6 +142,33 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         projects[project_id] = proj
         res.stage("projects", proj)
 
+    # Bind initially unspecified source identities/bases from trusted API data,
+    # never from the model's dossier. Already-bound bases remain immutable.
+    source_blocked = set()
+    for cid, c in list(by_id.items()):
+        snapshot = inputs.upstream_snapshots.get(c["upstream"]["full_name"])
+        if snapshot is None:
+            continue
+        if snapshot.get("error"):
+            source_blocked.add(cid)
+            rep["deferred"].append({"contribution": cid, "why": "source verification unavailable"})
+            continue
+        current = c["upstream"].get("repository_id")
+        if current is not None and current != snapshot["repository_id"]:
+            source_blocked.add(cid)
+            changed = dict(c, blocked_reason="upstream repository identity changed", activity="waiting_human", updated_at=now)
+            by_id[cid] = changed
+            res.stage("contributions", changed)
+            continue
+        updated = dict(c["upstream"])
+        for key in ("repository_id", "base_ref", "base_sha"):
+            if updated.get(key) is None:
+                updated[key] = snapshot[key]
+        if updated != c["upstream"]:
+            changed = dict(c, upstream=updated, updated_at=now)
+            by_id[cid] = changed
+            res.stage("contributions", changed)
+
     # 2. Authorized commands, urgent stops first, all before any work is selected.
     decisions = []
     for item in inputs.comments:
@@ -172,9 +200,49 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
             for a in recovery.alerts(op, inputs.now):
                 rep["alerts"].append({"operation": op["operation_id"], "alert": a})
 
+    # Provisioning is a trusted administrative workflow, not a model task.
+    # Persist its normal operation intent before dispatch, with no second queue.
+    res.report["provision_requests"] = []
+    for cid, c in list(by_id.items()):
+        if len(res.report["provision_requests"]) >= 1:
+            break
+        if c["phase"] != "provisioning" or c.get("paused") or c.get("blocked_reason") \
+                or c.get("active_operation_id") or cid in source_blocked:
+            continue
+        if (c.get("pending_human_action") or {}).get("kind") not in (None, "provision_fork"):
+            continue
+        if not c.get("dossier_evidence_id") or not c.get("admission_class") \
+                or not c["owners"].get("primary") or not c["owners"].get("backup") \
+                or not c["upstream"].get("repository_id") or not c["upstream"].get("base_sha"):
+            rep["deferred"].append({"contribution": cid, "why": "provisioning prerequisites missing"})
+            continue
+        ok, why = capacity.admit_expensive(inputs.pressure or capacity.Pressure(ok=False, reason="no usage data"),
+                                           reserved=capacity.reserved_jobs(operations.values()), estimated_jobs=1, policy=policy)
+        if not ok:
+            rep["deferred"].append({"contribution": cid, "why": why})
+            continue
+        fork = c.get("fork") or {}
+        op = recovery.plan(contribution_id=cid, revision=c["revision"], kind="fork_provision",
+                           policy_version=policy["policy_version"], reason_ids=[c["dossier_evidence_id"]],
+                           target={"repository": "riseproject-upstreaming/" + c["upstream"]["full_name"].split('/', 1)[1],
+                                   "repository_id": fork.get("repository_id"), "ref": "riscv64",
+                                   "expected_head": fork.get("head_sha"), "base_sha": c["upstream"]["base_sha"]},
+                           proposed={"commit": c["upstream"]["base_sha"], "marker": f"provision:{cid}:{c['revision']}"},
+                           capacity={"selector": "ubuntu-24.04-riscv", "estimated_jobs": 1,
+                                     "estimated_minutes": 10, "observed_run_ids": []}, now=now)
+        if op["operation_id"] in operations:
+            rep["deferred"].append({"contribution": cid, "why": "existing provisioning operation requires reconciliation"})
+            continue
+        res.stage("operations", op)
+        res.stage("contributions", dict(c, active_operation_id=op["operation_id"], activity="waiting_capacity", updated_at=now))
+        by_id[cid] = dict(c, active_operation_id=op["operation_id"], activity="waiting_capacity", updated_at=now)
+        res.report["provision_requests"].append({"operation_id": op["operation_id"], "contribution_id": cid})
+
     # 8-10. Select bounded work, honouring capacity and one worker.
     candidates = []
     for c in by_id.values():
+        if c["contribution_id"] in source_blocked:
+            continue
         kind = _actionable(c)
         if kind is None:
             continue

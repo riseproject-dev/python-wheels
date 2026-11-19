@@ -61,7 +61,30 @@ is a verified prerequisite, not proof that workflow-mediated fork creation works
 repository-scoped token. Actual single-fork write-token isolation and publisher
 CI-trigger association still need integration evidence.
 
-## Current branch changes, not yet deployed
+## Latest deployment and current local changes
+
+PR #4941 passed all control checks and merged as `5b7277becea`. Its investigator,
+dependency and finalization fixes are deployed as source, but native contract
+adoption and a successful remote Result remain unverified. GitHub server-signed
+control commits verified the requested author identity; local SSH signing no
+longer prevents control-code publication.
+
+Current local work has **148 passing pipeline tests** and passing hand-authored
+workflow lint. It adds a trusted workflow-only fork provisioning job, recorded
+`fork_provision` intents, scoped creation/per-fork tokens, source-ID/base binding,
+receipt readback, and initial-patch admission without waiting for base CI. The
+manual fork helper is removed and bare existing-fork verification cannot bypass
+workflow provisioning. These provisioning changes are not yet deployed or tested
+against real fork permissions.
+
+The additive, versioned investigator-profile migration in the same native pool
+was approved by the operator and is implemented locally as
+`upstreaming-investigator-v2`. The native on-demand `PoolInstall` copies installed
+profiles and pool limits before adding the default-revision worker. Existing
+profiles, Work and pending delivery history are preserved; no new queue or ref
+is introduced. Live registration remains unverified.
+
+Previously merged implementation:
 
 - The native artifact patch now separates artifact descriptors from private
   repository/run authorization receipts, covering the observed finalizer error.
@@ -148,17 +171,21 @@ Result, token, expected-head or operation-receipt checks.
 2. **Deploy the investigator changes safely.** Adding Issues/extensions/MCP tools
    changes its native worker contract. The installed queue cannot update that
    authority while existing completed Work has pending delivery barriers.
-   Resolve those barriers first, then perform a supported, quiescent policy
-   migration. Do not silently switch profiles/pools or discard history.
+   The operator approved an additive versioned profile in the same pool instead
+   of replacing installed authority. Deploy it through supported on-demand
+   `PoolInstall`, verify old profiles/economics remain intact, and retain pending
+   history. Do not reset the queue or claim those old deliveries succeeded.
 3. **Run the complete investigator through the controller/dispatcher.** Verify
    issue/comments, graph MCP, ecosystem report and historical research; require
    the gate, native verified Result and recorded dossier evidence.
 4. **Approve bounded scope and owners.** The primary/backup owner, target matrix,
    allowed paths, release contract and existing-upstream-work decision must come
    from reviewed evidence. Do not infer that wheel CI alone closes a release gap.
-5. **Implement workflow-only fork provisioning.** The current command verifies an
-   existing fork; creation is not wired. Existing pilot setup is not proof of
-   automated creation. The writer App's source-installation prerequisites may
+5. **Validate workflow-only fork provisioning.** The implementation is now local:
+   the controller persists a `fork_provision` operation, dispatches the trusted
+   provisioning workflow, then consumes its receipt only after fork/ref readback.
+   Real creation/token/settings permissions are not tested yet. Existing pilot
+   setup is not proof of automated creation. The writer App's source-installation prerequisites may
    require a separately approved provisioning identity. No manual fallback.
 6. **Develop, publish and open the fork PR through workflows.** Resolve the exact
    Claim Result, mint a single-fork token, independently rebuild/validate the
