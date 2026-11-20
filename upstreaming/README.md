@@ -222,6 +222,12 @@ compiler and action updates: [`dependencies/README.md`](dependencies/README.md).
 
 ## Commands on a tracking issue
 
+The `riseproject-dev` App appends a concise 1-2 line ledger comment after every
+durable lifecycle event. Each entry shows revision, phase/activity, action,
+outcome and controller workflow link, followed by a folded **Possible next
+commands** section with the current revision/head prefilled. Entries are never
+edited, so user commands and pipeline history remain interleaved chronologically.
+
 Post a command as its own comment on the request issue. The issue says which
 contribution it applies to, so `contribution=` is optional (if given, it must
 match). Stop commands need no revision:
