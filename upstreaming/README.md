@@ -162,8 +162,10 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    `notify` job posts a bounded readable summary to the tracking issue. The
    controller records the dossier as evidence. A machine-readable, trusted-gated
    dossier decision either moves directly to `provisioning` with a bounded
-   admission class and path set, or moves to `parked` when no concrete patch is
-   actionable. Neither route waits for scope approval. An authorized human may
+   admission class and multi-path set, or moves to `parked` when no concrete
+   patch is actionable. The dossier must separately assess build, test, release,
+   packaging, documentation and native-source paths, and its allowed path set
+   must cover every path found. Neither route waits for scope approval. An authorized human may
    override a parked decision with:
 
    ```text
@@ -210,7 +212,11 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    and PR conversation comments from authorized reviewers. Feedback bound to the
    current head is persisted as `human_relay` evidence, processed once, and
    automatically starts a revisioned repair with the exact reviewer, URL, path,
-   line and text in task context. Passing means every required riscv64 job and
+   line and text in task context. Ordinary natural-language review feedback may
+   require another file without any command syntax. A human-relay-backed repair
+   may identify that exact path; trusted publication validates the actual diff
+   and persists the verified path into contribution scope. Passing means every
+   required riscv64 job and
    wheel artifact satisfy the project-specific frozen topology contract.
 5. **Upstream handoff.** When the exact development head passes its frozen CI
    contract and has no debug commits, observation automatically records it as the

@@ -54,7 +54,15 @@ def dossier():
                                   "prior_work_and_blockers": "Followed and reviewed the report's linked prior contributions and architecture blockers."},
                               "corroboration_and_conflicts": [ISSUE_URL]},
          "proposal": {"decision": "develop", "rationale": "Add bounded wheel CI configuration following the verified architecture precedent.",
-                      "admission_class": "configuration_integration", "allowed_paths": [".github/workflows/*"]}}
+                      "admission_class": "configuration_integration", "allowed_paths": [".github/workflows/*", "README.rst"],
+                      "path_coverage": [
+                          {"area": "build", "paths": [".github/workflows/wheels.yml"], "assessment": "The wheel workflow owns architecture build rows."},
+                          {"area": "test", "paths": [".github/workflows/test.yml"], "assessment": "The test matrix mirrors supported build architectures."},
+                          {"area": "release", "paths": [".github/workflows/release.yml"], "assessment": "The release workflow consumes validated wheel artifacts."},
+                          {"area": "packaging", "paths": [], "assessment": "Packaging metadata requires no architecture-specific change."},
+                          {"area": "documentation", "paths": ["README.rst"], "assessment": "The support table documents shipped architectures."},
+                          {"area": "native_sources", "paths": [], "assessment": "No architecture-specific native source dispatch exists."}
+                      ]}}
     d["research"]["ecosystem_report"]["sources"][0]["url"] = REPORT_URL
     return d
 
@@ -87,6 +95,16 @@ class TestDossierCompleteness(unittest.TestCase):
         dossier_gate.validate(d, proposal(), task())
         d["proposal"]["allowed_paths"] = ["pyproject.toml"]
         with self.assertRaises(schemas.SchemaError):
+            dossier_gate.validate(d, proposal(), task())
+
+    def test_allowed_paths_cover_every_researched_riscv64_path(self):
+        d = dossier()
+        d["proposal"]["allowed_paths"] = [".github/workflows/wheels.yml", "README.rst"]
+        with self.assertRaisesRegex(dossier_gate.DossierError, "omit researched"):
+            dossier_gate.validate(d, proposal(), task())
+        d = dossier()
+        d["proposal"]["path_coverage"][1]["area"] = "build"
+        with self.assertRaisesRegex(dossier_gate.DossierError, "each required area"):
             dossier_gate.validate(d, proposal(), task())
 
     def test_every_category_is_required(self):
@@ -168,6 +186,22 @@ class TestDossierCompleteness(unittest.TestCase):
 
 
 class TestImmutableTrackingIssue(unittest.TestCase):
+    def test_authorized_human_relay_enables_natural_review_scope_extension(self):
+        rec = contribution(activity="agent_running")
+        rec["active_work"] = {"task": "development_repair", "reason_ids": ["review-1"],
+                              "requested_at": NOW, "revision": rec["revision"],
+                              "dedupe_key": "repair", "deadline_at": NOW}
+        request = work.request_from_active(rec)
+        node = work.node(request, rec, control_repo_id="7", allowed_paths=["build.yml", "test.yml"],
+                         context={"reason_evidence": [{"evidence_id": "review-1",
+                                                       "kind": "human_relay",
+                                                       "summary": "Add the test workflow."}]})
+        self.assertTrue(node["payload"]["review_scope_extension"])
+        self.assertEqual(node["payload"]["allowed_paths"], ["build.yml", "test.yml"])
+        ordinary = work.node(request, rec, control_repo_id="7", allowed_paths=["build.yml"],
+                             context={"reason_evidence": [{"evidence_id": "ci-1", "kind": "ci"}]})
+        self.assertFalse(ordinary["payload"]["review_scope_extension"])
+
     def test_full_description_url_and_links_frozen_into_work(self):
         body = "### Additional context\n\nhttps://github.com/example/proj/pull/31488\n" + "user context\n" * 500
         rec = contribution(phase="investigation", activity="idle")

@@ -8,6 +8,7 @@ This gate checks documented research coverage, not the truth of every assertion.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -57,11 +58,26 @@ def validate(dossier: dict, proposal: dict, task: dict) -> None:
     if issue["url"] not in {s["url"] for s in dossier["research"]["tracking_issue"]["sources"]}:
         raise DossierError("tracking-issue research must cite the original issue URL")
     decision = dossier["proposal"]
+    coverage = decision["path_coverage"]
+    areas = [entry["area"] for entry in coverage]
+    required_areas = {"build", "test", "release", "packaging", "documentation", "native_sources"}
+    if set(areas) != required_areas or len(areas) != len(set(areas)):
+        raise DossierError("path_coverage must assess each required area exactly once")
+    covered_paths = [path for entry in coverage for path in entry["paths"]]
+    if covered_paths:
+        try:
+            validate_scope_paths(covered_paths)
+        except ValueError as exc:
+            raise DossierError(f"path_coverage: {exc}") from None
     if decision["decision"] == "develop":
         try:
             validate_scope_paths(decision["allowed_paths"])
         except ValueError as exc:
             raise DossierError(str(exc)) from None
+        missing = [path for path in covered_paths if not any(
+            fnmatch.fnmatchcase(path, allowed) for allowed in decision["allowed_paths"])]
+        if missing:
+            raise DossierError(f"allowed_paths omit researched riscv64 paths: {sorted(set(missing))}")
 
 
 def _read(root: Path, relative: Path, limit: int = 256 * 1024) -> str:

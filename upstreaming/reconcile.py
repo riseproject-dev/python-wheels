@@ -218,6 +218,10 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
         staged.append(("operations", op))
         new["publication_operation_id"] = op["operation_id"]
     status = outcome.get("status")
+    if status in ("published", "uncertain") and op:
+        changed_files = (op.get("proposed") or {}).get("changed_files") or []
+        if changed_files:
+            new["scope_paths"] = list(dict.fromkeys((new.get("scope_paths") or []) + changed_files))
     if status == "published":
         # The branch head itself is recorded by the next observation (head
         # change bumps revision); here we only leave agent_running.

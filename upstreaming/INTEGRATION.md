@@ -189,6 +189,16 @@ the intentionally credentialless destination organization. A build or test
 failure discovered after handoff automatically returns the contribution to
 revisioned development repair.
 
+The investigation dossier assesses path coverage separately for build, test,
+release, packaging, documentation and native sources. Its multi-path
+`allowed_paths` must cover every path found by that assessment and is preserved
+through contribution state, Work and publication. If an authorized reviewer
+later asks in ordinary natural language for a change that requires another
+file, the human-relay-backed repair may identify and change that additional
+exact path without command syntax. The trusted publisher admits only exact
+paths actually changed by that repair, applies all existing content and workflow
+safety checks, and persists the verified paths into contribution scope.
+
 Previously merged implementation:
 
 - The native artifact patch now separates artifact descriptors from private

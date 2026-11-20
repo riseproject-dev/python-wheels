@@ -446,7 +446,16 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
     for `park`;
   - `allowed_paths`: 1..32 exact relative paths or directory globs with a
     single final wildcard component for `develop`, and an empty list for
-    `park`. Never use `*`, `**`, absolute paths, `.git`, or `..`.
+    `park`. Never use `*`, `**`, absolute paths, `.git`, or `..`;
+  - `path_coverage`: exactly one assessment for each of `build`, `test`,
+    `release`, `packaging`, `documentation`, and `native_sources`. Each entry
+    lists every repository path that may need a riscv64 change in that area,
+    or an empty path list with a source-grounded explanation. For `develop`,
+    every listed path must be matched by `allowed_paths`. Inspect sibling
+    workflows, called reusable workflows, action files, build configuration,
+    package metadata, native source dispatch, support documentation, artifact
+    validation, and release/publish consumers. Do not scope only the first file
+    that appears sufficient.
 
   A `develop` decision automatically provisions the fork and starts development;
   it does not wait for scope approval. A `park` decision stops work but can be
@@ -468,7 +477,10 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
     that stop CI from running on a fork;
   - contribution rules: CONTRIBUTING, commit conventions, CLA/DCO;
   - any existing riscv64 work upstream (issues, PRs, CI);
-  - proposed admission class, allowed paths, target matrix, and risks.
+  - proposed admission class, complete multi-path coverage, allowed paths,
+    target matrix, and risks. Trace the full build-to-test-to-release graph and
+    include all files that may require modification, even when the initial
+    patch is expected to touch only a subset.
 - `proposal.json`: a JSON object matching
   `upstreaming/schemas/proposal.schema.json` in the control repository,
   with `outcome: "investigation"`, `operation: "none"`, and

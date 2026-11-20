@@ -30,6 +30,7 @@ HTTP header for the push. It is never written to disk.
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -41,7 +42,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import lifecycle, publisher, recovery, schemas
-from .common import DEV_REF, FORK_ORG
+from .common import DEV_REF, FORK_ORG, validate_scope_paths
 
 MAX_MBOX_BYTES = 4 * 1024 * 1024
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -229,13 +230,30 @@ def publish(*, record: dict, task: dict, proposal: dict, mbox: bytes, token: str
             if tree != proposal["proposed_tree"]:
                 return Outcome("rejected", "rebuilt tree differs from the proposal's proposed_tree", candidate=cand,
                                failure_class="validation")
-        sc = publisher.Scope(allowed_globs=scope.allowed_globs, workflow_globs=scope.workflow_globs,
+        claimed = set(proposal.get("changed_files") or [])
+        effective_globs = list(scope.allowed_globs)
+        outside_scope = sorted(path for path in claimed if not any(
+            fnmatch.fnmatchcase(path, allowed) for allowed in scope.allowed_globs))
+        if outside_scope:
+            if not task.get("review_scope_extension"):
+                return Outcome("rejected", f"proposal changes files outside admitted scope: {outside_scope}",
+                               candidate=cand, failure_class="validation")
+            if any(any(ch in path for ch in "*?[]") for path in outside_scope):
+                return Outcome("rejected", "review scope extensions must be exact paths",
+                               candidate=cand, failure_class="validation")
+            try:
+                validate_scope_paths(outside_scope)
+                validate_scope_paths(list(dict.fromkeys(effective_globs + outside_scope)))
+            except ValueError as exc:
+                return Outcome("rejected", f"invalid review scope extension: {exc}",
+                               candidate=cand, failure_class="validation")
+            effective_globs.extend(outside_scope)
+        sc = publisher.Scope(allowed_globs=effective_globs, workflow_globs=scope.workflow_globs,
                              upstream_facing=record.get("upstream_pr") is not None,
                              history="append" if proposal["operation"] == "append" else "rewrite")
         rep = publisher.validate_update(work, base=record["upstream"]["base_sha"], expected_head=expected,
                                         candidate=cand, scope=sc)
         delta = _git(work, "diff", "--name-only", "--no-renames", expected, cand).stdout.decode().split()
-        claimed = set(proposal.get("changed_files") or [])
         if claimed and set(delta) != claimed:
             rep.problems.append(f"proposal claims files {sorted(claimed)} but series changes {sorted(delta)}")
         digest = hashlib.sha256(mbox).hexdigest()
@@ -256,7 +274,8 @@ def publish(*, record: dict, task: dict, proposal: dict, mbox: bytes, token: str
                                    "base_sha": record["upstream"]["base_sha"]},
                            proposed={"commit": cand, "tree": rep.final_tree, "parents": parents,
                                      "marker": f"artifact:{artifact['artifact_id']}" if artifact else None,
-                                     "content_digest": hashlib.sha256(mbox).hexdigest()}, now=now)
+                                     "content_digest": hashlib.sha256(mbox).hexdigest(),
+                                     "changed_files": delta}, now=now)
         save_operation(op)                     # intent persisted before the effect
         if policy.get("read_only", True):
             return Outcome("rejected", "policy is read-only; validated but not pushed", candidate=cand,

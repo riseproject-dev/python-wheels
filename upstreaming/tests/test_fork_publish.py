@@ -45,6 +45,7 @@ class _ForkFixture:
                      "allowed_operations": ["append", "rewrite"],
                      "allowed_paths": [".github/workflows/*"], "reason_ids": ["ci-1"]}
         self.ops = []
+        self.invocations = 0
 
     def tearDown(self):
         fork_publish.URL_TEMPLATE, extra = self._saved
@@ -71,12 +72,13 @@ class _ForkFixture:
         return git(self.fork_bare, "rev-parse", "refs/heads/riscv64")
 
     def run_publish(self, proposal=None, mbox=None, pol=None, observe=None, scope=None):
+        self.invocations += 1
         return fork_publish.publish(
             record=self.record, task=self.task, proposal=proposal or self.proposal(), mbox=self.mbox if mbox is None else mbox,
             token=None, observe_head=observe or self.fork_head,
             scope=scope or publisher.Scope(allowed_globs=[".github/workflows/*"]),
             policy=pol or policy(read_only=False), now=NOW, save_operation=self.ops.append,
-            workdir=self.root / f"pub-{len(self.ops)}-{id(proposal)}")
+            workdir=self.root / f"pub-{self.invocations}")
 
 class TestForkPublish(_ForkFixture, unittest.TestCase):
     def test_publishes_with_lease_and_confirms(self):
@@ -89,6 +91,26 @@ class TestForkPublish(_ForkFixture, unittest.TestCase):
         expected = f"{fork_publish.APP_COMMIT_NAME};{fork_publish.APP_COMMIT_EMAIL}"
         self.assertEqual(identity, f"{expected};{expected}")
 
+    def test_authorized_review_repair_may_add_exact_changed_path_to_scope(self):
+        commit_files(self.agent, {"src/a.c": "int riscv64;\n"}, msg="BLD: follow review feedback")
+        self.mbox = git(self.agent, "format-patch", "--stdout", self.base).encode() + b"\n"
+        self.task["task"] = "development_repair"
+        self.task["review_scope_extension"] = True
+        proposal = self.proposal(reason_ids=["ci-1"],
+                                 changed_files=[".github/workflows/wheels.yml", "src/a.c"])
+        out = self.run_publish(proposal=proposal)
+        self.assertEqual(out.status, "published", out.reason)
+        self.assertEqual(out.operation["proposed"]["changed_files"],
+                         [".github/workflows/wheels.yml", "src/a.c"])
+
+    def test_non_review_task_cannot_expand_scope(self):
+        commit_files(self.agent, {"src/a.c": "int riscv64;\n"}, msg="BLD: unrelated scope")
+        self.mbox = git(self.agent, "format-patch", "--stdout", self.base).encode() + b"\n"
+        proposal = self.proposal(changed_files=[".github/workflows/wheels.yml", "src/a.c"])
+        out = self.run_publish(proposal=proposal)
+        self.assertEqual((out.status, out.failure_class), ("rejected", "validation"))
+        self.assertIn("outside admitted scope", out.reason)
+
     def test_read_only_validates_but_does_not_push(self):
         out = self.run_publish(pol=policy(read_only=True))
         self.assertEqual(out.status, "rejected")
@@ -97,8 +119,8 @@ class TestForkPublish(_ForkFixture, unittest.TestCase):
 
     def test_rejects_out_of_scope_and_lies(self):
         out = self.run_publish(scope=publisher.Scope(allowed_globs=["src/*"]))
-        self.assertIn("outside the approved patch surface", out.reason)
-        out = self.run_publish(self.proposal(changed_files=["src/a.c"]))
+        self.assertIn("outside admitted scope", out.reason)
+        out = self.run_publish(self.proposal(changed_files=[".github/workflows/other.yml"]))
         self.assertIn("proposal claims files", out.reason)
         out = self.run_publish(self.proposal(patch_digest="0" * 64))
         self.assertIn("digest", out.reason)
