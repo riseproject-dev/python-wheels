@@ -88,6 +88,14 @@ def dispatch_recovery(contributions: dict[str, dict], *, runs: list[dict] | None
                      key=lambda kc: kc[1]["active_work"]["requested_at"])
     for key, c in pending:
         aw = c["active_work"]
+        if c["phase"] == "handoff":
+            new = dict(c, active_work=None, updated_at=iso)
+            contributions[key] = new
+            schemas.validate("contribution", new)
+            staged.append(("contributions", new))
+            report.append({"contribution": c["contribution_id"], "task": aw["task"],
+                           "decision": "cleared obsolete Work at handoff"})
+            continue
         state = queue_works.get(work.graph_id(aw["dedupe_key"]))
         if state not in (None, "available", "completed", "cancelled"):
             continue      # a live Claim is resolved by the worker outcome or deadline
@@ -429,7 +437,13 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
         if pid:
             rec = dict(rec, processed_publications=((rec.get("processed_publications") or []) + [pid])[-64:])
             contributions[key] = rec
-        if pub.get("task", {}).get("revision") != rec["revision"] and pub.get("status") != "published":
+        task_revision = pub.get("task", {}).get("revision")
+        if rec["phase"] in ("handoff", "upstream_review") and pub.get("status") != "published" \
+                and isinstance(task_revision, int) and task_revision <= rec["revision"]:
+            out.staged.append(("contributions", rec))
+            pubs_report.append({"contribution": cid, "ignored": "superseded by exact-head handoff"})
+            continue
+        if task_revision != rec["revision"] and pub.get("status") != "published":
             out.staged.append(("contributions", rec))
             pubs_report.append({"contribution": cid, "ignored": "stale revision"})
             continue
@@ -474,6 +488,13 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
                 contributions[by_cid[r["contribution_id"]]] = r
         out.staged.extend(obs.staged)
         out.report["observation"] = obs.report
+        # Recovery is evaluated before live CI. If CI accepts the current head
+        # in this same tick, do not launch a dispatcher for the now-obsolete
+        # retry request.
+        out.report["dispatch_relaunch"] = [
+            item for item in out.report["dispatch_relaunch"]
+            if (contributions[by_cid[item["contribution_id"]]].get("active_work") is not None
+                and contributions[by_cid[item["contribution_id"]]]["phase"] != "handoff")]
 
     # 3. Commands, intake and work selection (controller).
     res = controller.tick(contributions=contributions, operations=snap.operations, consumed=snap.consumed,

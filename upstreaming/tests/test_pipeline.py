@@ -166,6 +166,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(final["proposal_artifact"]["artifact_id"], 900)
         self.assertEqual(final["publication_operation_id"], ops[-1]["operation_id"])
         self.assertTrue(final["last_ci_evidence_id"].startswith("ci-2-7-1"))
+        self.assertIsNone(final["active_work"])
         self.assertIn("evidence", kinds)
         self.assertIn("operations", kinds)
         # Passed CI on the new head: nothing more for an agent to do right now.
@@ -238,6 +239,17 @@ class TestPublicationRetry(unittest.TestCase):
         self.assertEqual(t.report["requested_effects"], [])
         self.assertEqual(self.final(t)["activity"], "idle")
 
+    def test_late_no_change_cannot_regress_exact_head_handoff(self):
+        rec = dict(self.rec, phase="handoff", activity="waiting_human", active_work=None,
+                   clean_head_sha=self.rec["fork"]["head_sha"])
+        pub = {"status": "no_change", "task": self.task, "worker_run_id": "8",
+               "publication_artifact_id": 88, "operation": None, "artifact": None}
+        t = self.tick(rec, [pub])
+        final = self.final(t)
+        self.assertEqual((final["phase"], final["activity"]), ("handoff", "waiting_human"))
+        self.assertIn(88, final["processed_publications"])
+        self.assertEqual(t.report["publications"][0]["ignored"], "superseded by exact-head handoff")
+
     def test_success_after_retry_clears_pending(self):
         rec = dict(self.rec, pending_publication={"worker_run_id": "4242", "attempts": 1, "last_reason": "x",
                                                   "next_attempt_at": self.now.isoformat()})
@@ -307,6 +319,12 @@ class TestDispatchRecovery(unittest.TestCase):
                 self.assertNotEqual(work.graph_id(rec["active_work"]["dedupe_key"]), self.gid)
                 for kind, staged in t.staged:
                     schemas.validate({"contributions": "contribution", "events": "event"}.get(kind, kind), staged)
+
+    def test_handoff_clears_obsolete_active_work_without_dispatch(self):
+        rec = dict(self.rec, phase="handoff", activity="waiting_human")
+        t = self.tick([self.drun(1)], {self.gid: "completed"}, rec=rec)
+        self.assertEqual(t.report["dispatch_relaunch"], [])
+        self.assertIsNone(self.final(t)["active_work"])
 
     def test_lost_launch_after_grace_and_unknown_queue(self):
         t = self.tick([], {}, now=datetime(2026, 11, 18, 19, 30, tzinfo=timezone.utc))
