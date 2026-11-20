@@ -41,11 +41,13 @@ release-path rehearsal still need live evidence.
 - The dispatcher and patch worker stay sandboxed. The worker's native detector
   currently uses a provider-specific CLI; Pi-only detection is an unresolved
   compatibility limitation and is not silently worked around.
-- Before worker model execution, trusted code hash-checks the pinned gh-aw
-  v1.2.2 process runner and patches only its console-forwarding path. Every
-  colon byte in untrusted child output gains a following space in the Actions
-  log, so model and MCP content cannot become `::workflow-command::` syntax,
-  including across output chunks. Canonical artifact evidence stays unchanged.
+- Before worker model execution, a trusted pre-agent step generates a
+  cryptographically random token, stores it as that trusted step's output, and
+  emits GitHub's `::stop-commands::` directive. An `if: always()` post-step resumes
+  command processing with that exact token after the engine exits. Agent and
+  MCP output therefore stays exact and searchable in both the Actions console
+  and canonical artifacts without being interpreted as workflow commands. The
+  random token is not exposed to the model.
 
 ## Deployed and observed remotely
 

@@ -29,3 +29,4 @@
 - Added a fast ungrouped controller job that idempotently reacts `+1` to visible `/upstreaming` tracking-issue comments while leaving all parsing, authorization and command effects in serialized reconciliation.
 - Aligned the controller's cheap comment filter with first-nonblank-line command parsing so blank-line-prefixed commands are both acknowledged and reconciled.
 - Added a hash-pinned gh-aw v1.2.2 console guard that preserves canonical agent evidence while preventing untrusted model or MCP text from being parsed as GitHub Actions workflow commands.
+- Replaced console-byte rewriting with GitHub's native stop-commands protocol: trusted pre/post agent steps bracket exact output with a random step-output token and always restore command processing.
