@@ -403,6 +403,17 @@ You MUST investigate the project's upstream history, not just its checkout:
    distinguish build/runtime/optional dependencies where the data supports it,
    report omissions/conflicts explicitly, and never invent edges. A missing
    project or tool failure is not an empty or complete dependency graph.
+7. Audit every direct and transitive build and test dependency against both
+   public PyPI and `https://pypi.riseproject.dev/simple` for the proposed
+   riscv64 interpreter and libc matrix. Inspect actual filenames and wheel tags,
+   not only package-page existence. Read relevant CI logs for unexpected sdist
+   downloads. When public PyPI lacks a compatible wheel but the RISE index has
+   one, record the exact package/version/interpreter evidence and identify the
+   workflow environment that must receive both
+   `PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple` and
+   `PIP_PREFER_BINARY=true`. The latter prefers an available wheel but preserves
+   a source fallback. Distinguish pip/cibuildwheel resolution from uv, which
+   requires its corresponding `UV_*` index settings as well.
 
 For every research category, record the exact queries, source URLs, findings,
 search scope and whether pagination/discussion review is complete. Link concrete
@@ -463,7 +474,11 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   approve scope, with evidence:
   - release coverage: which platforms and architectures the latest release
     ships wheels for on PyPI, and whether riscv64 is already there;
-  - build backend and native dependencies;
+  - build backend and native dependencies, plus build/test dependency wheel
+    availability across the target matrix. For any dependency without a
+    compatible public-PyPI wheel, state whether the RISE index has a compatible
+    wheel and where the paired `PIP_EXTRA_INDEX_URL` and `PIP_PREFER_BINARY`
+    settings must propagate;
   - release graph: the workflows and jobs that build, test and publish
     wheels, and how they are triggered;
   - existing architecture precedent: the nearest aarch64/s390x/ppc64le

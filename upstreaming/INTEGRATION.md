@@ -160,8 +160,14 @@ and broadening `inputs.upload` with `github.event_name == 'push'`. The worker
 contract now explicitly forbids both patterns and any unrelated event, upload,
 retention or release behavior change. It also requires per-file commit history,
 issue/PR/review research and policy evidence before editing changelogs or other
-policy-sensitive files. Existing PR CI that builds but intentionally does not
-upload artifacts is left unchanged; any extra acceptance evidence belongs in a
+policy-sensitive files. Investigation and development also audit direct and
+transitive build/test dependency resolution across public PyPI and the RISE
+index. When public PyPI has no compatible wheel but RISE does, the proposed
+workflow passes both
+`PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple` and
+`PIP_PREFER_BINARY=true` to the narrowest applicable build/test resolver scope,
+retaining source fallback for uncovered rows and recording wheel-tag evidence.
+Existing PR CI that builds but intentionally does not upload artifacts is left unchanged; any extra acceptance evidence belongs in a
 separate trusted probe. The first repair performed the required history analysis
 and produced the correct rewrite, but built-in GitHub research labels reproduced
 the pinned gateway's queue-finish DIFC incompatibility. Current local workflow

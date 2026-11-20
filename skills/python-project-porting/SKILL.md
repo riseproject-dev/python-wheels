@@ -83,6 +83,13 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
 - **Default to NO comments in workflows** — they are read as reference. One "why" line only for
   a genuine non-obvious deviation; never narrate standard steps.
 - **Never set `CIBW_BUILD_VERBOSITY`** — drop it if you inherit it from a template.
+- **Do not source-build a dependency when a compatible RISE wheel exists.** Audit actual
+  build and test resolver logs plus both simple indexes for the complete target matrix. When
+  public PyPI lacks a compatible wheel but `https://pypi.riseproject.dev/simple` has one,
+  pass both `PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple` and
+  `PIP_PREFER_BINARY=true` to the exact build/test resolver environment. Prefer-binary keeps
+  source fallback for matrix rows the registry does not cover; never replace it with a broad
+  `PIP_ONLY_BINARY`. For uv commands, also set the equivalent `UV_*` index configuration.
 - **Start from upstream's own build/test workflow, then delete** everything that isn't Linux
   glibc/musl, and only then apply the riscv64 changes. Jobs consuming the setup matrix must
   use `${{ matrix.platform }}` in build selectors, names, and artifact names instead of
@@ -151,13 +158,19 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 4. **Map the git tag to the Python version** (see gotcha 3). Take the tag as the
    workflow input; derive `package_version` from the built sdist filename.
 
-5. **Identify native deps** the bdist needs at build time. Three cases: (a) none
-   bundled → add `CIBW_BEFORE_BUILD` to build them in-container (cffi builds libffi
+5. **Identify native and Python deps** the bdist needs at build time. Three native cases:
+   (a) none bundled → add `CIBW_BEFORE_BUILD` to build them in-container (cffi builds libffi
    that way); (b) the sdist bundles its C sources (protobuf bundles upb/utf8_range)
    → no before-build needed; (c) the dep is another Python wheel we already ship →
-   `pip install` it from our registry in `CIBW_BEFORE_BUILD` (see gotcha 17).
+   `pip install` it from our registry in `CIBW_BEFORE_BUILD` (see gotcha 17). For Python
+   build dependencies, inspect resolver logs and wheel tags on both indexes. If public PyPI
+   has no compatible wheel but RISE does, propagate the paired `PIP_EXTRA_INDEX_URL` and
+   `PIP_PREFER_BINARY=true` settings into the build environment.
 
-6. **Wire up real testing** — mirror how upstream tests its wheels (gotcha 6).
+6. **Wire up real testing**: mirror how upstream tests its wheels (gotcha 6). Audit every
+   direct and transitive test dependency the same way. Put the paired pip settings in the
+   test environment when they avoid an unnecessary riscv64 sdist build, and confirm in CI
+   that the resolver selected a wheel.
 
 7. **Validate locally, then push** (gotcha 9). Open a PR; the `pull_request` path
    trigger runs CI for every pending version. Watch, triage, iterate.

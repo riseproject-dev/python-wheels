@@ -209,6 +209,21 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("printf '::%s::", after["run"])
         self.assertNotIn("gh_aw_log_guard", (WF / "upstreaming-worker.md").read_text())
 
+    def test_prompts_require_rise_wheels_for_missing_build_and_test_dependencies(self):
+        investigator = (WF / "upstreaming-investigator.md").read_text()
+        worker = (WF / "upstreaming-worker.md").read_text()
+        for text in (investigator, worker):
+            self.assertIn("PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple", text)
+            self.assertIn("PIP_PREFER_BINARY=true", text)
+            self.assertIn("public PyPI", text)
+        self.assertIn("CIBW_ENVIRONMENT", worker)
+        self.assertIn("CIBW_TEST_ENVIRONMENT", worker)
+        skill = (ROOT / "skills/python-project-porting/SKILL.md").read_text()
+        self.assertIn("Do not source-build a dependency when a compatible RISE wheel exists", skill)
+        self.assertIn("PIP_PREFER_BINARY=true", skill)
+        gotchas = (ROOT / "skills/python-project-porting/references/gotchas/dependencies-and-registry.md").read_text()
+        self.assertIn("The reusable setting is the pair", gotchas)
+
     def test_worker_forbids_unrelated_fork_ci_debug_changes(self):
         worker = source("upstreaming-worker")
         self.assertNotIn("github", worker["tools"])

@@ -691,12 +691,18 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     version has to line up" bit for it exactly: PyPI's latest was newer than what we host,
     so pip took that and built it from source, costing ~45 minutes per job (and cp314t has
     no registry wheel at any pandas version, so it always builds from source regardless).
-    `CIBW_TEST_ENVIRONMENT: PIP_PREFER_BINARY=1` (test-phase only, per gotcha 12) tells pip
-    to prefer an *older* wheel-backed version over a newer sdist-only one — it dropped
-    cp312/cp313/cp314 to a few seconds (the registry wheel resolves) while leaving cp314t's
-    from-source fallback intact, which had already been confirmed to build cleanly, just
-    slowly. `PIP_ONLY_BINARY` would have been wrong here — it hard-fails cp314t instead of
-    letting it fall back to source.
+    The reusable setting is the pair
+    `PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple` and
+    `PIP_PREFER_BINARY=true`: the first makes the RISE wheel a candidate, while the second
+    lets an older compatible wheel beat a newer sdist-only release. Put both in
+    `CIBW_TEST_ENVIRONMENT` for cibuildwheel test dependency resolution, in
+    `CIBW_ENVIRONMENT` for build dependency resolution, or in the job/step `env` for a
+    native pip invocation. Set both scopes when both phases resolve affected dependencies.
+    In the clevercsv case, the test-phase setting dropped cp312/cp313/cp314 to a few seconds
+    while leaving cp314t's from-source fallback intact, which had already been confirmed to
+    build cleanly, just slowly. `PIP_ONLY_BINARY` would have been wrong here because it
+    hard-fails cp314t instead of letting it fall back to source. Always confirm wheel filenames/tags on
+    both indexes before the change and confirm the resolver selects a wheel in CI afterward.
 
 375. **`uv` (0.12.13, riscv64) can reject a real, `--only-binary`-eligible `abi3` wheel as
     "has no usable wheels" when it is resolved *by name from an index*, even though the

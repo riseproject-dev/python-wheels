@@ -401,7 +401,24 @@ and analogous changes in the proposal diagnosis.
    emulation/cross-build path cannot support riscv64. Follow the nearest existing
    architecture precedent rather than preferring RISE runners. When required by
    the selected topology, use `manylinux_2_39_riscv64` and
-   `musllinux_1_2_riscv64` images.
+   `musllinux_1_2_riscv64` images. Before finalizing any build or test workflow,
+   inspect its dependency declarations and CI logs for packages downloaded as
+   sdists on riscv64. Check public PyPI and the RISE simple index for compatible
+   wheels across every affected interpreter and libc. When public PyPI lacks a
+   compatible build or test dependency wheel but
+   `https://pypi.riseproject.dev/simple` has one, add both
+   `PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple` and
+   `PIP_PREFER_BINARY=true` to the narrowest environment that reaches that pip
+   resolver. Use the ordinary job or step `env` for native pip, `CIBW_ENVIRONMENT`
+   for build resolution inside cibuildwheel, and `CIBW_TEST_ENVIRONMENT` for test
+   dependency resolution; set both scopes when both phases need the registry.
+   Do not use `PIP_ONLY_BINARY`: source fallback must remain available where the
+   RISE index has no matching wheel. If the project invokes uv, retain the two
+   requested `PIP_*` settings and also configure uv's corresponding extra-index
+   and index-strategy settings because uv does not read pip's index variables.
+   Record package names, versions, tags, index evidence and propagation scope in
+   `diagnosis` and verify from CI that the dependency resolves as a wheel rather
+   than an sdist.
 3. Temporary fork-only changes that let CI run on the fork (for example
    removing `if: github.repository == 'owner/repo'`) go in a separate commit
    whose subject starts with `{debug}`. Never when `upstream_facing` is true.

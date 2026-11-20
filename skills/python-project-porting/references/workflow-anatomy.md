@@ -99,8 +99,14 @@ through `outputs:`; name the artifact `<pkg>-${{ env.X_VERSION }}-sdist`, upload
 UV env vars (`UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, `UV_ONLY_BINARY`) are **only** needed
 if the workflow has steps that actually invoke `uv` (e.g. an sdist-build job on `ubuntu-latest`
 that uses `setup-uv`). For pure cibuildwheel build-from-checkout workflows with no `uv` steps,
-skip them entirely — pass the registry to the container via
-`CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/` instead.
+skip them entirely. When a build or test dependency has no compatible wheel on public PyPI
+but does have one on the RISE index, pass both
+`PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple` and `PIP_PREFER_BINARY=true` to
+the resolver. Use `CIBW_ENVIRONMENT` for build resolution and `CIBW_TEST_ENVIRONMENT` for
+test dependency resolution, setting both when both phases need the registry. Prefer-binary
+allows source fallback on uncovered matrix rows; do not replace it with a broad
+`PIP_ONLY_BINARY`. Confirm actual filenames and tags on both indexes before adding the env,
+and confirm the CI resolver log selects a wheel afterward.
 
 Newer workflows start with an SPDX header:
 ```
