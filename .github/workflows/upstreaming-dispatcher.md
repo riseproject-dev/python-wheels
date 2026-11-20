@@ -58,6 +58,28 @@ steps:
         const { stagePlanIntents } = require(path.join(process.env.RUNNER_TEMP, "gh-aw/actions/work_queue_intents.cjs"));
         stagePlanIntents(path.join(process.env.RUNNER_TEMP, "gh-aw/safeoutputs/work-queue/work-queue.intents.jsonl"), plan);
         core.info(`Staged ${plan.nodes.length} upstreaming task(s)`);
+jobs:
+  continuation:
+    needs: [safe_outputs]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: control-token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-dev
+          repositories: python-wheels
+          permission-contents: read
+          permission-actions: write
+      - name: Continue reconciliation after the dispatch decision
+        env:
+          GH_TOKEN: ${{ steps.control-token.outputs.token }}
+        run: gh workflow run upstreaming-controller.yml --repo "$GITHUB_REPOSITORY" --ref main
 timeout-minutes: 10
 strict: true
 ---
