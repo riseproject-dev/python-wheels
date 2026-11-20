@@ -23,3 +23,4 @@
 - Updated acceptance validation so state-only pushes may trigger exactly `website.yml`, preserving the rule that they never wake pipeline control or model workflows.
 - Addressed PR #4989 review feedback by moving the status-page generator into `upstreaming/`, invoking it through `uv run`, and adding focused rendering coverage.
 - Fixed review and CI reconciliation so pending human feedback survives head changes, every repair carries and acknowledges all feedback evidence, `fix_needed` cannot be overwritten before dispatch, and any executed build or test failure returns handoff to automated development repair.
+- After the pipeline correctly reported spookyhash repair blocked by exact-file scope, normalized approved workflow scope to `.github/workflows/*` and added a revisioned migration for idle repair records so sibling test/build workflows remain pipeline-repairable.

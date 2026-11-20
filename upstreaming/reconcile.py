@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from . import capacity, collect, controller, lifecycle, observe_ci, recovery, schemas
-from .common import safe_id
+from .common import normalize_workflow_scope, safe_id
 
 
 @dataclass
@@ -277,7 +277,7 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
             new["phase"] = "provisioning"
             new["activity"] = "idle"
             new["admission_class"] = dossier["proposal"]["admission_class"]
-            new["scope_paths"] = list(dossier["proposal"]["allowed_paths"])
+            new["scope_paths"] = normalize_workflow_scope(list(dossier["proposal"]["allowed_paths"]))
             new["pending_human_action"] = None
             new["revision"] += 1
             staged.append(("events", lifecycle._event(rec, new, "dossier_develop", "observation",
@@ -490,6 +490,23 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
             c = dict(c, pending_feedback_evidence_ids=feedback_ids[-64:])
             contributions[key] = c
             out.staged.append(("contributions", c))
+
+    # Exact workflow-file scopes from older dossiers cannot absorb review or
+    # CI fixes in sibling workflows. Migrate only idle repair records. Active
+    # immutable Work finishes through normal terminal recovery first.
+    for key, c in list(contributions.items()):
+        paths = c.get("scope_paths") or []
+        widened = normalize_workflow_scope(paths) if paths else paths
+        if widened != paths and c["activity"] == "fix_needed" and not c.get("active_work") \
+                and c["phase"] in {"development", "handoff", "upstream_review"}:
+            before = c
+            c = dict(c, scope_paths=widened, revision=c["revision"] + 1,
+                     clean_head_sha=None, handoff_request=None, handoff_approval=None,
+                     updated_at=iso)
+            contributions[key] = c
+            out.staged.append(("contributions", c))
+            out.staged.append(("events", lifecycle._event(
+                before, c, "workflow_scope_normalized", "migration", None, iso, True)))
 
     # 2. Live branch and CI observation.
     if observe:

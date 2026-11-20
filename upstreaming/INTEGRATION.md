@@ -187,7 +187,11 @@ addition to the target riscv64 job and wheel contract. Failures confined to
 package publishing, upload, or release-request validation remain non-blocking in
 the intentionally credentialless destination organization. A build or test
 failure discovered after handoff automatically returns the contribution to
-revisioned development repair.
+revisioned development repair. When a dossier approves any file under
+`.github/workflows/`, the admitted scope is normalized to the bounded
+`.github/workflows/*` glob so review and CI repair can update a sibling test,
+build, or release workflow. Existing publisher checks still reject unsafe
+workflow content and every non-workflow path remains explicitly scoped.
 
 Previously merged implementation:
 

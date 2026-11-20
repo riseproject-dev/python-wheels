@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from upstreaming import (capacity, ci_evidence, collect, commands, controller, recovery,
+from upstreaming import (capacity, ci_evidence, collect, commands, common, controller, recovery,
                                     release, triggers)
 from upstreaming.tests.helpers import (NOW, OWNER, SHA_A, SHA_B, comment, contribution,
                                                   policy)
@@ -253,6 +253,14 @@ class TestDevelopmentReviewFeedback(unittest.TestCase):
         rec["processed_review_ids"] = []; rec["processed_review_comment_ids"] = []
         rec["processed_pr_conversation_comment_ids"] = []
         self.assertIsNone(collect.development_review_feedback(self.Api(), rec, [OWNER["id"]]))
+
+
+class TestScopeNormalization(unittest.TestCase):
+    def test_workflow_files_share_a_bounded_repair_scope(self):
+        self.assertEqual(common.normalize_workflow_scope([
+            ".github/workflows/wheels.yml", "README.rst", ".github/workflows/test.yml"]),
+            [".github/workflows/*", "README.rst"])
+        self.assertEqual(common.normalize_workflow_scope(["src/port.c"]), ["src/port.c"])
 
 
 class TestTriggers(unittest.TestCase):
