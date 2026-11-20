@@ -16,3 +16,5 @@
 - Enforced `riseproject-upstreaming[bot]` as both author and committer for every future pipeline-created destination commit, with trusted publisher normalization remaining authoritative.
 - Made destination token-mint failures durable `infra_error` publication outcomes so the controller self-heals through publish-only retry instead of spending another model run.
 - Verified a single manual controller tick recovered python-isal from a terminal failed Work by allocating revision 5 and returning control to the normal dispatcher path.
+- Simplified rare destination-token failure handling: rely on bounded terminal-Work retry and accept the occasional extra model run instead of adding a publish-only token-error state path.
+- Removed the one-time App boundary validation workflow; production token minting and exact readback remain the authoritative checks.
