@@ -49,147 +49,62 @@ jobs:
       package: bcrypt
       version: ${{ inputs.version }}
 
-  build_sdist:
+  # One cp312-abi3 wheel: cibuildwheel builds it once and reuses+tests it on
+  # cp313/cp314 (find_compatible_wheel), so all three tags share one wheel.
+  build_abi3:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build bcrypt ${{ matrix.version }} sdist
-    runs-on: ubuntu-latest
-    env:
-      BCRYPT_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout bcrypt ${{ env.BCRYPT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: pyca/bcrypt
-          ref: ${{ env.BCRYPT_VERSION }}
-          persist-credentials: false
-
-      - name: Install Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
-        with:
-          python-version: '3.12'
-          activate-environment: true
-          enable-cache: false
-
-      - name: Build sdist
-        id: sdist
-        run: |
-          set -euo pipefail
-          rm -rf dist
-          uv pip install build twine
-          python -m build --sdist --outdir dist
-          twine check dist/*
-
-      - name: Upload sdist artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: bcrypt-${{ env.BCRYPT_VERSION }}-sdist
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  # One cp312-abi3 wheel: cibuildwheel builds it once and reuses+tests it on
-  # cp313/cp314 (find_compatible_wheel), so all three tags share one wheel.
-  build_abi3:
-    needs: [setup, build_sdist]
-    if: needs.setup.outputs.versions != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build bcrypt ${{ matrix.version }} cp312-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
-    env:
-      BCRYPT_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: bcrypt-${{ env.BCRYPT_VERSION }}-sdist
-          path: dist/
-
-      - id: sdist_path
-        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ${{ steps.sdist_path.outputs.path }}
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: 'cp312-* cp313-* cp314-*'
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setuptools-rust emits abi3 only when bdist_wheel gets --py-limited-api
-          # (cibuildwheel won't); without this it's per-interpreter wheels, not abi3.
-          CIBW_CONFIG_SETTINGS: --build-option=--py-limited-api=${{ env.ABI3_FLOOR }}
-          # No Rust in the manylinux image; install it and put cargo on PATH.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT: 'PATH="$PATH:$HOME/.cargo/bin"'
-          # Upstream's suite; {package} is the extracted sdist dir (gotcha 5).
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest -q {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: bcrypt-${{ env.BCRYPT_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: bcrypt
+      version: ${{ matrix.version }}
+      source: pypi-sdist
+      artifact-tag: cp312-abi3-manylinux_riscv64
+      timeout-minutes: 90
+      cibw-build: cp312-* cp313-* cp314-*
+      # setuptools-rust emits abi3 only when bdist_wheel gets --py-limited-api
+      # (cibuildwheel won't); without this it's per-interpreter wheels, not abi3.
+      cibw-config-settings: --build-option=--py-limited-api=cp312
+      # No Rust in the manylinux image; install it and put cargo on PATH.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: PATH="$PATH:$HOME/.cargo/bin"
+      # Upstream's suite; {package} is the extracted sdist dir (gotcha 5).
+      cibw-test-requires: pytest
+      cibw-test-command: pytest -q {package}/tests
 
   # Free-threaded wheel: per-interpreter, no abi3 (pyo3 disables abi3 under
   # Py_GIL_DISABLED). Only cp314t - the riscv64 image has no cp313t interpreter.
   build_freethreaded:
-    needs: [setup, build_sdist]
+    needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build bcrypt ${{ matrix.version }} cp314t-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
-    env:
-      BCRYPT_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: bcrypt-${{ env.BCRYPT_VERSION }}-sdist
-          path: dist/
-
-      - id: sdist_path
-        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ${{ steps.sdist_path.outputs.path }}
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: 'cp314t-*'  # no --py-limited-api: abi3 has no free-threaded ABI
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT: 'PATH="$PATH:$HOME/.cargo/bin"'
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest -q {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: bcrypt-${{ env.BCRYPT_VERSION }}-cp314t-manylinux_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: bcrypt
+      version: ${{ matrix.version }}
+      source: pypi-sdist
+      artifact-tag: cp314t-manylinux_riscv64
+      timeout-minutes: 90
+      cibw-build: cp314t-*
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: PATH="$PATH:$HOME/.cargo/bin"
+      cibw-test-requires: pytest
+      cibw-test-command: pytest -q {package}/tests
 
   publish:
     name: Publish bcrypt ${{ matrix.version }}
-    needs: [setup, build_sdist, build_abi3, build_freethreaded]
+    needs: [setup, build_abi3, build_freethreaded]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false

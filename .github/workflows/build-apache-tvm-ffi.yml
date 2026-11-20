@@ -49,161 +49,77 @@ jobs:
       package: apache-tvm-ffi
       version: ${{ inputs.version }}
 
-  build_sdist:
+  build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    # The sdist is architecture-independent: it just packages the source tree,
-    # the vendored submodules (dlpack, libbacktrace) and a setuptools-scm-derived
-    # _version.py. Build it once on x86 instead of burning a scarce riscv runner
-    # (see CLAUDE.md gotcha 4). The resulting sdist is self-contained, so the
-    # riscv wheel job below needs neither git history nor submodules.
-    name: Build apache-tvm-ffi ${{ matrix.version }} sdist
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      TVM_FFI_VERSION: ${{ matrix.version }}
-
-    steps:
-      # Upstream tags post-releases with a dash (v0.1.13-post2), but the PyPI
-      # version this repo tracks normalizes that to a dot (0.1.13.post2); GitHub
-      # Actions expressions have no replace(), so the substitution happens here.
-      - name: Determine upstream tag
-        id: tag
-        run: echo "tag=v${TVM_FFI_VERSION/.post/-post}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout tvm-ffi ${{ steps.tag.outputs.tag }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: apache/tvm-ffi
-          ref: ${{ steps.tag.outputs.tag }}
-          # submodules must be present so pyproject's sdist.include /3rdparty/**
-          # globs actually bundle dlpack + libbacktrace; setuptools-scm needs the
-          # full history + tags to derive the version from the checked-out tag.
-          submodules: recursive
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-
-      - name: Install Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
-        with:
-          python-version: '3.12'
-          activate-environment: true
-          enable-cache: false
-
-      - name: Build sdist
-        id: sdist
-        run: |
-          uv pip install build twine
-          python -m build --sdist
-          twine check dist/*
-
-      - name: Upload sdist artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: apache-tvm-ffi-${{ env.TVM_FFI_VERSION }}-sdist
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  build_wheels:
-    needs: [setup, build_sdist]
-    if: needs.setup.outputs.versions != '[]'
     name: Build apache-tvm-ffi ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    permissions:
-      contents: read
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      TVM_FFI_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: apache-tvm-ffi-${{ env.TVM_FFI_VERSION }}-sdist
-          path: dist/
-
-      - id: sdist_path
-        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          # cibuildwheel accepts an sdist tarball directly: it extracts it and
-          # builds from the self-contained tree (no submodules/git needed here).
-          package-dir: ${{ steps.sdist_path.outputs.path }}
-        env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
-          # override so this native riscv runner builds the riscv64 wheel.
-          CIBW_ARCHS: riscv64
-          CIBW_SKIP: '*-musllinux_*'
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Override upstream's build-frontend = "build[uv]". cibuildwheel's audit
-          # step creates a venv on the *host* runner (not in the container) and,
-          # when the frontend is build[uv], insists on a host `uv` binary
-          # (venv.py: `assert uv_path is not None`). The self-hosted riscv runner
-          # has no host uv, so the abi3 wheel builds fine but the run crashes in
-          # "Auditing wheel...". Plain `build` uses pip/virtualenv on the host
-          # instead - the way our local container build was validated.
-          CIBW_BUILD_FRONTEND: build
-          # The test-command (pytest {package}/tests/python) and test-groups
-          # (["test"] pulls in torch/numpy/ml_dtypes/pytest/ninja) are inherited
-          # from the sdist's pyproject.toml, so we build and test exactly the way
-          # upstream does.
-          #
-          # CIBW_ENVIRONMENT applies to BOTH the build and test phases. We only
-          # point pip/uv at our registry here (needed so test deps resolve, and
-          # harmless at build time). We deliberately do NOT set ONLY_BINARY here:
-          # the build backend needs cython>=3.0, which has no riscv64 wheel on
-          # any index and must be compiled from its sdist inside the container.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_INDEX_STRATEGY=unsafe-best-match
-          # Test phase only: force wheels-only so a missing riscv64 wheel for a
-          # heavy test dep (torch/numpy/ml_dtypes) fails fast instead of silently
-          # kicking off a multi-hour source build under the runner. GPU-only tests
-          # self-skip via torch.cuda.is_available().
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_ONLY_BINARY=:all:
-            UV_ONLY_BINARY=:all:
-          # Mirror upstream's test-command (pytest {package}/tests/python -vvs)
-          # but drop two tests that fail only because of this riscv64 runner's
-          # environment, not the wheel (2300+ others pass; cp314t, which pulls no
-          # torch, is fully green):
-          #   * test_libinfo.py - every test there shells out to `tvm-ffi-config`
-          #     and asserts the subprocess's stderr is empty. Importing tvm_ffi
-          #     pulls in torch, whose bundled libcpuinfo can't parse this runner's
-          #     /sys CPU topology (core_id reads "-1") and prints
-          #     "Error in cpuinfo: failed to parse ... core_id" to stderr. The
-          #     noise is nondeterministic across the module's subprocess tests, so
-          #     the whole file is dropped via --ignore (an absolute path, so it's
-          #     unambiguous regardless of pytest's rootdir).
-          #   * test_filelock.py::test_concurrent_access - spawns 16 concurrent
-          #     torch-importing workers under a hard 60s wait; the slower riscv64
-          #     runner blows the timeout. Dropped with -k by its (unique) name -
-          #     rootdir-independent, unlike a path-based --deselect (which silently
-          #     no-ops when the nodeid prefix doesn't match pytest's rootdir).
-          CIBW_TEST_COMMAND: >-
-            pytest {package}/tests/python -vvs
-            --ignore {package}/tests/python/test_libinfo.py
-            -k "not test_concurrent_access"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: apache-tvm-ffi-${{ env.TVM_FFI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    # The reusable workflow extracts the self-contained PyPI sdist, so this
+    # build needs neither Git history nor submodules.
+    # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
+    # override so this native riscv runner builds the riscv64 wheel.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: apache-tvm-ffi
+      version: ${{ matrix.version }}
+      # The PyPI sdist contains the generated version and vendored dlpack/libbacktrace sources.
+      source: pypi-sdist
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-skip: "*-musllinux_*"
+      # Override upstream's build-frontend = "build[uv]". cibuildwheel's audit
+      # step creates a venv on the *host* runner (not in the container) and,
+      # when the frontend is build[uv], insists on a host `uv` binary
+      # (venv.py: `assert uv_path is not None`). The self-hosted riscv runner
+      # has no host uv, so the abi3 wheel builds fine but the run crashes in
+      # "Auditing wheel...". Plain `build` uses pip/virtualenv on the host
+      # instead - the way our local container build was validated.
+      cibw-build-frontend: build
+      # The test-command (pytest {package}/tests/python) and test-groups
+      # (["test"] pulls in torch/numpy/ml_dtypes/pytest/ninja) are inherited
+      # from the sdist's pyproject.toml, so we build and test exactly the way
+      # upstream does.
+      #
+      # CIBW_ENVIRONMENT applies to BOTH the build and test phases. We only
+      # point pip/uv at our registry here (needed so test deps resolve, and
+      # harmless at build time). We deliberately do NOT set ONLY_BINARY here:
+      # the build backend needs cython>=3.0, which has no riscv64 wheel on
+      # any index and must be compiled from its sdist inside the container.
+      cibw-environment-linux: >
+        UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        UV_INDEX_STRATEGY=unsafe-best-match
+      # Test phase only: force wheels-only so a missing riscv64 wheel for a
+      # heavy test dep (torch/numpy/ml_dtypes) fails fast instead of silently
+      # kicking off a multi-hour source build under the runner. GPU-only tests
+      # self-skip via torch.cuda.is_available().
+      cibw-test-environment: >
+        PIP_ONLY_BINARY=:all:
+        UV_ONLY_BINARY=:all:
+      # Mirror upstream's test-command (pytest {package}/tests/python -vvs)
+      # but drop two tests that fail only because of this riscv64 runner's
+      # environment, not the wheel (2300+ others pass; cp314t, which pulls no
+      # torch, is fully green):
+      #   * test_libinfo.py - every test there shells out to `tvm-ffi-config`
+      #     and asserts the subprocess's stderr is empty. Importing tvm_ffi
+      #     pulls in torch, whose bundled libcpuinfo can't parse this runner's
+      #     /sys CPU topology (core_id reads "-1") and prints
+      #     "Error in cpuinfo: failed to parse ... core_id" to stderr. The
+      #     noise is nondeterministic across the module's subprocess tests, so
+      #     the whole file is dropped via --ignore (an absolute path, so it's
+      #     unambiguous regardless of pytest's rootdir).
+      #   * test_filelock.py::test_concurrent_access - spawns 16 concurrent
+      #     torch-importing workers under a hard 60s wait; the slower riscv64
+      #     runner blows the timeout. Dropped with -k by its (unique) name -
+      #     rootdir-independent, unlike a path-based --deselect (which silently
+      #     no-ops when the nodeid prefix doesn't match pytest's rootdir).
+      cibw-test-command: >
+        pytest {package}/tests/python -vvs
+        --ignore {package}/tests/python/test_libinfo.py
+        -k "not test_concurrent_access"
 
   publish:
     name: Publish apache-tvm-ffi ${{ matrix.version }}
