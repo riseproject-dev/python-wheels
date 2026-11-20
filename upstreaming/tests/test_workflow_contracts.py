@@ -195,6 +195,20 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertEqual(reconcile["concurrency"]["group"], "python-wheels-upstreaming-controller")
         self.assertFalse(reconcile["concurrency"]["cancel-in-progress"])
 
+    def test_worker_brackets_untrusted_output_with_stop_commands(self):
+        worker = source("upstreaming-worker")
+        before = worker["pre-agent-steps"][0]
+        self.assertIn("openssl rand -hex 32", before["run"])
+        self.assertEqual(before["id"], "suspend_commands")
+        self.assertIn('echo "token=$token" >> "$GITHUB_OUTPUT"', before["run"])
+        self.assertIn("::stop-commands::%s", before["run"])
+        after = worker["post-steps"][0]
+        self.assertEqual(after["if"], "always()")
+        self.assertEqual(after["env"]["STOP_COMMANDS_TOKEN"],
+                         "${{ steps.suspend_commands.outputs.token }}")
+        self.assertIn("printf '::%s::", after["run"])
+        self.assertNotIn("gh_aw_log_guard", (WF / "upstreaming-worker.md").read_text())
+
     def test_worker_forbids_unrelated_fork_ci_debug_changes(self):
         worker = source("upstreaming-worker")
         self.assertNotIn("github", worker["tools"])

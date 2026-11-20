@@ -68,15 +68,13 @@ safe-outputs:
   noop:
     report-as-issue: false
 pre-agent-steps:
-  - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
-    with:
-      enable-cache: false
-  - name: Guard the Actions log from untrusted workflow commands
-    env:
-      GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions
+  - name: Suspend workflow commands around untrusted agent output
+    id: suspend_commands
     run: |
       set -euo pipefail
-      uv run --no-project python -m upstreaming.gh_aw_log_guard "$GH_AW_ACTIONS_DIR"
+      token="upstreaming-stop-$(openssl rand -hex 32)"
+      echo "token=$token" >> "$GITHUB_OUTPUT"
+      printf '::stop-commands::%s\n' "$token"
   - name: Check out the contribution fork at the expected head (read-only)
     env:
       GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions
@@ -120,6 +118,15 @@ pre-agent-steps:
       git config user.name "riseproject-upstreaming[bot]"
       git config user.email "359135081+riseproject-upstreaming[bot]@users.noreply.github.com"
       echo "checked out $(git rev-parse HEAD) into ./fork"
+post-steps:
+  - name: Resume workflow commands after untrusted agent output
+    if: always()
+    env:
+      STOP_COMMANDS_TOKEN: ${{ steps.suspend_commands.outputs.token }}
+    run: |
+      set -euo pipefail
+      test -n "$STOP_COMMANDS_TOKEN"
+      printf '::%s::\n' "$STOP_COMMANDS_TOKEN"
 jobs:
   safe_outputs:
     pre-steps:
