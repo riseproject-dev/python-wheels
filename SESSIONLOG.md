@@ -9,3 +9,4 @@
 - The first autonomous deployment wake-up exposed invalid `recovery` event causes; changed them to schema-valid observations and added end-to-end staged-record validation.
 - Autonomous recovery moved immutables to exact-head handoff, then exposed a same-tick race that retained and dispatched obsolete Work; added handoff cleanup and final-state relaunch filtering.
 - Fenced late non-publishing worker outcomes so an obsolete task cannot regress an already-authoritative exact-head handoff.
+- Confirmed autonomous queue progression from immutables handoff to python-isal development; fixed repeated green observation so handoff remains visibly `waiting_human`.

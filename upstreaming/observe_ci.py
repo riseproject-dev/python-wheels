@@ -131,6 +131,8 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
         new_activity = {"passed": "idle", "failed": "fix_needed", "pending": "waiting_ci",
                         "missing": "waiting_ci", "not_executed": "waiting_human",
                         "access_wait": "waiting_human"}[verdict.state]
+        if verdict.state == "passed" and cur["phase"] == "handoff":
+            new_activity = "waiting_human"
         if verdict.state in ("passed", "failed", "not_executed") and latest:
             run = max(latest, key=lambda r: r["id"])
             eid = _evidence_id(snap.repository["id"], run)
