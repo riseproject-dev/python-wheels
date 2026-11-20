@@ -45,6 +45,8 @@ from .common import DEV_REF, FORK_ORG
 
 MAX_MBOX_BYTES = 4 * 1024 * 1024
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+APP_COMMIT_NAME = "riseproject-dev[bot]"
+APP_COMMIT_EMAIL = "330740410+riseproject-dev[bot]@users.noreply.github.com"
 
 
 class PublishRejected(RuntimeError):
@@ -77,8 +79,8 @@ class Outcome:
 def _git(repo: Path, *args: str, check: bool = True, input: bytes | None = None,
          extra_config: list[str] | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     e = publisher.safe_env()
-    e.update({"GIT_AUTHOR_NAME": "riseproject-upstreaming", "GIT_AUTHOR_EMAIL": "noreply@riseproject.dev",
-              "GIT_COMMITTER_NAME": "riseproject-upstreaming", "GIT_COMMITTER_EMAIL": "noreply@riseproject.dev"})
+    e.update({"GIT_AUTHOR_NAME": APP_COMMIT_NAME, "GIT_AUTHOR_EMAIL": APP_COMMIT_EMAIL,
+              "GIT_COMMITTER_NAME": APP_COMMIT_NAME, "GIT_COMMITTER_EMAIL": APP_COMMIT_EMAIL})
     e.update(env or {})
     return subprocess.run(["git", *publisher.SAFE_GIT_CONFIG, *TEST_EXTRA_CONFIG, *(extra_config or []),
                            "-C", str(repo), *args],
@@ -101,6 +103,19 @@ def _url(full_name: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name):
         raise PublishRejected(f"invalid repository name {full_name!r}")
     return URL_TEMPLATE.format(full_name)
+
+
+def _rewrite_app_identity(repo: Path, start: str, head: str) -> str:
+    """Recreate the linear proposal series with the App as author/committer."""
+    commits = [sha for sha in _git(repo, "rev-list", "--reverse", f"{start}..{head}").stdout.decode().splitlines() if sha]
+    parent = start
+    for old in commits:
+        tree = _git(repo, "rev-parse", f"{old}^{{tree}}").stdout.decode().strip()
+        message = _git(repo, "show", "-s", "--format=%B", old).stdout
+        dates = {"GIT_AUTHOR_DATE": _git(repo, "show", "-s", "--format=%aI", old).stdout.decode().strip(),
+                 "GIT_COMMITTER_DATE": _git(repo, "show", "-s", "--format=%cI", old).stdout.decode().strip()}
+        parent = _git(repo, "commit-tree", tree, "-p", parent, input=message, env=dates).stdout.decode().strip()
+    return parent
 
 
 def check_proposal(proposal: dict, record: dict, task: dict) -> None:
@@ -161,7 +176,8 @@ def rebuild(work: Path, *, fork: str, upstream: str, expected_head: str, base_sh
     if p.returncode:
         _git(wt, "am", "--abort", check=False)
         raise PublishRejected(f"series does not apply on {start[:12]}: {p.stderr.decode()[-400:]}")
-    return _git(wt, "rev-parse", "HEAD").stdout.decode().strip()
+    applied = _git(wt, "rev-parse", "HEAD").stdout.decode().strip()
+    return _rewrite_app_identity(wt, start, applied)
 
 
 def publish(*, record: dict, task: dict, proposal: dict, mbox: bytes, token: str | None,
