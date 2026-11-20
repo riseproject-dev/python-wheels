@@ -218,6 +218,18 @@ jobs:
           # 1 rejected / 3 infrastructure are recorded outcomes, not job failures;
           # 2 (uncertain) fails the job so it is visible, and discovery resolves it.
           exit $(( rc == 1 || rc == 3 ? 0 : rc ))
+      - name: Answer addressed review feedback and resolve inline threads
+        if: steps.publish.outputs.status == 'published'
+        continue-on-error: true
+        working-directory: control
+        env:
+          UPSTREAMING_FORK_TOKEN: ${{ steps.fork-token.outputs.token }}
+        run: |
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.review_response \
+              --record ../in/record.json --task ../in/task.json \
+              --proposal ../in/proposal.json --outcome ../in/outcome.json \
+              --out ../in/review-response.json
       # Everything the controller needs to record the outcome and, for an
       # infrastructure failure, to retry this exact publication without a new
       # agent run: the task, the verified artifact identity and the outcome.
@@ -233,6 +245,7 @@ jobs:
             in/outcome.json
             in/proposal.json
             in/dossier.json
+            in/review-response.json
           if-no-files-found: ignore
           retention-days: 30
   continuation:
@@ -296,7 +309,12 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   revision task, `reason_ids` must include every task `reason_ids` entry. In
   `diagnosis`, include a checklist with one item per review or CI constraint,
   the exact change that addresses it, and how you verified that change. Never
-  claim `no_change` while required review feedback remains unresolved.
+  claim `no_change` while required review feedback remains unresolved. For
+  every item in human-relay `reviews`, `comments`, and `conversation_comments`,
+  add one `feedback_responses` entry with its numeric ID and a short factual
+  description of the implemented change. Trusted code posts these responses
+  only after publication and resolves inline review threads. Do not claim a
+  change was made unless it is present in the delivered series.
   `patch_digest` is the sha256 of `patches.mbox`, or null.
 - `patches.mbox`: for `append`, `git -C fork format-patch --stdout <expected_head>`;
   for `rewrite`, `git -C fork format-patch --stdout <base_sha>`. Omit it

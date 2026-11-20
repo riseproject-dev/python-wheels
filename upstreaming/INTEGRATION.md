@@ -200,7 +200,12 @@ paths actually changed by that repair, applies all existing content and workflow
 safety checks, and persists the verified paths into contribution scope. Live
 contributions whose dossiers predate mandatory path coverage receive the same
 exact-path compatibility only during repair; new dossiers are marked complete
-and cannot use that legacy allowance.
+and cannot use that legacy allowance. A human-relay-backed proposal also carries
+one bounded response per review item. After exact-head publication, trusted code
+posts each short response as the destination App and resolves its inline review
+thread. PR conversation comments receive the response but are not falsely marked
+resolved because GitHub does not expose thread resolution for them. Response
+markers and thread-state readback make retries idempotent.
 
 Previously merged implementation:
 

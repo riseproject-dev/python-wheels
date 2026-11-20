@@ -215,8 +215,11 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    line and text in task context. Ordinary natural-language review feedback may
    require another file without any command syntax. A human-relay-backed repair
    may identify that exact path; trusted publication validates the actual diff
-   and persists the verified path into contribution scope. Passing means every
-   required riscv64 job and
+   and persists the verified path into contribution scope. After the patch is
+   published, trusted code posts the worker's short factual response to each
+   addressed review item as the destination App and resolves inline review
+   threads. Conversation comments are answered but cannot be marked resolved by
+   GitHub. Passing means every required riscv64 job and
    wheel artifact satisfy the project-specific frozen topology contract.
 5. **Upstream handoff.** When the exact development head passes its frozen CI
    contract and has no debug commits, observation automatically records it as the

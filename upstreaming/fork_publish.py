@@ -130,6 +130,20 @@ def check_proposal(proposal: dict, record: dict, task: dict, *, allow_no_change:
         missing_reasons = set(task.get("reason_ids") or []) - set(proposal.get("reason_ids") or [])
         if missing_reasons:
             raise PublishRejected(f"repair proposal did not acknowledge required evidence: {sorted(missing_reasons)}")
+        required_feedback = {
+            int(item["id"])
+            for evidence in (task.get("context") or {}).get("reason_evidence") or []
+            if evidence.get("kind") == "human_relay"
+            for key in ("reviews", "comments", "conversation_comments")
+            for item in ((evidence.get("data") or {}).get(key) or [])
+            if item.get("id")
+        }
+        response_ids = [int(item["comment_id"]) for item in proposal.get("feedback_responses") or []]
+        if len(response_ids) != len(set(response_ids)):
+            raise PublishRejected("repair proposal contains duplicate feedback responses")
+        missing_feedback = required_feedback - set(response_ids)
+        if missing_feedback:
+            raise PublishRejected(f"repair proposal did not describe responses for feedback: {sorted(missing_feedback)}")
     fork = (record.get("fork") or {}).get("name") or ""
     if not fork.startswith(FORK_ORG + "/") or task["fork"] != fork:
         raise PublishRejected("task fork is not the recorded contribution fork")
