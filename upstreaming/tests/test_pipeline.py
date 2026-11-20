@@ -16,7 +16,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from upstreaming import artifact, capacity, controller, fork_publish, publisher, queue_result, reconcile, work
+from upstreaming import artifact, capacity, controller, fork_publish, publisher, queue_result, reconcile, schemas, work
 from upstreaming.tests.helpers import commit_files, contribution, git, init_repo, policy
 
 WF = ".github/workflows/upstreaming-worker.lock.yml"
@@ -305,6 +305,8 @@ class TestDispatchRecovery(unittest.TestCase):
                 self.assertEqual(rec["revision"], 2)
                 self.assertEqual(rec["active_work"]["attempt"], 2)
                 self.assertNotEqual(work.graph_id(rec["active_work"]["dedupe_key"]), self.gid)
+                for kind, staged in t.staged:
+                    schemas.validate({"contributions": "contribution", "events": "event"}.get(kind, kind), staged)
 
     def test_lost_launch_after_grace_and_unknown_queue(self):
         t = self.tick([], {}, now=datetime(2026, 11, 18, 19, 30, tzinfo=timezone.utc))
