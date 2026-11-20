@@ -458,7 +458,12 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   - release graph: the workflows and jobs that build, test and publish
     wheels, and how they are triggered;
   - existing architecture precedent: the nearest aarch64/s390x/ppc64le
-    wheel rows a riscv64 row should follow;
+    wheel rows a riscv64 row should follow. Explicitly classify whether Linux
+    architectures share one `ubuntu-latest` host through an architecture list /
+    QEMU, or use dedicated native runner rows. Recommend adding `riscv64` to the
+    existing shared list when that is the precedent; recommend
+    `ubuntu-24.04-riscv` only for an existing native-per-architecture topology or
+    a documented technical incompatibility with the established shared path;
   - fork guards: conditions such as `if: github.repository == 'owner/repo'`
     that stop CI from running on a fork;
   - contribution rules: CONTRIBUTING, commit conventions, CLA/DCO;

@@ -339,9 +339,18 @@ and analogous changes in the proposal diagnosis.
    follows the nearest existing architecture pattern in the project (for
    example an existing aarch64 or s390x wheel row). No unrelated refactors,
    formatting or dependency changes.
-2. Native riscv64 jobs use exactly `runs-on: ubuntu-24.04-riscv`. QEMU jobs
-   follow the project's own x86_64/aarch64 host precedent. Manylinux image
-   `manylinux_2_39_riscv64`, musllinux `musllinux_1_2_riscv64`.
+2. Follow the upstream project's existing architecture runner topology. If one
+   `ubuntu-latest` job already builds aarch64, ppc64le or other non-host Linux
+   architectures from `CIBW_ARCHS_LINUX` (typically through QEMU), add `riscv64`
+   to that same list and keep the shared runner. Do not introduce
+   `ubuntu-24.04-riscv`, runner-specific expressions, or QEMU exclusions in that
+   topology. Add a dedicated `runs-on: ubuntu-24.04-riscv` row only when the
+   project already uses separate native runner rows for its native architecture
+   builds, or when documented technical evidence proves its established
+   emulation/cross-build path cannot support riscv64. Follow the nearest existing
+   architecture precedent rather than preferring RISE runners. When required by
+   the selected topology, use `manylinux_2_39_riscv64` and
+   `musllinux_1_2_riscv64` images.
 3. Temporary fork-only changes that let CI run on the fork (for example
    removing `if: github.repository == 'owner/repo'`) go in a separate commit
    whose subject starts with `{debug}`. Never when `upstream_facing` is true.
