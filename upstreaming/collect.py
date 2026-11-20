@@ -153,8 +153,34 @@ def tracking_issues(api: Api, contributions: Iterable[dict], intake_issues: list
     return issues
 
 
+_EXPLANATION_WORDS = re.compile(
+    r"(?:^|\b)(?:why|what happened|how did|explain|explanation|diagnose|diagnosis)(?:\b|$)", re.IGNORECASE)
+_REPAIR_WORDS = re.compile(
+    r"(?:^|\b)(?:fix|update|add|remove|revert|disable|enable|implement|rename|delete|replace|set|use)(?:\b|$)",
+    re.IGNORECASE)
+_NO_CHANGE = re.compile(
+    r"(?:do not|don't|dont|please do not|please don't)\s+(?:make\s+(?:any\s+)?)?(?:change|changes|modify|edit|push|commit|fix)\b|"
+    r"\bwithout\s+(?:changing|modifying|editing|pushing|committing|fixing)\b|"
+    r"\bno\s+(?:code\s+)?changes?\b",
+    re.IGNORECASE)
+
+
+def review_comment_intent(body: str) -> str:
+    """Conservatively distinguish an explanation request from repair feedback.
+
+    An explicit no-change instruction is authoritative. Otherwise only a clear
+    explanatory question with no repair verb is treated as inquiry-only.
+    """
+    text = " ".join(body.split())
+    if _NO_CHANGE.search(text):
+        return "inquiry"
+    if _EXPLANATION_WORDS.search(text) and not _REPAIR_WORDS.search(text):
+        return "inquiry"
+    return "repair"
+
+
 def development_review_feedback(api: Api, record: dict, authority: Iterable[int]) -> dict | None:
-    """Return new authorized review feedback bound to the current fork head."""
+    """Return new authorized review feedback or inquiries bound to the current fork head."""
     fork = record.get("fork") or {}
     number = fork.get("pr_number")
     head = fork.get("head_sha")
@@ -191,7 +217,7 @@ def development_review_feedback(api: Api, record: dict, authority: Iterable[int]
                               "review_id": comment.get("pull_request_review_id"),
                               "reviewer": (comment.get("user") or {}).get("login"),
                               "path": comment.get("path"), "line": comment.get("line") or comment.get("original_line"),
-                              "commit_id": head})
+                              "commit_id": head, "intent": review_comment_intent(body)})
     conversation_items = []
     for comment in conversation:
         body = (comment.get("body") or "").strip()
@@ -203,14 +229,23 @@ def development_review_feedback(api: Api, record: dict, authority: Iterable[int]
         conversation_items.append({"id": comment["id"], "body": body[:8000],
                                    "url": comment.get("html_url"),
                                    "reviewer": (comment.get("user") or {}).get("login"),
-                                   "created_at": created, "commit_id": head})
+                                   "created_at": created, "commit_id": head,
+                                   "intent": review_comment_intent(body)})
     if not review_items and not comment_items and not conversation_items:
         return None
-    return {"reviews": review_items, "comments": comment_items,
-            "conversation_comments": conversation_items,
+    inquiry_comments = [item for item in comment_items if item["intent"] == "inquiry"]
+    inquiry_conversation = [item for item in conversation_items if item["intent"] == "inquiry"]
+    repair_comments = [item for item in comment_items if item["intent"] == "repair"]
+    repair_conversation = [item for item in conversation_items if item["intent"] == "repair"]
+    return {"reviews": review_items, "comments": repair_comments,
+            "conversation_comments": repair_conversation,
             "review_ids": [item["id"] for item in review_items],
-            "comment_ids": [item["id"] for item in comment_items],
-            "conversation_comment_ids": [item["id"] for item in conversation_items]}
+            "comment_ids": [item["id"] for item in repair_comments],
+            "conversation_comment_ids": [item["id"] for item in repair_conversation],
+            "inquiry_comments": inquiry_comments,
+            "inquiry_conversation_comments": inquiry_conversation,
+            "inquiry_comment_ids": [item["id"] for item in inquiry_comments],
+            "inquiry_conversation_comment_ids": [item["id"] for item in inquiry_conversation]}
 
 
 def upstream_snapshots(api: Api, contributions: Iterable[dict], issues: list[dict], policy: dict) -> dict[str, dict]:

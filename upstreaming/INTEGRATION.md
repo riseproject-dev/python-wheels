@@ -205,6 +205,11 @@ requests `development_repair`. Pending feedback evidence survives branch-head
 changes and is attached to every repair until exact-head CI is green. A repair
 proposal must acknowledge every required evidence record. Observation does not
 replace `fix_needed` before the controller can allocate that repair.
+Explanation-only comments are classified separately as `human_inquiry` when
+an explicit no-change instruction is present, or when they clearly request an
+explanation without a repair instruction. They are marked processed and retained
+for audit, but do not bump the revision, set `fix_needed`, enter pending repair
+evidence, invalidate CI or handoff state, or claim that repair was requested.
 
 Exact-head CI is green only when every executed build or test job succeeds, in
 addition to the target riscv64 job and wheel contract. Failures confined to

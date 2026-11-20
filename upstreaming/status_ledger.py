@@ -25,7 +25,8 @@ MESSAGES = {
     "dossier_parked": "Verified the investigation dossier and parked the contribution because no bounded patch is actionable.",
     "fork_provisioned": "Provisioned and verified the contribution fork and exact `riscv64` base.",
     "development_pr_created": "Created and verified the same-fork development PR.",
-    "development_review_feedback": "Recorded authorized development-PR review feedback and requested repair.",
+    "development_review_feedback": "Recorded authorized development-PR change feedback and requested repair.",
+    "development_review_inquiry": "Recorded an authorized explanation-only development-PR comment. No repair was requested; lifecycle state is unchanged.",
     "handoff_ready": "Accepted clean-head development CI and reached human upstream handoff.",
 }
 

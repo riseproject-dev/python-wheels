@@ -49,6 +49,16 @@ class TestStatusLedger(unittest.TestCase):
         self.assertIn("/upstreaming force-develop revision=4", body)
         self.assertIn("<!-- upstreaming-ledger:", body)
 
+    def test_explanation_only_ledger_does_not_claim_repair(self):
+        record = contribution(phase="development", activity="fix_needed", revision=8, paused=True)
+        event = lifecycle._event(record, record, "development_review_inquiry", "observation",
+                                 "inquiry-1", NOW, False)
+        event["sequence"] = 14
+        body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertIn("explanation-only", body)
+        self.assertIn("No repair was requested", body)
+        self.assertNotIn("requested repair", body)
+
     def test_development_pr_ledger_offers_dossier_refresh(self):
         record = contribution(phase="development", activity="fix_needed", revision=7)
         event = lifecycle._event(record, record, "activity", "observation", None, NOW, False)

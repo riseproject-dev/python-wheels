@@ -35,6 +35,16 @@ class TestCommandFeedback(unittest.TestCase):
         body = command_feedback.render(receipt, original)
         self.assertIn('/upstreaming restart revision=7 reason="..."', body)
 
+    def test_repeated_pause_explains_that_pause_remains_effective(self):
+        receipt = {"comment_id": 42, "actor": {"login": "luhenry"}, "verb": "pause",
+                   "reason": "already paused", "revision": 8}
+        original = {"body": '/upstreaming pause revision=8 reason="saving tokens"',
+                    "user": {"login": "luhenry"}}
+        body = command_feedback.render(receipt, original)
+        self.assertIn("the contribution remains paused", body)
+        self.assertIn('/upstreaming resume revision=8 reason="..."', body)
+        self.assertNotIn("**Expected form:**", body)
+
     def test_rejected_command_is_quoted_pings_author_and_shows_expected_form(self):
         receipt = {"schema_version": 1, "command_id": "comment-42", "command_version": 1,
                    "comment_id": 42, "issue_number": 1138, "actor": {"id": 660779, "login": "luhenry"},
