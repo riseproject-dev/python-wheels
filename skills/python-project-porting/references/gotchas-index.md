@@ -1383,9 +1383,9 @@ The porting gotchas (566 of them) live in [`references/gotchas/`](gotchas/), spl
 - **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
   answer plain `404`, not `302` — the check logic is unaffected, but scripts written
   against the old behavior may misread it.
-- **354** — `PIP_PREFER_BINARY` (not `PIP_ONLY_BINARY`) is the fix when our registry
-  hosts a wheel for only *some* matrix interpreters and an unpinned test dependency
-  keeps resolving to a newer, wheel-less release.
+- **354**: Pair the RISE `PIP_EXTRA_INDEX_URL` with `PIP_PREFER_BINARY=true` (not
+  `PIP_ONLY_BINARY`) when public PyPI lacks a compatible build/test dependency wheel or an
+  unpinned dependency otherwise resolves to a newer, wheel-less release.
 - **375** — `uv` can reject a real `abi3` wheel resolved by name from an index as "has no
   usable wheels" even though the identical wheel installs fine as a local file.
 - **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
