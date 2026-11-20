@@ -231,6 +231,7 @@ class TestPublicationRetry(unittest.TestCase):
         # The rejection makes it fix_needed and the same tick requests one repair.
         self.assertEqual([e["task"] for e in t.report["requested_effects"]], ["development_repair"])
         self.assertEqual(self.final(t)["active_work"]["task"], "development_repair")
+        self.assertEqual(self.final(t)["revision"], self.rec["revision"] + 1)
         # Stale: no repair is requested (the next tick re-plans from the new head).
         stale = dict(rej, failure_class="stale", publication_artifact_id=10)
         t = self.tick(dict(self.rec, last_ci_evidence_id="ev-1"), [stale])
@@ -291,10 +292,19 @@ class TestDispatchRecovery(unittest.TestCase):
     def test_running_dispatcher_or_claimed_work_is_left_alone(self):
         t = self.tick([self.drun(1, None, "in_progress")], {})
         self.assertEqual(t.report["dispatch_relaunch"], [])
-        for state in ("claimed", "completed", "cancelled"):
-            t = self.tick([self.drun(1)], {self.gid: state})
-            self.assertEqual(t.report["dispatch_relaunch"], [], state)
-            self.assertEqual(t.report["dispatch_recovery"], [], state)
+        t = self.tick([self.drun(1)], {self.gid: "claimed"})
+        self.assertEqual(t.report["dispatch_relaunch"], [])
+        self.assertEqual(t.report["dispatch_recovery"], [])
+
+    def test_terminal_work_gets_new_revision_and_graph_instead_of_resubmission(self):
+        for state in ("completed", "cancelled"):
+            with self.subTest(state):
+                t = self.tick([self.drun(1)], {self.gid: state})
+                self.assertEqual(len(t.report["dispatch_relaunch"]), 1)
+                rec = self.final(t)
+                self.assertEqual(rec["revision"], 2)
+                self.assertEqual(rec["active_work"]["attempt"], 2)
+                self.assertNotEqual(work.graph_id(rec["active_work"]["dedupe_key"]), self.gid)
 
     def test_lost_launch_after_grace_and_unknown_queue(self):
         t = self.tick([], {}, now=datetime(2026, 11, 18, 19, 30, tzinfo=timezone.utc))

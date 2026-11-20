@@ -160,7 +160,8 @@ class TestForkPublish(_ForkFixture, unittest.TestCase):
     def test_preflight(self):
         ok = fork_publish.preflight(record=self.record, task=self.task, proposal=self.proposal(),
                                     fork_lookup=lambda n: {"id": 2, "full_name": n, "archived": False})
-        self.assertEqual(ok, {"publish": True, "reason": None, "fork_name": "proj", "failure_class": None})
+        self.assertEqual(ok, {"publish": True, "status": "publish", "reason": None,
+                              "fork_name": "proj", "failure_class": None})
         moved = fork_publish.preflight(record=self.record, task=self.task, proposal=self.proposal(),
                                        fork_lookup=lambda n: {"id": 77, "full_name": n})
         self.assertFalse(moved["publish"])
@@ -168,6 +169,12 @@ class TestForkPublish(_ForkFixture, unittest.TestCase):
                                          proposal=self.proposal(outcome="blocked", operation="none"),
                                          fork_lookup=lambda n: {"id": 2, "full_name": n})
         self.assertFalse(blocked["publish"])
+        unchanged = fork_publish.preflight(
+            record=self.record, task=self.task,
+            proposal=self.proposal(outcome="no_change", operation="none", patch_digest=None, changed_files=[]),
+            fork_lookup=lambda _n: self.fail("no-change must not mint or inspect a fork token"))
+        self.assertEqual(unchanged["status"], "no_change")
+        self.assertFalse(unchanged["publish"])
 
     def test_rewrite_squash_and_empty_removal(self):
         # First land two commits, then squash them via a rewrite onto the base.

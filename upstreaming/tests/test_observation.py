@@ -27,10 +27,12 @@ def job(i, name, conclusion="success", status="completed", labels=("ubuntu-24.04
 
 
 class TestCiEvidence(unittest.TestCase):
-    def ev(self, runs, jobs, expected=("p-1-cp312-cp312-manylinux_2_39_riscv64.whl",), produced=None):
+    def ev(self, runs, jobs, expected=("p-1-cp312-cp312-manylinux_2_39_riscv64.whl",), produced=None,
+           required_runner_label=None):
         return ci_evidence.evaluate(runs=runs, jobs_by_run=jobs, head_sha=SHA_A,
                                     required_job_patterns=["riscv64"], expected_wheels=list(expected),
-                                    produced_wheels=list(expected if produced is None else produced))
+                                    produced_wheels=list(expected if produced is None else produced),
+                                    required_runner_label=required_runner_label)
 
     def test_passed(self):
         self.assertEqual(self.ev([run(1)], {1: [job(1, "wheels riscv64")]}).state, "passed")
@@ -59,8 +61,11 @@ class TestCiEvidence(unittest.TestCase):
     def test_pending_and_label(self):
         self.assertEqual(self.ev([run(1)], {1: [job(1, "wheels riscv64", status="in_progress",
                                                      conclusion=None)]}).state, "pending")
-        v = self.ev([run(1)], {1: [job(1, "wheels riscv64", labels=("riscv-custom",))]})
-        self.assertEqual(v.state, "failed")
+        qemu = self.ev([run(1)], {1: [job(1, "wheels riscv64", labels=("ubuntu-latest",))]})
+        self.assertEqual(qemu.state, "passed")
+        native_contract = self.ev([run(1)], {1: [job(1, "wheels riscv64", labels=("riscv-custom",))]},
+                                  required_runner_label="ubuntu-24.04-riscv")
+        self.assertEqual(native_contract.state, "failed")
 
 
 USAGE = Path.home() / "notes/ecosystem-wg/python/python-wheels-upstreaming/research/2026-11-17-reassessment/runner-usage.json"

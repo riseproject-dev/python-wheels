@@ -83,6 +83,14 @@ workflow environments. `park` stops work without a human prompt; an authorized
 `force-develop` command can override it with an exact revision, class, paths and
 reason. Human approval remains mandatory at upstream handoff.
 
+CI acceptance follows each project's established architecture topology. A
+`target_contract` may require a dedicated runner label; shared `ubuntu-latest`
+QEMU/cross matrices deliberately omit that constraint while still requiring the
+riscv64 job and retained wheel artifact. Validated worker `no_change` outcomes
+remain `no_change`, rather than becoming publication failures. Terminal queue
+Work is never resubmitted with the same graph ID: bounded retries receive a new
+revision, and exhaustion parks the contribution so it cannot block the queue.
+
 The remaining orchestration gap was automatic continuation: rollout-disabled
 controller triggers left a completed investigation in `agent_running` until a
 manual tick. Current local workflow changes trigger reconciliation when an

@@ -41,7 +41,7 @@ def latest_attempts(runs: Iterable[dict]) -> list[dict]:
 
 def evaluate(*, runs: list[dict], jobs_by_run: dict[int, list[dict]], head_sha: str,
              required_job_patterns: list[str], expected_wheels: list[str],
-             produced_wheels: list[str], native_label: str = "ubuntu-24.04-riscv") -> CiVerdict:
+             produced_wheels: list[str], required_runner_label: str | None = None) -> CiVerdict:
     """Decide what the observed CI establishes for ``head_sha``.
 
     ``required_job_patterns`` are substrings identifying the wheel jobs the
@@ -76,10 +76,11 @@ def evaluate(*, runs: list[dict], jobs_by_run: dict[int, list[dict]], head_sha: 
             else:
                 v.executed_jobs.append(j)
             labels = j.get("labels") or []
-            if native_label not in labels:
-                # Wheel success means built natively on the standard label
-                # (QEMU or cross jobs on other runners do not count).
-                v.problems.append(f"job {j['name']!r} failed the native-runner check: labels {labels}")
+            if required_runner_label and required_runner_label not in labels:
+                # Runner topology is project-specific. Dedicated native rows
+                # pin a label; shared QEMU/cross matrices deliberately do not.
+                v.problems.append(
+                    f"job {j['name']!r} failed runner-label check {required_runner_label!r}: labels {labels}")
     missing_wheels = sorted(set(expected_wheels) - set(produced_wheels))
     if missing_wheels:
         v.problems.append(f"expected wheels not produced: {', '.join(missing_wheels)}")

@@ -431,11 +431,13 @@ def wheel_names_from_artifacts(snap: CiSnapshot) -> list[str]:
 
 
 def evaluate_snapshot(snap: CiSnapshot, *, required_job_patterns: list[str], expected_wheels: list[str],
-                      produced_wheels: list[str] | None = None) -> ci_evidence.CiVerdict:
+                      produced_wheels: list[str] | None = None,
+                      required_runner_label: str | None = None) -> ci_evidence.CiVerdict:
     produced = produced_wheels if produced_wheels is not None else wheel_names_from_artifacts(snap)
     return ci_evidence.evaluate(runs=snap.runs, jobs_by_run=snap.jobs_by_run, head_sha=snap.head_sha,
                                 required_job_patterns=required_job_patterns,
-                                expected_wheels=expected_wheels, produced_wheels=produced)
+                                expected_wheels=expected_wheels, produced_wheels=produced,
+                                required_runner_label=required_runner_label)
 
 
 # --------------------------------------------------------------------------
