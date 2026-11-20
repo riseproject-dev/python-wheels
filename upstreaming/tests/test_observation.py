@@ -51,6 +51,15 @@ class TestCiEvidence(unittest.TestCase):
         self.assertEqual(self.ev([run(1, sha=SHA_B)], {}).state, "missing")
         self.assertEqual(self.ev([run(1, conclusion="action_required")], {}).state, "access_wait")
 
+    def test_any_executed_test_failure_blocks_green_but_publish_failure_does_not(self):
+        jobs = {1: [job(1, "wheels riscv64"), job(2, "tests (3.12)", conclusion="failure")]}
+        verdict = self.ev([run(1)], jobs)
+        self.assertEqual(verdict.state, "failed")
+        self.assertIn("tests (3.12)", " ".join(verdict.problems))
+        publish_only = {1: [job(1, "wheels riscv64"),
+                            job(2, "validate-release-request", conclusion="failure")]}
+        self.assertEqual(self.ev([run(1)], publish_only).state, "passed")
+
     def test_rerun_uses_latest_attempt(self):
         runs = [run(1, attempt=1), run(1, attempt=2)]
         v = self.ev(runs, {1: [job(1, "wheels riscv64")]})
@@ -327,6 +336,15 @@ class TestTick(unittest.TestCase):
         eff = res.requested_effects[0]
         self.assertEqual(eff["effect_contract"]["ref"], "riscv64")
         self.assertEqual(eff["expected_head"], SHA_A)
+
+    def test_repair_carries_pending_review_and_latest_ci_evidence(self):
+        rec = contribution(activity="fix_needed")
+        rec["pending_feedback_evidence_ids"] = ["review-1", "review-2"]
+        rec["last_ci_evidence_id"] = "ci-3"
+        res = controller.tick(contributions={"a": rec}, operations={}, consumed={}, projects={},
+                              policy=policy(), inputs=controller.Inputs(
+                                  now=T, pressure=capacity.Pressure(ok=True)))
+        self.assertEqual(res.requested_effects[0]["reason_ids"], ["review-1", "review-2", "ci-3"])
 
     def test_uncertain_operation_holds_work(self):
         rec = contribution(activity="fix_needed")

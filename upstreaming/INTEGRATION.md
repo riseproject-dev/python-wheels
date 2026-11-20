@@ -177,7 +177,17 @@ represented only by an opaque ID. Controller observation polls the recorded
 same-fork PR for current-head reviews and inline comments from configured
 authority actor IDs. New feedback is persisted once as `human_relay` evidence,
 records processed review/comment IDs, bumps the revision and automatically
-requests `development_repair`.
+requests `development_repair`. Pending feedback evidence survives branch-head
+changes and is attached to every repair until exact-head CI is green. A repair
+proposal must acknowledge every required evidence record. Observation does not
+replace `fix_needed` before the controller can allocate that repair.
+
+Exact-head CI is green only when every executed build or test job succeeds, in
+addition to the target riscv64 job and wheel contract. Failures confined to
+package publishing, upload, or release-request validation remain non-blocking in
+the intentionally credentialless destination organization. A build or test
+failure discovered after handoff automatically returns the contribution to
+revisioned development repair.
 
 Previously merged implementation:
 

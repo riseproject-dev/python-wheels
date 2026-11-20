@@ -269,8 +269,10 @@ pipeline. The trusted pre-agent step wrote the immutable task to
 branch in `./fork`. The task's
 `plan` field says what to do; `reason_ids` and `context` say why. For repair and
 revision tasks, read every entry in `context.reason_evidence` before researching
-or editing. Treat its concrete review feedback and rejected-change descriptions
-as required repair constraints, then verify them against repository history.
+or editing. Treat every concrete review comment, PR conversation comment and
+rejected-change description in every reason evidence record as a required
+repair constraint, then verify each one against repository history. A repair is
+incomplete if even one requested change is omitted.
 
 Only process the compiler-supplied `work_queue_assignment`. It has exactly
 one Claim; use its `handle` as `claim_handle` on every safe output and on
@@ -290,7 +292,11 @@ call: `{"path": "upstreaming-out"}` (the native handler names the artifact
   `append` (new commits on top of `expected_head`), `rewrite` (a series on
   top of `base_sha`, only if `allowed_operations` contains it) or `none`.
   `changed_files` lists every path your series changes relative to
-  `expected_head` (for `rewrite`, relative to it as well).
+  `expected_head` (for `rewrite`, relative to it as well). For a repair or
+  revision task, `reason_ids` must include every task `reason_ids` entry. In
+  `diagnosis`, include a checklist with one item per review or CI constraint,
+  the exact change that addresses it, and how you verified that change. Never
+  claim `no_change` while required review feedback remains unresolved.
   `patch_digest` is the sha256 of `patches.mbox`, or null.
 - `patches.mbox`: for `append`, `git -C fork format-patch --stdout <expected_head>`;
   for `rewrite`, `git -C fork format-patch --stdout <base_sha>`. Omit it

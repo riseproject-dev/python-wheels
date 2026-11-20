@@ -125,6 +125,10 @@ def check_proposal(proposal: dict, record: dict, task: dict, *, allow_no_change:
         raise PublishRejected("proposal/task/record contribution mismatch")
     if proposal["expected_revision"] != task["revision"] or proposal["expected_head"] != task["expected_head"]:
         raise PublishRejected("proposal does not answer the admitted task (revision/head)")
+    if task.get("task") in ("development_repair", "upstream_revision"):
+        missing_reasons = set(task.get("reason_ids") or []) - set(proposal.get("reason_ids") or [])
+        if missing_reasons:
+            raise PublishRejected(f"repair proposal did not acknowledge required evidence: {sorted(missing_reasons)}")
     fork = (record.get("fork") or {}).get("name") or ""
     if not fork.startswith(FORK_ORG + "/") or task["fork"] != fork:
         raise PublishRejected("task fork is not the recorded contribution fork")
