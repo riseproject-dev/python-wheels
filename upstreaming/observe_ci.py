@@ -110,7 +110,10 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
                                                          + feedback["comment_ids"])[-512:],
                            processed_pr_conversation_comment_ids=(
                                (cur.get("processed_pr_conversation_comment_ids") or [])
-                               + feedback["conversation_comment_ids"])[-512:], updated_at=now)
+                               + feedback["conversation_comment_ids"])[-512:],
+                           pending_feedback_evidence_ids=list(dict.fromkeys(
+                               (cur.get("pending_feedback_evidence_ids") or []) + [eid]))[-64:],
+                           updated_at=now)
                 schemas.validate("contribution", cur)
                 obs.staged.extend([("evidence", ev), ("contributions", cur),
                                    ("events", lifecycle._event(before, cur, "development_review_feedback",
@@ -118,6 +121,12 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
                 entry["review_feedback"] = eid
                 obs.report.append(entry)
                 continue
+        # A requested repair must reach the controller before another CI poll
+        # can reclassify the same unchanged head as waiting for a human.
+        if cur["activity"] == "fix_needed":
+            entry["note"] = "repair remains required"
+            obs.report.append(entry)
+            continue
         upstream_facing = cur.get("upstream_pr") is not None
         repo_for_ci = cur["upstream"]["full_name"] if upstream_facing else fork
         snap = collect.ci_snapshot(api, repo_for_ci, head["head"])
@@ -153,10 +162,27 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
             if verdict.state == "passed" and cur.get("last_ci_evidence_id") != eid:
                 cur = dict(cur, last_ci_evidence_id=eid, updated_at=now)
                 obs.staged.append(("contributions", cur))
+            if verdict.state == "failed" and cur["phase"] == "handoff":
+                before = cur
+                moved = lifecycle.transition(cur, "development", cause_type="observation",
+                                             cause_id=eid, now=now)
+                status = lifecycle.observe_status(moved.record, activity="fix_needed", now=now)
+                cur = dict(status.record, last_ci_evidence_id=eid,
+                           pending_human_action=None, updated_at=now)
+                schemas.validate("contribution", cur)
+                obs.staged.append(("contributions", cur))
+                if moved.event:
+                    obs.staged.append(("events", moved.event))
+                if status.event:
+                    obs.staged.append(("events", status.event))
+                entry["activity"] = "fix_needed"
+                entry["returned_to_development"] = True
+                obs.report.append(entry)
+                continue
             if verdict.state == "passed" and cur["phase"] == "development" and not cur.get("debug_commits"):
                 before = cur
                 cur = dict(cur, phase="handoff", activity="waiting_human", active_work=None,
-                           clean_head_sha=head["head"],
+                           clean_head_sha=head["head"], pending_feedback_evidence_ids=[],
                            handoff_request={"command_id": f"observation-{eid}", "head": head["head"],
                                             "revision": cur["revision"]},
                            pending_human_action={"kind": "approve_handoff", "requested_at": now,

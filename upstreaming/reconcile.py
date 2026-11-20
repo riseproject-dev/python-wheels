@@ -478,6 +478,19 @@ def tick(api: collect.Api, snap: Snapshot, *, policy: dict, now: datetime,
     out.report["dispatch_recovery"] = rep
     out.report["dispatch_relaunch"] = relaunch
 
+    # 1d. Carry durable review constraints across head changes. Older records
+    # predate pending_feedback_evidence_ids, so recover their already-ingested
+    # human relay evidence before selecting another repair.
+    for key, c in list(contributions.items()):
+        feedback_ids = sorted(
+            e["evidence_id"] for e in snap.evidence.values()
+            if e.get("kind") == "human_relay" and e.get("contribution_id") == c["contribution_id"])
+        if feedback_ids and "pending_feedback_evidence_ids" not in c \
+                and c["phase"] in {"development", "handoff", "upstream_review"}:
+            c = dict(c, pending_feedback_evidence_ids=feedback_ids[-64:])
+            contributions[key] = c
+            out.staged.append(("contributions", c))
+
     # 2. Live branch and CI observation.
     if observe:
         contracts = {e["evidence_id"]: e for e in snap.evidence.values() if e.get("kind") == "target_contract"}

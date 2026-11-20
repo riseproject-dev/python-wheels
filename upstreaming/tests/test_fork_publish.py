@@ -61,6 +61,12 @@ class _ForkFixture:
         p.update(over)
         return p
 
+    def test_repair_must_acknowledge_every_reason_evidence_record(self):
+        self.task["task"] = "development_repair"
+        with self.assertRaisesRegex(fork_publish.PublishRejected, "did not acknowledge"):
+            fork_publish.check_proposal(self.proposal(reason_ids=[]), self.record, self.task)
+        fork_publish.check_proposal(self.proposal(reason_ids=["ci-1"]), self.record, self.task)
+
     def fork_head(self):
         return git(self.fork_bare, "rev-parse", "refs/heads/riscv64")
 

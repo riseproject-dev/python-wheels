@@ -15,6 +15,9 @@ from typing import Any, Iterable
 
 SUCCESS = "success"
 NOT_EXECUTED = frozenset({"skipped", "neutral", "cancelled", "action_required", "stale", None})
+# Disposable forks intentionally lack package publishing credentials and OIDC
+# trust. Those jobs may fail naturally and do not invalidate build/test CI.
+CREDENTIALLESS_JOB_MARKERS = ("publish", "upload_pypi", "upload to pypi", "validate-release-request")
 
 
 @dataclass
@@ -59,6 +62,13 @@ def evaluate(*, runs: list[dict], jobs_by_run: dict[int, list[dict]], head_sha: 
         return v
     all_jobs = [j for r in relevant for j in jobs_by_run.get(r["id"], [])]
     pending = [j for j in all_jobs if j.get("status") != "completed"]
+    blocking_failures = [
+        j for j in all_jobs
+        if job_executed(j) and j.get("conclusion") != SUCCESS
+        and not any(marker in j.get("name", "").lower() for marker in CREDENTIALLESS_JOB_MARKERS)
+    ]
+    for j in blocking_failures:
+        v.problems.append(f"job {j['name']!r} failed ({j.get('conclusion')})")
     # Wheel success means the wheel was built on the native runner label: a
     # job only matches when its name matches and it ran on that label.
     for pat in required_job_patterns:
