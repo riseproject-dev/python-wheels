@@ -26,3 +26,4 @@
 - Replaced the rejected workflow-glob approach with complete dossier path coverage and natural-language review scope extension: human-relay-backed repairs may add exact changed paths, which trusted publication verifies and persists without requiring command syntax.
 - Added an exact-path repair compatibility flag for live contributions whose dossiers predate mandatory path coverage; new dossiers are marked coverage-complete and cannot use the legacy allowance.
 - Added trusted post-publication review acknowledgements: every addressed feedback item gets a short App-authored response, inline review threads are resolved after replying, and marker/readback checks make retries idempotent.
+- Added a fast ungrouped controller job that idempotently reacts `+1` to visible `/upstreaming` tracking-issue comments while leaving all parsing, authorization and command effects in serialized reconciliation.

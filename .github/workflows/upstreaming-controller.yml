@@ -38,15 +38,44 @@ on:
     types: [completed]
   workflow_dispatch:
 
-concurrency:
-  group: python-wheels-upstreaming-controller
-  cancel-in-progress: false
-
 permissions:
   contents: read
   issues: read
 
 jobs:
+  # Fast receipt only. This job has no needs and no concurrency group, so a
+  # queued reconciliation run cannot delay acknowledgement. Command parsing,
+  # authority checks, rejection feedback and state changes remain in reconcile.
+  acknowledge-command:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request == null
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: control-token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-dev
+          repositories: python-wheels
+          permission-issues: write
+      - name: Acknowledge a visible upstreaming command
+        env:
+          GH_TOKEN: ${{ steps.control-token.outputs.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          first=$(printf '%s\n' "$COMMENT_BODY" | awk 'NF { print; exit }')
+          [[ "$first" == /upstreaming\ * ]] || exit 0
+          reactions=$(gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions?per_page=100")
+          jq -e 'any(.[]; .content == "+1" and .user.login == "riseproject-dev[bot]")' \
+            <<<"$reactions" >/dev/null || \
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" \
+              -f content='+1' >/dev/null
+
   # Cheap filter: unsupported events, missing labels and comments that are
   # not commands never reach the tick.
   filter:
@@ -102,6 +131,9 @@ jobs:
     needs: filter
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:
+      group: python-wheels-upstreaming-controller
+      cancel-in-progress: false
     environment: upstreaming-state
     permissions:
       contents: read
