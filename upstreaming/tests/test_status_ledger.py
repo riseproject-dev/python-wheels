@@ -55,9 +55,21 @@ class TestStatusLedger(unittest.TestCase):
                                  "review-1", NOW, True)
         event["sequence"] = 14
         body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertTrue(body.startswith("**Upstreaming r8 · development/paused**"))
         self.assertIn("Repair remains pending", body)
         self.assertIn("no Work was requested because the contribution is paused", body)
         self.assertNotIn("and requested repair", body)
+        self.assertNotIn("/upstreaming pause revision=8", body)
+        self.assertIn("/upstreaming resume revision=8", body)
+
+    def test_pause_event_explains_retained_pending_state(self):
+        record = contribution(phase="development", activity="fix_needed", revision=10, paused=True)
+        event = lifecycle._event(record, record, "command:pause", "command", "comment-1", NOW, False)
+        event["sequence"] = 15
+        body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertTrue(body.startswith("**Upstreaming r10 · development/paused**"))
+        self.assertIn("Paused automatic work", body)
+        self.assertIn("Pending lifecycle activity `fix needed` is retained until resume", body)
 
     def test_unpaused_feedback_ledger_reports_repair_request(self):
         record = contribution(phase="development", activity="fix_needed", revision=8, paused=False)

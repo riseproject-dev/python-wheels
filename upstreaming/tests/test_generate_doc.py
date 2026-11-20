@@ -40,6 +40,14 @@ class TestGenerateUpstreamingDoc(unittest.TestCase):
         self.assertIn("Development (waiting for CI)", rendered)
         self.assertEqual(rendered.count("\n| [example/"), 2)
 
+    def test_paused_state_is_primary_status_with_pending_activity_context(self):
+        self.assertEqual(generate_doc.status_label({"phase": "development", "activity": "fix_needed",
+                                                    "paused": True}),
+                         "Paused (Development; fix needed pending)")
+        self.assertEqual(generate_doc.status_label({"phase": "development", "activity": "idle",
+                                                    "paused": True}),
+                         "Paused (Development)")
+
 
 if __name__ == "__main__":
     unittest.main()
