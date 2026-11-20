@@ -56,63 +56,35 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build openbabel-wheel ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      OPENBABEL_WHEEL_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "openbabel-wheel"
+      version: "${{ matrix.version }}"
+      repository: "njzjz/openbabel-wheel"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
 
-    steps:
-      - name: Checkout openbabel-wheel ${{ env.OPENBABEL_WHEEL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: njzjz/openbabel-wheel
-          ref: v${{ env.OPENBABEL_WHEEL_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch openbabel-wheel source
-        run: git apply python-wheels/patches/openbabel-wheel/${{ env.OPENBABEL_WHEEL_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # manylinux2014's cairo-devel is too old for OpenBabel's depiction code,
-          # which is why upstream builds cairo 1.15.14 from source instead; Rocky 10
-          # (this image) ships a current one, so installing it directly is simpler
-          # and the other libraries it names (freetype/libpng/pixman) come in as its
-          # dependencies. Rocky 10 packages no RapidJSON, so OpenBabel would download the
-          # 1.1.0 release, whose GenericStringRef::operator= assigns its const length member
-          # (a hard error under GCC 14); its find_package(RapidJSON) picks up a master
-          # revision's headers from /usr/include instead.
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y libxml2-devel zlib-devel cairo-devel &&
-            curl -fsSL https://github.com/Tencent/rapidjson/archive/${{ env.RAPIDJSON_REV }}.tar.gz | tar xz -C /tmp &&
-            cp -r /tmp/rapidjson-${{ env.RAPIDJSON_REV }}/include/rapidjson /usr/include/
-          # The FetchContent'd OpenBabel's obutil.h calls clock() without <ctime>, which GCC 14's
-          # libstdc++ no longer includes transitively (openbabel master now includes it directly).
-          # The patched tree would otherwise get a dirty setuptools_scm version (gotcha 31).
-          CIBW_ENVIRONMENT_LINUX: >-
-            CXXFLAGS="-include ctime"
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OPENBABEL_WHEEL=${{ env.OPENBABEL_WHEEL_VERSION }}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: openbabel-wheel-${{ env.OPENBABEL_WHEEL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # manylinux2014's cairo-devel is too old for OpenBabel's depiction code,
+      # which is why upstream builds cairo 1.15.14 from source instead; Rocky 10
+      # (this image) ships a current one, so installing it directly is simpler
+      # and the other libraries it names (freetype/libpng/pixman) come in as its
+      # dependencies. Rocky 10 packages no RapidJSON, so OpenBabel would download the
+      # 1.1.0 release, whose GenericStringRef::operator= assigns its const length member
+      # (a hard error under GCC 14); its find_package(RapidJSON) picks up a master
+      # revision's headers from /usr/include instead.
+      cibw-before-all-linux: "dnf install -y libxml2-devel zlib-devel cairo-devel && curl -fsSL https://github.com/Tencent/rapidjson/archive/24b5e7a8b27f42fa16b96fc70aade9106cf7102f.tar.gz | tar xz -C /tmp && cp -r /tmp/rapidjson-24b5e7a8b27f42fa16b96fc70aade9106cf7102f/include/rapidjson /usr/include/"
+      # The FetchContent'd OpenBabel's obutil.h calls clock() without <ctime>, which GCC 14's
+      # libstdc++ no longer includes transitively (openbabel master now includes it directly).
+      # The patched tree would otherwise get a dirty setuptools_scm version (gotcha 31).
+      cibw-environment-linux: "CXXFLAGS=\"-include ctime\" SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OPENBABEL_WHEEL=${{ matrix.version }}"
 
   publish:
     name: Publish openbabel-wheel ${{ matrix.version }}

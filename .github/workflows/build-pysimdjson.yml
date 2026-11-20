@@ -51,50 +51,25 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pysimdjson ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
-
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PYSIMDJSON_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout pysimdjson v${{ env.PYSIMDJSON_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: TkTech/pysimdjson
-          ref: v${{ env.PYSIMDJSON_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pysimdjson"
+      version: "${{ matrix.version }}"
+      repository: "TkTech/pysimdjson"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
 
       # The extension statically compiles the vendored, Apache-2.0-licensed
       # simdjson.cpp/simdjson.h; upstream's own setup.cfg lists only its MIT LICENSE.
-      - name: Patch pysimdjson source
-        run: git apply python-wheels/patches/pysimdjson/${{ env.PYSIMDJSON_VERSION }}/00*.patch
+      patches: true
 
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as md; got = sorted(p.name for p in md.files('pysimdjson') if '.dist-info/licenses/' in str(p) and p.name); assert got == ['LICENSE', 'LICENSE.simdjson'], got"
-            && pytest {project}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pysimdjson-${{ env.PYSIMDJSON_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-test-command: "python -c \"import importlib.metadata as md; got = sorted(p.name for p in md.files('pysimdjson') if '.dist-info/licenses/' in str(p) and p.name); assert got == ['LICENSE', 'LICENSE.simdjson'], got\" && pytest {project}/tests"
 
   publish:
     name: Publish pysimdjson ${{ matrix.version }}

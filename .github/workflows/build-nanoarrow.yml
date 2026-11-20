@@ -49,58 +49,31 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build nanoarrow ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      NANOARROW_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout arrow-nanoarrow ${{ env.NANOARROW_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: apache/arrow-nanoarrow
-          ref: apache-arrow-nanoarrow-${{ env.NANOARROW_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "nanoarrow"
+      version: "${{ matrix.version }}"
+      repository: "apache/arrow-nanoarrow"
+      ref: "apache-arrow-nanoarrow-${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
 
       # Upstream's wheels ship no licence files, nor those of the statically linked zstd/lz4.
-      - name: Patch arrow-nanoarrow source
-        run: git apply python-wheels/patches/nanoarrow/${{ env.NANOARROW_VERSION }}/*.patch
+      patches: true
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,pyarrow
-          # The test extra (as in upstream's python.yaml) needs numpy/pyarrow, which have no musllinux_riscv64 wheels.
-          CIBW_TEST_EXTRAS: ${{ matrix.platform == 'manylinux' && 'test' || '' }}
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as md; lic = {p.name for p in md.files('nanoarrow') if '.dist-info/licenses/' in str(p)}; assert {'LICENSE.txt', 'NOTICE.txt', 'LICENSE.zstd', 'LICENSE.lz4'} <= lic, lic"
-            && pytest {package}/tests -vv
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: nanoarrow-${{ env.NANOARROW_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-package-dir: "python"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,pyarrow"
+      # The test extra (as in upstream's python.yaml) needs numpy/pyarrow, which have no musllinux_riscv64 wheels.
+      cibw-test-extras: "${{ matrix.platform == 'manylinux' && 'test' || '' }}"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -c \"import importlib.metadata as md; lic = {p.name for p in md.files('nanoarrow') if '.dist-info/licenses/' in str(p)}; assert {'LICENSE.txt', 'NOTICE.txt', 'LICENSE.zstd', 'LICENSE.lz4'} <= lic, lic\" && pytest {package}/tests -vv"
 
   publish:
     name: Publish nanoarrow ${{ matrix.version }}

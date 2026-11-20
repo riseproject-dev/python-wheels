@@ -56,116 +56,87 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build skia-python ${{ matrix.version }} cp312/cp313/cp314/cp314t-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 1440  # full Skia (Chromium's 2D graphics engine) compile from source
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "skia-python"
+      version: "${{ matrix.version }}"
+      repository: "kyamagu/skia-python"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "manylinux_riscv64"
+      timeout-minutes: 1440
 
-    env:
-      SKIA_PYTHON_VERSION: ${{ matrix.version }}
+      checkout-submodules: "true"
 
-    steps:
-      - name: Checkout skia-python v${{ env.SKIA_PYTHON_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: kyamagu/skia-python
-          ref: v${{ env.SKIA_PYTHON_VERSION }}
-          submodules: true
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch skia-python source
-        run: git apply python-wheels/patches/skia-python/${{ env.SKIA_PYTHON_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64 cp314t-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_SKIP: "*musllinux*"
-          # Reimplements scripts/build_Linux.sh: its `yum install ... ninja-build gn`
-          # comes from EPEL, which the riscv64 manylinux image doesn't carry (gotcha
-          # 51), so ninja comes from its own riscv64 PyPI wheel and gn is bootstrapped
-          # from source (gn.googlesource.com/gn's build/gen.py has no arch-specific
-          # logic). Everything after that mirrors the upstream script unchanged.
-          CIBW_BEFORE_ALL_LINUX: |
-            set -e
-            dnf install -y --enablerepo=crb \
-              fontconfig-devel mesa-libGL-devel mesa-libEGL-devel libglvnd-devel \
-              mesa-libGLES-devel libglvnd mesa-libGLES mesa-libEGL libglvnd-egl \
-              mesa-dri-drivers expat-devel libxml2-devel libstdc++-static
-            python3 -m pip install ninja
-            # Full clone, not --depth 1: build/gen.py's GenerateLastCommitPosition
-            # runs `git describe --match initial-commit` unconditionally whenever
-            # .git exists, which needs the full history back to that root tag.
-            git clone https://gn.googlesource.com/gn /tmp/gn
-            git -C /tmp/gn checkout ${{ env.GN_REVISION }}
-            # build/gen.py defaults CXX to clang++ on any non-MSVC/AIX/Windows
-            # host when CXX isn't set; this image has no clang, only GCC.
-            # --allow-warnings: gn's own source only gets clang -Werror
-            # coverage upstream; GCC's -Wcomment fires on an ASCII-art
-            # diagram in a doc-comment (src/gn/header_checker.h).
-            (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
-            install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
-            # BUILD.gn's `skia.h` action hardcodes rebase_path("//bin/gn") --
-            # the path our patched bin/fetch-gn would have populated -- so PATH
-            # alone isn't enough; put the same binary there too.
-            install -D -m 0755 /tmp/gn/out/gn skia/bin/gn
-            cd skia
-            patch -R -p1 < ../patch/0001-Make-SkPath-immutable-on-GN-build.patch
-            patch -R -p1 < ../patch/0001-Disable-legacy-PNG-encoding-decoding-in-SkPicture.patch
-            patch -p1 < ../patch/skia-m144-minimize-download.patch
-            patch -p1 < ../patch/skia-m132-colrv1-freetype.diff
-            patch -p1 < ../patch/skia-m132-egl-runtime.diff
-            python3 tools/git-sync-deps
-            gn gen out/Release --args="
-            is_official_build=true
-            skia_enable_svg=true
-            skia_use_vulkan=true
-            skia_use_system_libjpeg_turbo=false
-            skia_use_system_libwebp=false
-            skia_use_system_libpng=false
-            skia_use_system_icu=false
-            skia_use_system_harfbuzz=false
-            skia_use_system_freetype2=false
-            extra_cflags_cc=[\"-frtti\"]
-            extra_ldflags=[\"-lrt\"]
-            "
-            ninja -C out/Release
-            cd ..
-          CIBW_BEFORE_BUILD: pip install pybind11 numpy
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # The test stage's `pip install pillow` otherwise resolves to a PyPI
-          # release with no riscv64 wheel and compiles it from source, which
-          # fails for lack of jpeg headers in the image; take the registry's
-          # prebuilt riscv64 wheel instead.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=pillow
-          CIBW_TEST_REQUIRES: pytest pillow glfw
-          # moderngl (used only by test_GrDirectContext_MakeGL_EGL) has no riscv64 wheel;
-          # test_GrDirectContext_MakeGL_GLX has no display-unavailable skip at all, unlike
-          # the fixture-based 'gpu'-parametrized tests 0001-*.patch covers. No xvfb-run:
-          # Rocky 10 ships no Xvfb (nor Xvnc/weston) at all, so there's no display to run
-          # one under. -k, not --deselect {project}/...: gotcha 14 -- a path-based
-          # --deselect silently no-ops since pytest reports nodeids relative to its
-          # rootdir, not the absolute {project} path.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest {project}/tests
-            -k "not test_GrDirectContext_MakeGL_EGL and not test_GrDirectContext_MakeGL_GLX"
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libEGL.so.1 -w {dest_dir} {wheel}"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: skia-python-${{ env.SKIA_PYTHON_VERSION }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64 cp314t-manylinux_riscv64"
+      cibw-skip: "*musllinux*"
+      # Reimplements scripts/build_Linux.sh: its `yum install ... ninja-build gn`
+      # comes from EPEL, which the riscv64 manylinux image doesn't carry (gotcha
+      # 51), so ninja comes from its own riscv64 PyPI wheel and gn is bootstrapped
+      # from source (gn.googlesource.com/gn's build/gen.py has no arch-specific
+      # logic). Everything after that mirrors the upstream script unchanged.
+      cibw-before-all-linux: |
+        set -e
+        dnf install -y --enablerepo=crb \
+          fontconfig-devel mesa-libGL-devel mesa-libEGL-devel libglvnd-devel \
+          mesa-libGLES-devel libglvnd mesa-libGLES mesa-libEGL libglvnd-egl \
+          mesa-dri-drivers expat-devel libxml2-devel libstdc++-static
+        python3 -m pip install ninja
+        # Full clone, not --depth 1: build/gen.py's GenerateLastCommitPosition
+        # runs `git describe --match initial-commit` unconditionally whenever
+        # .git exists, which needs the full history back to that root tag.
+        git clone https://gn.googlesource.com/gn /tmp/gn
+        git -C /tmp/gn checkout 0625da07ece7b1a374ec0719b6f40ebe3d0950c1
+        # build/gen.py defaults CXX to clang++ on any non-MSVC/AIX/Windows
+        # host when CXX isn't set; this image has no clang, only GCC.
+        # --allow-warnings: gn's own source only gets clang -Werror
+        # coverage upstream; GCC's -Wcomment fires on an ASCII-art
+        # diagram in a doc-comment (src/gn/header_checker.h).
+        (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
+        install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
+        # BUILD.gn's `skia.h` action hardcodes rebase_path("//bin/gn") --
+        # the path our patched bin/fetch-gn would have populated -- so PATH
+        # alone isn't enough; put the same binary there too.
+        install -D -m 0755 /tmp/gn/out/gn skia/bin/gn
+        cd skia
+        patch -R -p1 < ../patch/0001-Make-SkPath-immutable-on-GN-build.patch
+        patch -R -p1 < ../patch/0001-Disable-legacy-PNG-encoding-decoding-in-SkPicture.patch
+        patch -p1 < ../patch/skia-m144-minimize-download.patch
+        patch -p1 < ../patch/skia-m132-colrv1-freetype.diff
+        patch -p1 < ../patch/skia-m132-egl-runtime.diff
+        python3 tools/git-sync-deps
+        gn gen out/Release --args="
+        is_official_build=true
+        skia_enable_svg=true
+        skia_use_vulkan=true
+        skia_use_system_libjpeg_turbo=false
+        skia_use_system_libwebp=false
+        skia_use_system_libpng=false
+        skia_use_system_icu=false
+        skia_use_system_harfbuzz=false
+        skia_use_system_freetype2=false
+        extra_cflags_cc=[\"-frtti\"]
+        extra_ldflags=[\"-lrt\"]
+        "
+        ninja -C out/Release
+        cd ..
+      cibw-before-build: "pip install pybind11 numpy"
+      # The test stage's `pip install pillow` otherwise resolves to a PyPI
+      # release with no riscv64 wheel and compiles it from source, which
+      # fails for lack of jpeg headers in the image; take the registry's
+      # prebuilt riscv64 wheel instead.
+      cibw-test-environment: "PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=pillow"
+      cibw-test-requires: "pytest pillow glfw"
+      # moderngl (used only by test_GrDirectContext_MakeGL_EGL) has no riscv64 wheel;
+      # test_GrDirectContext_MakeGL_GLX has no display-unavailable skip at all, unlike
+      # the fixture-based 'gpu'-parametrized tests 0001-*.patch covers. No xvfb-run:
+      # Rocky 10 ships no Xvfb (nor Xvnc/weston) at all, so there's no display to run
+      # one under. -k, not --deselect {project}/...: gotcha 14 -- a path-based
+      # --deselect silently no-ops since pytest reports nodeids relative to its
+      # rootdir, not the absolute {project} path.
+      cibw-test-command: "python -m pytest {project}/tests -k \"not test_GrDirectContext_MakeGL_EGL and not test_GrDirectContext_MakeGL_GLX\""
+      cibw-repair-wheel-command-linux: "auditwheel repair --exclude libEGL.so.1 -w {dest_dir} {wheel}"
 
   publish:
     name: Publish skia-python ${{ matrix.version }}

@@ -50,54 +50,31 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pytrec-eval-terrier ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PYTREC_EVAL_TERRIER_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pytrec-eval-terrier"
+      version: "${{ matrix.version }}"
+      repository: "terrierteam/pytrec_eval"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "true"
 
-    steps:
-      - name: Checkout pytrec_eval v${{ env.PYTREC_EVAL_TERRIER_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: terrierteam/pytrec_eval
-          ref: v${{ env.PYTREC_EVAL_TERRIER_VERSION }}
-          submodules: true
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pytrec_eval source
-        run: git apply python-wheels/patches/pytrec-eval-terrier/${{ env.PYTREC_EVAL_TERRIER_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy/scipy (install_requires) have no riscv64 wheels on public
-          # PyPI but are published on our own registry, needed both to build
-          # the test venv and to satisfy the wheel's own install_requires.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Same suite upstream's push.yml runs (pytest tests/*.py); named
-          # explicitly since pytrec_eval_tests.py doesn't match pytest's
-          # default collection glob for a bare directory.
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {package}/tests/pytrec_eval_tests.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pytrec-eval-terrier-${{ env.PYTREC_EVAL_TERRIER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy/scipy (install_requires) have no riscv64 wheels on public
+      # PyPI but are published on our own registry, needed both to build
+      # the test venv and to satisfy the wheel's own install_requires.
+      # Same suite upstream's push.yml runs (pytest tests/*.py); named
+      # explicitly since pytrec_eval_tests.py doesn't match pytest's
+      # default collection glob for a bare directory.
+      cibw-test-requires: "pytest"
+      cibw-test-command: "pytest {package}/tests/pytrec_eval_tests.py"
 
   publish:
     name: Publish pytrec-eval-terrier ${{ matrix.version }}

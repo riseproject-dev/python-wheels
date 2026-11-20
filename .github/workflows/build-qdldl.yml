@@ -50,57 +50,30 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build qdldl ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      QDLDL_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "qdldl"
+      version: "${{ matrix.version }}"
+      repository: "osqp/qdldl-python"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      checkout-submodules: "true"
 
-    steps:
-      - name: Checkout qdldl-python v${{ env.QDLDL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: osqp/qdldl-python
-          ref: v${{ env.QDLDL_VERSION }}
-          submodules: true
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch qdldl-python source
-        run: git apply python-wheels/patches/qdldl/${{ env.QDLDL_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy is a build-time requirement too, and has no riscv64 wheel on
-          # public PyPI; scipy is only needed at test time. Both are on our registry.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            CMAKE_GENERATOR="Unix Makefiles"
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('qdldl') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.amd'], f" &&
-            python -m pytest {project}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: qdldl-${{ env.QDLDL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy is a build-time requirement too, and has no riscv64 wheel on
+      # public PyPI; scipy is only needed at test time. Both are on our registry.
+      cibw-environment-linux: "CMAKE_GENERATOR=\"Unix Makefiles\""
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy,scipy"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -c \"import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('qdldl') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.amd'], f\" && python -m pytest {project}/tests"
 
   publish:
     name: Publish qdldl ${{ matrix.version }}

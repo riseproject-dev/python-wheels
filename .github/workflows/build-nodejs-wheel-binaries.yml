@@ -52,48 +52,25 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build nodejs-wheel-binaries ${{ matrix.version }} manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 2880  # 48h — full Node.js (V8 + ICU) compile from source; runner speed
-                            # varies enough that a prior run needed ~23h16m and the next one
-                            # was still compiling V8 objects when killed at the 24h mark
-    env:
-      NODEJS_WHEEL_BINARIES_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "nodejs-wheel-binaries"
+      version: "${{ matrix.version }}"
+      repository: "njzjz/nodejs-wheel"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "py2.py3-none-manylinux_riscv64"
+      timeout-minutes: 2880
+      # varies enough that a prior run needed ~23h16m and the next one
+      # was still compiling V8 objects when killed at the 24h mark
 
-    steps:
-      - name: Checkout nodejs-wheel v${{ env.NODEJS_WHEEL_BINARIES_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: njzjz/nodejs-wheel
-          ref: v${{ env.NODEJS_WHEEL_BINARIES_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Pass --openssl-no-asm to Node's configure on riscv64
-        run: git apply python-wheels/patches/nodejs-wheel-binaries/${{ env.NODEJS_WHEEL_BINARIES_VERSION }}/00*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # The riscv64 OpenSSL patch leaves the checkout dirty relative to
-          # the tag, so setuptools_scm (via scikit-build-core) would
-          # otherwise compute a dev version (observed: published wheels came
-          # out as 24.19.1.dev0+g<hash>.d<date> instead of the clean 24.19.0).
-          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.NODEJS_WHEEL_BINARIES_VERSION }}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: nodejs-wheel-binaries-${{ env.NODEJS_WHEEL_BINARIES_VERSION }}-py2.py3-none-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "cp312-manylinux_riscv64"
+      # The riscv64 OpenSSL patch leaves the checkout dirty relative to
+      # the tag, so setuptools_scm (via scikit-build-core) would
+      # otherwise compute a dev version (observed: published wheels came
+      # out as 24.19.1.dev0+g<hash>.d<date> instead of the clean 24.19.0).
+      cibw-environment-linux: "SETUPTOOLS_SCM_PRETEND_VERSION=${{ matrix.version }}"
 
   publish:
     name: Publish nodejs-wheel-binaries ${{ matrix.version }}

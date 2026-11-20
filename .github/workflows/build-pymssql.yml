@@ -48,62 +48,33 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pymssql ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PYMSSQL_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout pymssql v${{ env.PYMSSQL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: pymssql/pymssql
-          ref: v${{ env.PYMSSQL_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pymssql"
+      version: "${{ matrix.version }}"
+      repository: "pymssql/pymssql"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
 
       # The wheel statically links FreeTDS but ships only pymssql's own LICENSE.
-      - name: Patch pymssql source
-        run: |
-          git apply python-wheels/patches/pymssql/${{ env.PYMSSQL_VERSION }}/00*.patch
+      patches: true
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Restates upstream's [tool.cibuildwheel.linux] environment, which CIBW_ENVIRONMENT
-          # replaces wholesale; the patch above leaves the tree dirty, so pin the version.
-          CIBW_ENVIRONMENT: >-
-            PYMSSQL_FREETDS=./deps
-            LD_LIBRARY_PATH=./deps/lib
-            CFLAGS=-Wno-incompatible-pointer-types
-            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYMSSQL=${{ env.PYMSSQL_VERSION }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's before-test installs dev/requirements-test.txt, whose gevent has no
-          # riscv64 wheel anywhere; test_green.py importorskips it, so drop just that one.
-          CIBW_BEFORE_TEST: pip install pytest-subtests pytest-timeout "psutil<7.2.3" sqlalchemy
-          # No SQL Server image exists for riscv64, so the mssql_server_required tests
-          # self-skip (tests/conftest.py); assert the patched licence shipped first.
-          CIBW_TEST_COMMAND: python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('pymssql') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.freetds'], f" && pytest {project}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pymssql-${{ env.PYMSSQL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Restates upstream's [tool.cibuildwheel.linux] environment, which CIBW_ENVIRONMENT
+      # replaces wholesale; the patch above leaves the tree dirty, so pin the version.
+      cibw-environment-linux: "PYMSSQL_FREETDS=./deps LD_LIBRARY_PATH=./deps/lib CFLAGS=-Wno-incompatible-pointer-types SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYMSSQL=${{ matrix.version }}"
+      # Upstream's before-test installs dev/requirements-test.txt, whose gevent has no
+      # riscv64 wheel anywhere; test_green.py importorskips it, so drop just that one.
+      cibw-before-test: "pip install pytest-subtests pytest-timeout \"psutil<7.2.3\" sqlalchemy"
+      # No SQL Server image exists for riscv64, so the mssql_server_required tests
+      # self-skip (tests/conftest.py); assert the patched licence shipped first.
+      cibw-test-command: "python -c \"import importlib.metadata as m; f = sorted(p.name for p in m.files('pymssql') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.freetds'], f\" && pytest {project}/tests"
 
   publish:
     name: Publish pymssql ${{ matrix.version }}

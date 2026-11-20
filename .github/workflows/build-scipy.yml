@@ -49,66 +49,46 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build scipy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      SCIPY_VERSION: ${{ matrix.version }}
-
-    steps:
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "scipy"
+      version: "${{ matrix.version }}"
       # scipy is checked out at the workspace root so cibuildwheel's `{project}`
       # resolves to it, matching upstream's own wheel job.
-      - name: Checkout scipy v${{ env.SCIPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: scipy/scipy
-          ref: v${{ env.SCIPY_VERSION }}
-          submodules: true
-          persist-credentials: false
+      repository: "scipy/scipy"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 720
+      checkout-submodules: "true"
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+      patches: true
+      pre-build: |-
+        # Upstream moved this from /project/ to /project/.openblas during 1.18; read whichever
+        # the checked-out tag declares so any version builds.
+        pkgconf="$(sed -n '/\[tool.cibuildwheel.linux.environment\]/,/^\[/p' pyproject.toml \
+                   | grep -oE 'PKG_CONFIG_PATH = "[^"]*"' | head -1 | cut -d'"' -f2)"
+        test -n "$pkgconf"
+        echo "SCIPY_PKG_CONFIG_PATH=$pkgconf" >> "$GITHUB_ENV"
 
-      - name: Patch scipy source
-        run: |
-          git apply python-wheels/patches/scipy/${{ env.SCIPY_VERSION }}/00*.patch
+        while IFS='=' read -r pw_key pw_value; do
+          [[ $pw_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+          printf -v "$pw_key" '%s' "$pw_value"
+          export "$pw_key"
+        done < "$GITHUB_ENV"
 
-      # Upstream moved this from /project/ to /project/.openblas during 1.18; read whichever
-      # the checked-out tag declares so any version builds.
-      - name: Read upstream's PKG_CONFIG_PATH
-        run: |
-          pkgconf="$(sed -n '/\[tool.cibuildwheel.linux.environment\]/,/^\[/p' pyproject.toml \
-                     | grep -oE 'PKG_CONFIG_PATH = "[^"]*"' | head -1 | cut -d'"' -f2)"
-          test -n "$pkgconf"
-          echo "SCIPY_PKG_CONFIG_PATH=$pkgconf" >> "$GITHUB_ENV"
+        printf '%s\n' "PKG_CONFIG_PATH=${SCIPY_PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: build
-          # CIBW_ENVIRONMENT replaces scipy's [tool.cibuildwheel.linux.environment] table
-          # wholesale, so RUNNER_OS and PKG_CONFIG_PATH have to be restated here.
-          CIBW_ENVIRONMENT: >-
-            RUNNER_OS=Linux
-            PKG_CONFIG_PATH=${{ env.SCIPY_PKG_CONFIG_PATH }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy-openblas32,hypothesis
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: scipy-${{ env.SCIPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build-frontend: "build"
+      # CIBW_ENVIRONMENT replaces scipy's [tool.cibuildwheel.linux.environment] table
+      # wholesale, so RUNNER_OS and PKG_CONFIG_PATH have to be restated here.
+      cibw-environment-linux: "RUNNER_OS=Linux PIP_ONLY_BINARY=numpy,scipy-openblas32,hypothesis"
+      cibw-environment-pass-linux: "PKG_CONFIG_PATH"
 
   publish:
     name: Publish scipy ${{ matrix.version }}

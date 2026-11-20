@@ -59,58 +59,33 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build tree-sitter-languages ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      TREE_SITTER_LANGUAGES_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tree-sitter-languages"
+      version: "${{ matrix.version }}"
+      repository: "grantjenks/py-tree-sitter-languages"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
 
-    steps:
-      - name: Checkout tree-sitter-languages v${{ env.TREE_SITTER_LANGUAGES_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: grantjenks/py-tree-sitter-languages
-          ref: v${{ env.TREE_SITTER_LANGUAGES_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch tree-sitter-languages source
-        run: git apply python-wheels/patches/tree-sitter-languages/${{ env.TREE_SITTER_LANGUAGES_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream runs `pip install -e . && python build.py`, which resolves
-          # tree-sitter to whatever is newest; install the pinned one instead.
-          CIBW_BEFORE_BUILD: pip install "${{ env.CYTHON_SPEC }}" "${{ env.TREE_SITTER_SPEC }}" "${{ env.SETUPTOOLS_SPEC }}" wheel && python build.py
-          # setup.py imports Cython at module level and declares no build-system
-          # table, so the build has to see the preinstalled one.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_TEST_REQUIRES: pytest ${{ env.TREE_SITTER_SPEC }}
-          # Assert the patched license_files glob still ships the 46 vendored
-          # grammar licences, then run upstream's suite over all 48 grammars.
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as md; f = [str(p) for p in md.files('tree_sitter_languages') if '.dist-info/licenses/vendor/' in str(p)]; assert len(f) == 46, f"
-            && pytest --showlocals {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tree-sitter-languages-${{ env.TREE_SITTER_LANGUAGES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Upstream runs `pip install -e . && python build.py`, which resolves
+      # tree-sitter to whatever is newest; install the pinned one instead.
+      cibw-before-build: "pip install \"cython==3.3.0\" \"tree-sitter<0.22\" \"setuptools<79\" wheel && python build.py"
+      # setup.py imports Cython at module level and declares no build-system
+      # table, so the build has to see the preinstalled one.
+      cibw-build-frontend: "pip; args: --no-build-isolation"
+      cibw-test-requires: "pytest tree-sitter<0.22"
+      # Assert the patched license_files glob still ships the 46 vendored
+      # grammar licences, then run upstream's suite over all 48 grammars.
+      cibw-test-command: "python -c \"import importlib.metadata as md; f = [str(p) for p in md.files('tree_sitter_languages') if '.dist-info/licenses/vendor/' in str(p)]; assert len(f) == 46, f\" && pytest --showlocals {package}/tests"
 
   publish:
     name: Publish tree-sitter-languages ${{ matrix.version }}

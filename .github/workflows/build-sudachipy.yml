@@ -56,8 +56,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build sudachipy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -65,58 +63,34 @@ jobs:
         # build is unproven here, so drop just the one test module that needs it.
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      SUDACHIPY_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "sudachipy"
+      version: "${{ matrix.version }}"
+      repository: "WorksApplications/sudachi.rs"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
 
-    steps:
-      - name: Checkout sudachi.rs ${{ env.SUDACHIPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: WorksApplications/sudachi.rs
-          ref: v${{ env.SUDACHIPY_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch sudachi.rs source
-        run: git apply python-wheels/patches/sudachipy/${{ env.SUDACHIPY_VERSION }}/*.patch
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: .
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_SKIP: '*-musllinux_*'  # rustup.rs has no riscv64 musl toolchain
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cibuildwheel's audit step needs a host `uv`, which the self-hosted
-          # runner doesn't have; override upstream's build-frontend = "build[uv]"
-          # (CLAUDE.md gotcha 13).
-          CIBW_BUILD_FRONTEND: build
-          # No Rust in the manylinux image; install it and put cargo on PATH. Skips
-          # upstream's PGO before-all (external corpus download + release build of
-          # sudachi-cli), which would otherwise re-run once per matrix leg here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT: PATH="$PATH:$HOME/.cargo/bin" PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # pypi.riseproject.dev's newest tokenizers (0.22.2) is behind PyPI's
-          # (0.23.2, no riscv64 wheel); pin so pip resolves to ours.
-          CIBW_TEST_REQUIRES: ${{ case(endsWith(matrix.python, 't'), 'sudachidict_core', '') || 'tokenizers==0.22.2 sudachidict_core' }}
-          # Upstream's own build_and_test.sh test command, run against {package}
-          # (gotcha 5) since cibuildwheel tests from an empty scratch directory.
-          CIBW_TEST_COMMAND: >-
-            bash -c "cd {package}/python && ${{ case(endsWith(matrix.python, 't'), 'rm tests/test_pretokenizers.py &&', '') }} python -m unittest discover -s tests -v"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: sudachipy-${{ env.SUDACHIPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-skip: "*-musllinux_*"
+      # cibuildwheel's audit step needs a host `uv`, which the self-hosted
+      # runner doesn't have; override upstream's build-frontend = "build[uv]"
+      # (CLAUDE.md gotcha 13).
+      cibw-build-frontend: "build"
+      # No Rust in the manylinux image; install it and put cargo on PATH. Skips
+      # upstream's PGO before-all (external corpus download + release build of
+      # sudachi-cli), which would otherwise re-run once per matrix leg here.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # pypi.riseproject.dev's newest tokenizers (0.22.2) is behind PyPI's
+      # (0.23.2, no riscv64 wheel); pin so pip resolves to ours.
+      cibw-test-requires: "${{ case(endsWith(matrix.python, 't'), 'sudachidict_core', '') || 'tokenizers==0.22.2 sudachidict_core' }}"
+      # Upstream's own build_and_test.sh test command, run against {package}
+      # (gotcha 5) since cibuildwheel tests from an empty scratch directory.
+      cibw-test-command: "bash -c \"cd {package}/python && ${{ case(endsWith(matrix.python, 't'), 'rm tests/test_pretokenizers.py &&', '') }} python -m unittest discover -s tests -v\""
 
   publish:
     name: Publish sudachipy ${{ matrix.version }}

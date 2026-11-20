@@ -55,68 +55,39 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build praat-parselmouth ${{ matrix.version }} cp312/cp313/cp314-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 480  # ~1M lines of vendored Praat C/C++ (clapack, gsl, glpk, flac, portaudio, espeak, vorbis, opusfile)
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "praat-parselmouth"
+      version: "${{ matrix.version }}"
+      repository: "YannickJadoul/Parselmouth"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "manylinux_riscv64"
+      timeout-minutes: 480
 
-    env:
-      PARSELMOUTH_VERSION: ${{ matrix.version }}
+      # praat/ and pybind11/ are vendored directly; only extern/fmt is a real submodule.
+      checkout-submodules: "recursive"
 
-    steps:
-      - name: Checkout Parselmouth v${{ env.PARSELMOUTH_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: YannickJadoul/Parselmouth
-          ref: v${{ env.PARSELMOUTH_VERSION }}
-          # praat/ and pybind11/ are vendored directly; only extern/fmt is a real submodule.
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch praat-parselmouth source
-        run: git apply python-wheels/patches/praat-parselmouth/${{ env.PARSELMOUTH_VERSION }}/*.patch
-
-      - name: Pin cmake build dependency
+      patches: true
+      pre-build: |-
         # Mirrors upstream's own CI (which rewrites pyproject.toml the same way at
         # build time): cmake 4 dropped compatibility with cmake_minimum_required
         # versions below 3.5, which the vendored pybind11 (3.5) and fmt (3.1...3.18)
         # CMakeLists.txt rely on.
-        run: sed -i 's/"cmake>=3.18"/"cmake>=3.18,<4"/' pyproject.toml
+        sed -i 's/"cmake>=3.18"/"cmake>=3.18,<4"/' pyproject.toml
 
-      - name: Build and test wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          # No musllinux riscv64 numpy wheel on the registry yet (workflow-anatomy.md).
-          CIBW_SKIP: "*musllinux*"
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Builds the heavy vendored `praat` static lib once for the whole job
-          # instead of once per interpreter (gotcha 15), exactly like upstream's
-          # own CIBW_BEFORE_ALL.
-          CIBW_BEFORE_ALL_LINUX: |
-            cmake -S . -B build_dependencies
-            cmake --build build_dependencies --target praat -j "$(nproc)"
-          CIBW_BEFORE_BUILD: rm -rf _skbuild
-          CIBW_ENVIRONMENT: >-
-            PARSELMOUTH_EXTRA_CMAKE_ARGS="-DPREBUILT_DEPENDENCIES=$(pwd)/build_dependencies"
-            CMAKE_BUILD_PARALLEL_LEVEL=4
-            PIP_ONLY_BINARY=numpy,cmake
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: "pytest<8 pytest-lazy-fixture tgt future"
-          CIBW_TEST_COMMAND: pytest {project}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: praat-parselmouth-${{ env.PARSELMOUTH_VERSION }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # No musllinux riscv64 numpy wheel on the registry yet (workflow-anatomy.md).
+      cibw-skip: "*musllinux*"
+      # Builds the heavy vendored `praat` static lib once for the whole job
+      # instead of once per interpreter (gotcha 15), exactly like upstream's
+      # own CIBW_BEFORE_ALL.
+      cibw-before-all-linux: |
+        cmake -S . -B build_dependencies
+        cmake --build build_dependencies --target praat -j "$(nproc)"
+      cibw-before-build: "rm -rf _skbuild"
+      cibw-environment-linux: "PARSELMOUTH_EXTRA_CMAKE_ARGS=\"-DPREBUILT_DEPENDENCIES=$(pwd)/build_dependencies\" CMAKE_BUILD_PARALLEL_LEVEL=4 PIP_ONLY_BINARY=numpy,cmake"
+      cibw-test-requires: "pytest<8 pytest-lazy-fixture tgt future"
+      cibw-test-command: "pytest {project}/tests"
 
   publish:
     name: Publish praat-parselmouth ${{ matrix.version }}

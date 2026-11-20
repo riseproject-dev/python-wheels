@@ -51,66 +51,36 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pynini ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PYNINI_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pynini"
+      version: "${{ matrix.version }}"
+      repository: "kylebgorman/pynini"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 180
 
-    steps:
-      - name: Checkout pynini v${{ env.PYNINI_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: kylebgorman/pynini
-          ref: v${{ env.PYNINI_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/pynini/${{ env.PYNINI_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # pynini links a system OpenFst rather than bundling it; build it the same
-          # way upstream's own manylinux Dockerfile does (third_party/Dockerfile).
-          CIBW_BEFORE_ALL_LINUX: |
-            set -eux
-            curl -fsSL -o /tmp/openfst.tar.gz "https://www.openfst.org/twiki/pub/FST/FstDownload/openfst-${{ env.OPENFST_VERSION }}.tar.gz"
-            tar -xzf /tmp/openfst.tar.gz -C /tmp
-            cd /tmp/openfst-${{ env.OPENFST_VERSION }}
-            ./configure --enable-grm
-            make -j"$(nproc)"
-            make install
-            ldconfig
-          CIBW_TEST_REQUIRES: absl-py
-          CIBW_TEST_COMMAND: >-
-            python -c "import pynini; print(pynini.__file__, pynini.__version__)" &&
-            python -c "import importlib.metadata as m; l = sorted(p.name for p in m.files('pynini') if '.dist-info/licenses/' in str(p)); assert l == ['AUTHORS', 'LICENSE', 'LICENSE.openfst'], l" &&
-            cd {project} &&
-            rc=0 &&
-            for t in tests/*_test.py; do
-            [ "$t" = tests/chatspeak_model_test.py ] || python "$t" || rc=1;
-            done;
-            exit $rc
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pynini-${{ env.PYNINI_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # pynini links a system OpenFst rather than bundling it; build it the same
+      # way upstream's own manylinux Dockerfile does (third_party/Dockerfile).
+      cibw-before-all-linux: |
+        set -eux
+        curl -fsSL -o /tmp/openfst.tar.gz "https://www.openfst.org/twiki/pub/FST/FstDownload/openfst-1.8.4.tar.gz"
+        tar -xzf /tmp/openfst.tar.gz -C /tmp
+        cd /tmp/openfst-1.8.4
+        ./configure --enable-grm
+        make -j"$(nproc)"
+        make install
+        ldconfig
+      cibw-test-requires: "absl-py"
+      cibw-test-command: "python -c \"import pynini; print(pynini.__file__, pynini.__version__)\" && python -c \"import importlib.metadata as m; l = sorted(p.name for p in m.files('pynini') if '.dist-info/licenses/' in str(p)); assert l == ['AUTHORS', 'LICENSE', 'LICENSE.openfst'], l\" && cd {project} && rc=0 && for t in tests/*_test.py; do [ \"$t\" = tests/chatspeak_model_test.py ] || python \"$t\" || rc=1; done; exit $rc"
 
   publish:
     name: Publish pynini ${{ matrix.version }}

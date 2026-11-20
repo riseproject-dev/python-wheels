@@ -51,35 +51,24 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build selectolax ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      SELECTOLAX_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout selectolax v${{ env.SELECTOLAX_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: rushter/selectolax
-          ref: v${{ env.SELECTOLAX_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "selectolax"
+      version: "${{ matrix.version }}"
+      repository: "rushter/selectolax"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      checkout-submodules: "true"
 
       # Vendored modest (LGPL-2.1) and lexbor (Apache-2.0) compile straight into
       # the extensions; upstream's wheel ships only its own LICENSE (gotcha 44).
-      - name: Patch selectolax source
-        run: git apply python-wheels/patches/selectolax/${{ env.SELECTOLAX_VERSION }}/*.patch
+      patches: true
 
       # musllinux is dropped: all 4 interpreters segfault (SIGSEGV, exit 139) in
       # tests/test_encoding.py::test_http_equiv_content_type_is_honored, a plain charset-
@@ -88,21 +77,10 @@ jobs:
       # in the lexbor bump this release carries; upstream's own release workflow never runs
       # the test suite against its musllinux wheels, so a musl-only memory bug like this
       # would ship there unnoticed. Revisit on a future selectolax release.
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_COMMAND: python -m pytest tests -v
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: selectolax-${{ env.SELECTOLAX_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      cibw-test-command: "python -m pytest tests -v"
 
   publish:
     name: Publish selectolax ${{ matrix.version }}

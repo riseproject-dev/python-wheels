@@ -50,69 +50,35 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build python-fcl ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PYTHON_FCL_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "python-fcl"
+      version: "${{ matrix.version }}"
+      repository: "berkeleyautomation/python-fcl"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
 
-    steps:
-      - name: Checkout python-fcl v${{ env.PYTHON_FCL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: berkeleyautomation/python-fcl
-          ref: v${{ env.PYTHON_FCL_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply -v python-wheels/patches/python-fcl/${{ env.PYTHON_FCL_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # build_dependencies/install_linux.sh builds eigen/libccd/octomap/fcl from
-          # source; the license copies are appended here since CIBW_BEFORE_ALL_LINUX
-          # fully replaces pyproject.toml's own before-all rather than extending it.
-          # -DBUILD_TESTING=OFF skips fcl's own test-binary build (not shipped in the
-          # wheel either way, and it otherwise adds ~25min per interpreter).
-          CIBW_BEFORE_ALL_LINUX: >-
-            sed -i '/^cd fcl$/,/^cd \.\.$/ s/^\$CMAKE \.[[:space:]]*$/$CMAKE . -DBUILD_TESTING=OFF/' build_dependencies/install_linux.sh &&
-            bash build_dependencies/install_linux.sh &&
-            cp deps/fcl/LICENSE /project/LICENSE.fcl &&
-            cp deps/libccd/BSD-LICENSE /project/LICENSE.libccd &&
-            cp deps/octomap/octomap/LICENSE.txt /project/LICENSE.octomap
-          # numpy: our registry is one patch release behind PyPI's latest (gotcha 84).
-          # cmake: install_linux.sh pip-installs an exact-pinned cmake==3.31.6, which
-          # our registry also carries; PIP_ONLY_BINARY keeps it off a source bootstrap.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=cmake,numpy
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m;
-            n={p.name for p in m.files('python-fcl') if '.dist-info/licenses/' in str(p)};
-            assert n == {'LICENSE', 'LICENSE.fcl', 'LICENSE.libccd', 'LICENSE.octomap'}, n" &&
-            pytest {project}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: python-fcl-${{ env.PYTHON_FCL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # build_dependencies/install_linux.sh builds eigen/libccd/octomap/fcl from
+      # source; the license copies are appended here since CIBW_BEFORE_ALL_LINUX
+      # fully replaces pyproject.toml's own before-all rather than extending it.
+      # -DBUILD_TESTING=OFF skips fcl's own test-binary build (not shipped in the
+      # wheel either way, and it otherwise adds ~25min per interpreter).
+      cibw-before-all-linux: "sed -i '/^cd fcl$/,/^cd \\.\\.$/ s/^\\$CMAKE \\.[[:space:]]*$/$CMAKE . -DBUILD_TESTING=OFF/' build_dependencies/install_linux.sh && bash build_dependencies/install_linux.sh && cp deps/fcl/LICENSE /project/LICENSE.fcl && cp deps/libccd/BSD-LICENSE /project/LICENSE.libccd && cp deps/octomap/octomap/LICENSE.txt /project/LICENSE.octomap"
+      # numpy: our registry is one patch release behind PyPI's latest (gotcha 84).
+      # cmake: install_linux.sh pip-installs an exact-pinned cmake==3.31.6, which
+      # our registry also carries; PIP_ONLY_BINARY keeps it off a source bootstrap.
+      cibw-environment-linux: "PIP_ONLY_BINARY=cmake,numpy"
+      cibw-test-requires: "pytest"
+      cibw-test-command: "python -c \"import importlib.metadata as m; n={p.name for p in m.files('python-fcl') if '.dist-info/licenses/' in str(p)}; assert n == {'LICENSE', 'LICENSE.fcl', 'LICENSE.libccd', 'LICENSE.octomap'}, n\" && pytest {project}/tests"
 
   publish:
     name: Publish python-fcl ${{ matrix.version }}

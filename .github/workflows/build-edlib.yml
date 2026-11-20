@@ -53,69 +53,40 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build edlib ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      EDLIB_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "edlib"
+      version: "${{ matrix.version }}"
+      repository: "Martinsos/edlib"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
 
-    steps:
-      - name: Checkout edlib ${{ env.EDLIB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: Martinsos/edlib
-          ref: ${{ env.EDLIB_VERSION }}
-          persist-credentials: false
+      patches: true
+      pre-build: |-
+        # setup.py's Extension() sources/include_dirs are relative to itself and
+        # expect a local edlib/ subdir (edlib/src/edlib.cpp, edlib/include/edlib.h)
+        # -- exactly what bindings/python/Makefile's own `edlib` target populates by
+        # copying the top-level C++ core in before invoking cibuildwheel.
+        cp -r edlib bindings/python/edlib
+        cp LICENSE bindings/python/LICENSE
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch edlib source
-        run: git apply python-wheels/patches/edlib/${{ env.EDLIB_VERSION }}/00*.patch
-
-      # setup.py's Extension() sources/include_dirs are relative to itself and
-      # expect a local edlib/ subdir (edlib/src/edlib.cpp, edlib/include/edlib.h)
-      # -- exactly what bindings/python/Makefile's own `edlib` target populates by
-      # copying the top-level C++ core in before invoking cibuildwheel.
-      - name: Copy the edlib C++ core and LICENSE into the Python binding dir
-        run: |
-          cp -r edlib bindings/python/edlib
-          cp LICENSE bindings/python/LICENSE
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: bindings/python
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # setup.py builds from the pre-generated edlib.bycython.cpp, which
-          # isn't checked in (upstream's own Makefile regenerates it before
-          # every build too); no pyproject.toml means no long_description
-          # source either (README.rst is cog-generated, requires a built wheel).
-          # {package}, not a bare filename: before-build's cwd is {project}
-          # (the whole checkout), not {package} (gotcha 5).
-          CIBW_BEFORE_BUILD: >-
-            pip install cython &&
-            cython --cplus {package}/edlib.pyx -o {package}/edlib.bycython.cpp
-          CIBW_ENVIRONMENT: EDLIB_OMIT_README_RST=1
-          CIBW_TEST_COMMAND: python3 {package}/test.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: edlib-${{ env.EDLIB_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-package-dir: "bindings/python"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # setup.py builds from the pre-generated edlib.bycython.cpp, which
+      # isn't checked in (upstream's own Makefile regenerates it before
+      # every build too); no pyproject.toml means no long_description
+      # source either (README.rst is cog-generated, requires a built wheel).
+      # {package}, not a bare filename: before-build's cwd is {project}
+      # (the whole checkout), not {package} (gotcha 5).
+      cibw-before-build: "pip install cython && cython --cplus {package}/edlib.pyx -o {package}/edlib.bycython.cpp"
+      cibw-environment-linux: "EDLIB_OMIT_README_RST=1"
+      cibw-test-command: "python3 {package}/test.py"
 
   publish:
     name: Publish edlib ${{ matrix.version }}

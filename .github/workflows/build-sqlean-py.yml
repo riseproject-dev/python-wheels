@@ -49,54 +49,31 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build sqlean-py ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      SQLEAN_PY_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "sqlean-py"
+      version: "${{ matrix.version }}"
+      repository: "nalgeon/sqlean.py"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 30
 
-    steps:
-      - name: Checkout sqlean-py ${{ env.SQLEAN_PY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: nalgeon/sqlean.py
-          ref: ${{ env.SQLEAN_PY_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch sqlean-py source
-        run: git apply python-wheels/patches/sqlean-py/${{ env.SQLEAN_PY_VERSION }}/00*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors upstream's `download-sources` job: sqlite/sqlean sources
-          # aren't checked in, they're fetched at build time (Makefile).
-          CIBW_BEFORE_BUILD: >-
-            dnf install -y unzip &&
-            make prepare-src download-sqlite download-sqlean
-          CIBW_TEST_SOURCES: tests setup.py README.md
-          # tests/extensions.py imports setup.py (for SQLEAN_VERSION), which
-          # imports setuptools; the test venv doesn't have it otherwise.
-          CIBW_TEST_REQUIRES: setuptools
-          CIBW_TEST_COMMAND: python -m tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: sqlean-py-${{ env.SQLEAN_PY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Mirrors upstream's `download-sources` job: sqlite/sqlean sources
+      # aren't checked in, they're fetched at build time (Makefile).
+      cibw-before-build: "dnf install -y unzip && make prepare-src download-sqlite download-sqlean"
+      cibw-test-sources: "tests setup.py README.md"
+      # tests/extensions.py imports setup.py (for SQLEAN_VERSION), which
+      # imports setuptools; the test venv doesn't have it otherwise.
+      cibw-test-requires: "setuptools"
+      cibw-test-command: "python -m tests"
 
   publish:
     name: Publish sqlean-py ${{ matrix.version }}

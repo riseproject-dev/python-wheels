@@ -62,8 +62,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build baseten-performance-client ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -95,81 +93,53 @@ jobs:
               cp311-manylinux_riscv64 cp312-manylinux_riscv64
               cp313-manylinux_riscv64 cp314-manylinux_riscv64
 
-    env:
-      BASETEN_PERFORMANCE_CLIENT_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "baseten-performance-client"
+      version: "${{ matrix.version }}"
+      repository: "basetenlabs/truss"
+      ref: "${{ fromJSON('{\"0.1.14\": \"6a5f24a2fd07c35206d7e76adc90a68c84473136\", \"0.1.15\": \"185866ce763269d9c312de58b0936ae83f6d15b4\", \"0.1.15.post1\": \"0256eb6cab8e9f79fba26a6ab1f0a6d588280cf8\", \"0.1.16\": \"de48abed5328636704f0b5a9925dd0f7cace8826\"}')[matrix.version] }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 360
 
-    steps:
-      - name: Checkout truss for ${{ env.BASETEN_PERFORMANCE_CLIENT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: basetenlabs/truss
-          ref: ${{ fromJSON(env.BASETEN_PERFORMANCE_CLIENT_REFS)[env.BASETEN_PERFORMANCE_CLIENT_VERSION] }}
-          persist-credentials: false
+      patches: true
+      pre-build: |-
+        export BASETEN_PERFORMANCE_CLIENT_VERSION='${{ matrix.version }}'
 
-      - name: Check the checkout is the requested version
-        run: grep -qx "version = \"${BASETEN_PERFORMANCE_CLIENT_VERSION}\"" baseten-performance-client/python_bindings/pyproject.toml
+        grep -qx "version = \"${BASETEN_PERFORMANCE_CLIENT_VERSION}\"" baseten-performance-client/python_bindings/pyproject.toml
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch baseten-performance-client source
-        run: git apply python-wheels/patches/baseten-performance-client/${{ env.BASETEN_PERFORMANCE_CLIENT_VERSION }}/00*.patch
-
-      - name: Stage LICENSE beside python_bindings' pyproject.toml
         # maturin globs LICEN[CS]E* relative to the pyproject directory,
         # which is baseten-performance-client/python_bindings -- so
         # upstream's published wheel carries no licence text at all.
-        run: cp LICENSE baseten-performance-client/python_bindings/LICENSE
+        cp LICENSE baseten-performance-client/python_bindings/LICENSE
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: baseten-performance-client/python_bindings
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # The crate's default features build both rustls (resolves to
-          # ring, no riscv64 issue) and native-tls, whose openssl-sys
-          # vendors and compiles OpenSSL from source. The image's minimal
-          # perl-interpreter lacks FindBin/Time::Piece, which Configure
-          # needs -- gotcha 46.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            dnf -y install perl
-          # CARGO_BUILD_JOBS=2 halves concurrent rustc processes on this
-          # runner's limited memory -- a first CI attempt (back when the
-          # matrix still had a second, concurrently-building cp314t leg,
-          # since dropped below) SIGABRT'd (signal 6, "corrupted
-          # double-linked list") mid-futures-macro codegen -- gotcha 228.
-          # Kept even with a single remaining leg: cheap insurance against
-          # the same OOM-driven abort on this dependency tree.
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin" CARGO_BUILD_JOBS=2
-          CIBW_TEST_REQUIRES: pytest anyio
-          # test-sources resolves against the checkout root, not package-dir.
-          CIBW_TEST_SOURCES: >-
-            baseten-performance-client/python_bindings/tests
-            baseten-performance-client/python_bindings/pyproject.toml
-          # A dummy key only satisfies PerformanceClient's local
-          # constructor validation (verified: the concurrency-settings
-          # tests raise before any request); every test that needs a real
-          # deployment self-skips on EMBEDDINGS_REACHABLE/RERANK_REACHABLE.
-          # test_methods.py exercises the HTTP verbs against httpbin.org.
-          CIBW_TEST_ENVIRONMENT: BASETEN_API_KEY=dummy
-          CIBW_TEST_COMMAND: >-
-            cd baseten-performance-client/python_bindings &&
-            python -c "import baseten_performance_client.baseten_performance_client as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest -v tests/test_bindings.py tests/test_methods.py tests/test_client_embed.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: baseten-performance-client-${{ env.BASETEN_PERFORMANCE_CLIENT_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-package-dir: "baseten-performance-client/python_bindings"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # The crate's default features build both rustls (resolves to
+      # ring, no riscv64 issue) and native-tls, whose openssl-sys
+      # vendors and compiles OpenSSL from source. The image's minimal
+      # perl-interpreter lacks FindBin/Time::Piece, which Configure
+      # needs -- gotcha 46.
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && dnf -y install perl"
+      # CARGO_BUILD_JOBS=2 halves concurrent rustc processes on this
+      # runner's limited memory -- a first CI attempt (back when the
+      # matrix still had a second, concurrently-building cp314t leg,
+      # since dropped below) SIGABRT'd (signal 6, "corrupted
+      # double-linked list") mid-futures-macro codegen -- gotcha 228.
+      # Kept even with a single remaining leg: cheap insurance against
+      # the same OOM-driven abort on this dependency tree.
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" CARGO_BUILD_JOBS=2"
+      cibw-test-requires: "pytest anyio"
+      # test-sources resolves against the checkout root, not package-dir.
+      cibw-test-sources: "baseten-performance-client/python_bindings/tests baseten-performance-client/python_bindings/pyproject.toml"
+      # A dummy key only satisfies PerformanceClient's local
+      # constructor validation (verified: the concurrency-settings
+      # tests raise before any request); every test that needs a real
+      # deployment self-skips on EMBEDDINGS_REACHABLE/RERANK_REACHABLE.
+      # test_methods.py exercises the HTTP verbs against httpbin.org.
+      cibw-test-environment: "BASETEN_API_KEY=dummy"
+      cibw-test-command: "cd baseten-performance-client/python_bindings && python -c \"import baseten_performance_client.baseten_performance_client as m; assert m.__file__.endswith('.so'), m.__file__\" && python -m pytest -v tests/test_bindings.py tests/test_methods.py tests/test_client_embed.py"
 
   publish:
     name: Publish baseten-performance-client ${{ matrix.version }}

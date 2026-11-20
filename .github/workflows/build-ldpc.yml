@@ -54,74 +54,46 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build ldpc ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      LDPC_VERSION: ${{ matrix.version }}
-
-    steps:
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "ldpc"
+      version: "${{ matrix.version }}"
       # Upstream pushes no git tag for any release; d3429964 is the commit that
       # released 2.4.1 (the next commit moved past it), 67 minutes before the
       # PyPI sdist upload. Its pyproject.toml/setup.py/src_python/src_cpp are
       # byte-identical to that sdist, but the sdist's MANIFEST.in never grafts
       # include/robin_map, which src_cpp/lsd.hpp and union_find.hpp #include --
       # the checkout is required, not the sdist.
-      - name: Checkout ldpc d3429964 (2.4.1 release commit)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: quantumgizmos/ldpc
-          ref: d3429964cd4ffe1abfc041c6ec8b8425cb174f40
-          persist-credentials: false
+      repository: "quantumgizmos/ldpc"
+      ref: "d3429964cd4ffe1abfc041c6ec8b8425cb174f40"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+      patches: true
 
-      - name: Patch ldpc source
-        run: git apply python-wheels/patches/ldpc/${{ env.LDPC_VERSION }}/0*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          CIBW_ARCHS: riscv64
-          # musllinux dropped: numpy/scipy/stim/pymatching have no musl riscv64 wheel.
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # ldpc's own install_requires pulls in sinter, which pulls in matplotlib and
-          # transitively pillow/contourpy/kiwisolver; none publish a riscv64 wheel on PyPI
-          # newer than ours, and pillow's sdist build fails outright (no libjpeg headers in
-          # the manylinux image). Pin these to our registry's wheels for the test install.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=matplotlib,contourpy,kiwisolver,pillow
-          CIBW_TEST_SOURCES: python_test
-          # test_soft_info_decoder.py's two SoftInfoBpDecoder assertions fail on
-          # a plain x86_64 checkout build too (verified locally): a pre-existing
-          # upstream bug, not riscv64-specific.
-          # ldpc/__init__.py's "Legacy syntax" section (`from ldpc.bp_decoder import
-          # bp_decoder`) rebinds the `ldpc.bp_decoder` package attribute to the
-          # legacy callable of the same name, so `ldpc.bp_decoder._bp_decoder`
-          # (attribute access) raises ImportError on any install, any arch, right
-          # after `import ldpc`; importlib.import_module resolves it by name
-          # instead and proves the compiled extension regardless.
-          CIBW_TEST_COMMAND: >-
-            python -c "import ldpc, importlib;
-            m = importlib.import_module('ldpc.bp_decoder._bp_decoder');
-            assert m.__file__.endswith('.so'), m.__file__"
-            && python -m pytest python_test -q
-            -k "not test_one_errored_syndrome_bit and not test_long_rep_code"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ldpc-${{ env.LDPC_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      # musllinux dropped: numpy/scipy/stim/pymatching have no musl riscv64 wheel.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # ldpc's own install_requires pulls in sinter, which pulls in matplotlib and
+      # transitively pillow/contourpy/kiwisolver; none publish a riscv64 wheel on PyPI
+      # newer than ours, and pillow's sdist build fails outright (no libjpeg headers in
+      # the manylinux image). Pin these to our registry's wheels for the test install.
+      cibw-test-environment: "PIP_ONLY_BINARY=matplotlib,contourpy,kiwisolver,pillow"
+      cibw-test-sources: "python_test"
+      # test_soft_info_decoder.py's two SoftInfoBpDecoder assertions fail on
+      # a plain x86_64 checkout build too (verified locally): a pre-existing
+      # upstream bug, not riscv64-specific.
+      # ldpc/__init__.py's "Legacy syntax" section (`from ldpc.bp_decoder import
+      # bp_decoder`) rebinds the `ldpc.bp_decoder` package attribute to the
+      # legacy callable of the same name, so `ldpc.bp_decoder._bp_decoder`
+      # (attribute access) raises ImportError on any install, any arch, right
+      # after `import ldpc`; importlib.import_module resolves it by name
+      # instead and proves the compiled extension regardless.
+      cibw-test-command: "python -c \"import ldpc, importlib; m = importlib.import_module('ldpc.bp_decoder._bp_decoder'); assert m.__file__.endswith('.so'), m.__file__\" && python -m pytest python_test -q -k \"not test_one_errored_syndrome_bit and not test_long_rep_code\""
 
   publish:
     name: Publish ldpc ${{ matrix.version }}
