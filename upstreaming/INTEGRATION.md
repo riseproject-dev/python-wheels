@@ -89,6 +89,9 @@ manual tick. Current local workflow changes trigger reconciliation when an
 investigator, worker, provisioning or publish-retry workflow completes, plus on
 request labels and commands. A 5-minute schedule is the recovery fallback.
 State-only commits do not trigger the controller, so the chain cannot recurse.
+Controller observe/reconcile jobs explicitly check out current `main`, not the
+trigger event SHA. This prevents overlapping completion events from planning and
+launching the same deterministic operation against stale state.
 
 Workflow-only fork creation is now live-verified: the trusted job created the
 correct destination fork with matching source/fork repository IDs and minted a
