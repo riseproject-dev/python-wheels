@@ -210,6 +210,9 @@ an explicit no-change instruction is present, or when they clearly request an
 explanation without a repair instruction. They are marked processed and retained
 for audit, but do not bump the revision, set `fix_needed`, enter pending repair
 evidence, invalidate CI or handoff state, or claim that repair was requested.
+When actionable change feedback arrives while a contribution is paused, it
+remains durable and pending, but the ledger explicitly says that no Work was
+requested because the contribution is paused.
 
 Exact-head CI is green only when every executed build or test job succeeds, in
 addition to the target riscv64 job and wheel contract. Failures confined to
