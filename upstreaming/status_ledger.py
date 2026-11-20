@@ -61,6 +61,9 @@ def render(event: dict, record: dict, run_url: str) -> str:
     activity = event.get("to", {}).get("activity", record["activity"])
     kind = event["kind"]
     message = MESSAGES.get(kind, kind.replace("_", " ").replace(":", ": ").capitalize() + ".")
+    if kind == "development_review_feedback" and record.get("paused"):
+        message = ("Recorded authorized development-PR change feedback. Repair remains pending, "
+                   "but no Work was requested because the contribution is paused.")
     visible = f"**Upstreaming r{revision} · {phase}/{activity}** — {message} [Workflow run]({run_url})"
     commands = _command_lines(record)
     details = ""

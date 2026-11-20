@@ -34,3 +34,4 @@
 - Added a stale-proof `/upstreaming restart` command for abandoned contributions that keeps the same tracking issue and append-only ledger while starting a fresh queued lifecycle generation after writer quiescence.
 - Added `/upstreaming refresh` to re-investigate an existing development PR with current prompts, replace its verified dossier scope, and require a fresh worker pass carrying the full new dossier plus pending review and CI evidence.
 - Separated explicit explanation-only PR comments from change feedback so they are audited without revision bumps, `fix_needed` transitions, repair evidence, or misleading repair ledger text; repeated-pause rejection feedback now confirms the pause remains effective instead of repeating the submitted syntax.
+- Corrected paused-feedback ledger wording so actionable feedback remains visibly pending without claiming repair Work was requested while pause prevents allocation.

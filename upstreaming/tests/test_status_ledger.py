@@ -49,6 +49,24 @@ class TestStatusLedger(unittest.TestCase):
         self.assertIn("/upstreaming force-develop revision=4", body)
         self.assertIn("<!-- upstreaming-ledger:", body)
 
+    def test_paused_feedback_ledger_does_not_claim_work_was_requested(self):
+        record = contribution(phase="development", activity="fix_needed", revision=8, paused=True)
+        event = lifecycle._event(record, record, "development_review_feedback", "observation",
+                                 "review-1", NOW, True)
+        event["sequence"] = 14
+        body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertIn("Repair remains pending", body)
+        self.assertIn("no Work was requested because the contribution is paused", body)
+        self.assertNotIn("and requested repair", body)
+
+    def test_unpaused_feedback_ledger_reports_repair_request(self):
+        record = contribution(phase="development", activity="fix_needed", revision=8, paused=False)
+        event = lifecycle._event(record, record, "development_review_feedback", "observation",
+                                 "review-1", NOW, True)
+        event["sequence"] = 14
+        body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertIn("change feedback and requested repair", body)
+
     def test_explanation_only_ledger_does_not_claim_repair(self):
         record = contribution(phase="development", activity="fix_needed", revision=8, paused=True)
         event = lifecycle._event(record, record, "development_review_inquiry", "observation",
