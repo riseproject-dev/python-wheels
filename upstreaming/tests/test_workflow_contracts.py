@@ -207,6 +207,21 @@ class TestWorkflowContracts(unittest.TestCase):
         complete_index = reconcile["steps"].index(complete)
         self.assertGreater(complete_index, publish_index)
 
+    def test_worker_fetches_and_verifies_complete_committed_dossier(self):
+        worker = source("upstreaming-worker")
+        checkout = worker["pre-agent-steps"][1]
+        script = checkout["run"]
+        self.assertEqual(checkout["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertIn("upstreaming-state/evidence/", script)
+        self.assertIn("application/vnd.github.raw+json", script)
+        self.assertIn("sha256sum /tmp/gh-aw/agent/dossier.json", script)
+        self.assertIn("dossier digest mismatch", script)
+        self.assertIn(".kind == \"dossier\" and .evidence_id == $id", script)
+        prompt = (WF / "upstreaming-worker.md").read_text()
+        self.assertIn("identifies the latest verified dossier", prompt)
+        self.assertIn("data` is only its queue-safe index", prompt)
+        self.assertIn("read the latest verified dossier", prompt)
+
     def test_worker_brackets_untrusted_output_with_stop_commands(self):
         worker = source("upstreaming-worker")
         before = worker["pre-agent-steps"][0]

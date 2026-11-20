@@ -78,6 +78,7 @@ pre-agent-steps:
   - name: Check out the contribution fork at the expected head (read-only)
     env:
       GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions
+      GH_TOKEN: ${{ github.token }}
     run: |
       set -euo pipefail
       node <<'JS'
@@ -92,6 +93,26 @@ pre-agent-steps:
       fs.writeFileSync("/tmp/gh-aw/agent/task.json", JSON.stringify(w, null, 2));
       JS
       task=/tmp/gh-aw/agent/task.json
+      dossier_count=$(jq '[.context.reason_evidence[]? | select(.kind == "dossier" and .reference)] | length' "$task")
+      [ "$dossier_count" -le 1 ] || { echo "multiple dossier references"; exit 1; }
+      if [ "$dossier_count" -eq 1 ]; then
+        repository=$(jq -r '.context.reason_evidence[] | select(.kind == "dossier").reference.repository' "$task")
+        ref=$(jq -r '.context.reason_evidence[] | select(.kind == "dossier").reference.ref' "$task")
+        path=$(jq -r '.context.reason_evidence[] | select(.kind == "dossier").reference.path' "$task")
+        expected=$(jq -r '.context.reason_evidence[] | select(.kind == "dossier").reference.sha256' "$task")
+        evidence_id=$(jq -r '.context.reason_evidence[] | select(.kind == "dossier").evidence_id' "$task")
+        [ "$repository" = "riseproject-dev/python-wheels" ] || { echo "bad dossier repository"; exit 1; }
+        [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "bad dossier ref"; exit 1; }
+        [[ "$path" =~ ^upstreaming-state/evidence/[A-Za-z0-9._-]+\.json$ ]] || { echo "bad dossier path"; exit 1; }
+        [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo "bad dossier digest"; exit 1; }
+        gh api -H 'Accept: application/vnd.github.raw+json' \
+          "/repos/$repository/contents/$path?ref=$ref" > /tmp/gh-aw/agent/dossier.json
+        actual=$(sha256sum /tmp/gh-aw/agent/dossier.json | cut -d' ' -f1)
+        [ "$actual" = "$expected" ] || { echo "dossier digest mismatch"; exit 1; }
+        jq -e --arg id "$evidence_id" '.kind == "dossier" and .evidence_id == $id' \
+          /tmp/gh-aw/agent/dossier.json >/dev/null
+        echo "verified complete dossier $evidence_id at /tmp/gh-aw/agent/dossier.json"
+      fi
       fork=$(jq -r '.fork // empty' "$task")
       upstream=$(jq -r '.upstream' "$task")
       head=$(jq -r '.expected_head // empty' "$task")
@@ -298,10 +319,16 @@ pipeline. The trusted pre-agent step wrote the immutable task to
 branch in `./fork`. The task's
 `plan` field says what to do; `reason_ids` and `context` say why. For repair and
 revision tasks, read every entry in `context.reason_evidence` before researching
-or editing. A `dossier` evidence entry includes the latest verified dossier in
-`data`; treat its path coverage, dependency findings, architecture precedent and
-risks as the authoritative current investigation, while still validating them
-against current repository history and CI. Treat every concrete review comment,
+or editing. A `dossier` evidence entry identifies the latest verified dossier.
+Its complete authoritative record is committed at the immutable `reference`;
+`data` is only its queue-safe index. The trusted pre-agent step fetches that
+exact-ref file, verifies its SHA-256 and evidence identity, and writes it to
+`/tmp/gh-aw/agent/dossier.json`. You MUST read the latest verified dossier from
+that complete local file when it exists. The reference also contains its
+immutable raw GitHub URL for provenance. Treat the latest verified dossier's
+path coverage, dependency findings, architecture precedent and risks as the
+authoritative current investigation, while still validating them against
+current repository history and CI. Treat every concrete review comment,
 PR conversation comment and
 rejected-change description in every reason evidence record as a required
 repair constraint, then verify each one against repository history. A repair is

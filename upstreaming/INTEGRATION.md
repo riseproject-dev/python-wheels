@@ -204,7 +204,18 @@ records processed review/comment IDs, bumps the revision and automatically
 requests `development_repair`. Pending feedback evidence survives branch-head
 changes and is attached to every repair until exact-head CI is green. A repair
 proposal must acknowledge every required evidence record. Observation does not
-replace `fix_needed` before the controller can allocate that repair.
+replace `fix_needed` before the controller can allocate that repair. Dispatcher
+Work carries a deterministic bounded projection of those durable records rather
+than embedding the complete dossier research corpus: evidence IDs, response IDs,
+exact paths, proposal/path coverage, architecture/build/dependency findings and
+risks are retained, while repeated prose and the full source-by-source research
+appendix remain in the complete committed dossier evidence file. The Work also
+carries an immutable control-repository ref, exact evidence path, raw GitHub URL
+and SHA-256 for that file. Before the model starts, trusted worker setup fetches
+it with the read-only job token, verifies the digest and evidence identity, and
+places the complete dossier at `/tmp/gh-aw/agent/dossier.json`; the worker must
+read it. Trusted preparation rejects a payload before queue staging if it
+exceeds the queue's safe byte budget.
 Explanation-only comments are classified separately as `human_inquiry` when
 an explicit no-change instruction is present, or when they clearly request an
 explanation without a repair instruction. They are marked processed and retained
