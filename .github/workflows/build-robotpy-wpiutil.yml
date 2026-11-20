@@ -52,48 +52,29 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build robotpy-wpiutil ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      ROBOTPY_WPIUTIL_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout mostrobotpy ${{ env.ROBOTPY_WPIUTIL_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: robotpy/mostrobotpy
-          ref: ${{ env.ROBOTPY_WPIUTIL_VERSION }}
-          persist-credentials: false
-
-      # subprojects/robotpy-wpiutil has no licence of its own, so upstream's wheel ships none.
-      - name: Add the mostrobotpy licence
-        run: cp LICENSE.md subprojects/robotpy-wpiutil/LICENSE.md
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: subprojects/robotpy-wpiutil
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=${{ env.PIP_EXTRA_INDEX_URL }}
-          # libwpiutil.so comes from the robotpy-native-wpiutil dependency, as upstream's wheel expects.
-          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel} --exclude libwpiutil.so
-          CIBW_TEST_REQUIRES: pytest hatch-meson hatchling ninja semiwrap~=0.3.0
-          CIBW_TEST_COMMAND: >-
-            pip install --no-build-isolation {package}/tests/cpp &&
-            pytest {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: robotpy-wpiutil-${{ env.ROBOTPY_WPIUTIL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    # subprojects/robotpy-wpiutil has no licence of its own, so upstream's wheel ships none.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "robotpy-wpiutil"
+      version: "${{ matrix.version }}"
+      repository: "robotpy/mostrobotpy"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: "cp LICENSE.md subprojects/robotpy-wpiutil/LICENSE.md"
+      cibw-package-dir: "subprojects/robotpy-wpiutil"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # libwpiutil.so comes from the robotpy-native-wpiutil dependency, as upstream's wheel expects.
+      cibw-repair-wheel-command: "auditwheel repair -w {dest_dir} {wheel} --exclude libwpiutil.so"
+      cibw-test-requires: "pytest hatch-meson hatchling ninja semiwrap~=0.3.0"
+      cibw-test-command: >
+        pip install --no-build-isolation {package}/tests/cpp &&
+        pytest {package}/tests
 
   publish:
     name: Publish robotpy-wpiutil ${{ matrix.version }}

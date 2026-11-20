@@ -49,8 +49,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build jsonschema-rs ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -70,57 +68,40 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
 
-    env:
-      JSONSCHEMA_RS_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout jsonschema python-v${{ env.JSONSCHEMA_RS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: Stranger6667/jsonschema
-          ref: python-v${{ env.JSONSCHEMA_RS_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Stage the licence beside jsonschema-py's pyproject.toml
-        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
-        # in this monorepo is crates/jsonschema-py/ -- so upstream's published
-        # wheels carry no licence text at all.
-        run: cp LICENSE crates/jsonschema-py/LICENSE
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: crates/jsonschema-py
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # jsonschema-py ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest hypothesis flask
-          CIBW_BEFORE_TEST: pip install {project}/crates/jsonschema-testsuite-pyo3
-          CIBW_TEST_SOURCES: >-
-            crates/jsonschema-py/tests-py crates/jsonschema-py/pyproject.toml
-            crates/jsonschema-py/README.md crates/jsonschema/tests/suite
-          # test_http_fetch_external_schema needs a live json-schema.org
-          # endpoint; every other test is self-contained.
-          CIBW_TEST_COMMAND: >-
-            cd crates/jsonschema-py &&
-            python -c "import jsonschema_rs.jsonschema_rs as m, importlib.metadata as md;
-            assert m.__file__.endswith('.so'), m.__file__;
-            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('jsonschema_rs'))" &&
-            python -m pytest -v tests-py --deselect tests-py/test_http_options.py::test_http_fetch_external_schema
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: jsonschema_rs-${{ env.JSONSCHEMA_RS_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+    # in this monorepo is crates/jsonschema-py/ -- so upstream's published
+    # wheels carry no licence text at all.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "jsonschema_rs"
+      version: "${{ matrix.version }}"
+      repository: "Stranger6667/jsonschema"
+      ref: "python-v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 360
+      checkout-submodules: "true"
+      pre-build: "cp LICENSE crates/jsonschema-py/LICENSE"
+      cibw-package-dir: "crates/jsonschema-py"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # jsonschema-py ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: PATH="$PATH:$HOME/.cargo/bin"
+      cibw-test-requires: "pytest hypothesis flask"
+      cibw-before-test: "pip install {project}/crates/jsonschema-testsuite-pyo3"
+      cibw-test-sources: >
+        crates/jsonschema-py/tests-py crates/jsonschema-py/pyproject.toml
+        crates/jsonschema-py/README.md crates/jsonschema/tests/suite
+      # test_http_fetch_external_schema needs a live json-schema.org
+      # endpoint; every other test is self-contained.
+      cibw-test-command: >
+        cd crates/jsonschema-py &&
+        python -c "import jsonschema_rs.jsonschema_rs as m, importlib.metadata as md;
+        assert m.__file__.endswith('.so'), m.__file__;
+        assert any(str(p).endswith('licenses/LICENSE') for p in md.files('jsonschema_rs'))" &&
+        python -m pytest -v tests-py --deselect tests-py/test_http_options.py::test_http_fetch_external_schema
 
   publish:
     name: Publish jsonschema-rs ${{ matrix.version }}
