@@ -114,6 +114,53 @@ class TestPauseParkResume(unittest.TestCase):
         self.assertFalse(apply(rec, f"/upstreaming resume contribution={CID} revision=0 reason=r").accepted)
 
 
+class TestRestartGeneration(unittest.TestCase):
+    def test_abandoned_contribution_restarts_on_same_identity(self):
+        rec = contribution(
+            phase="abandoned", generation=2, revision=8, terminal_reason="old attempt",
+            scope_paths=[".github/workflows/wheels.yml"], dossier_evidence_id="dossier-old",
+            scope_coverage_complete=True, processed_publications=[11, 12],
+            processed_review_ids=[21], processed_review_comment_ids=[22],
+            processed_pr_conversation_comment_ids=[23],
+            pending_feedback_evidence_ids=["review-old"],
+            proposal_artifact={"artifact_id": 1}, last_ci_evidence_id="ci-old",
+            budget={"policy_id": "test", "attempts_used": 3, "no_progress_streak": 2,
+                    "clusters": {"x": 2}, "spent_estimate_usd_cents": 99})
+        out = apply(rec, f'/upstreaming restart contribution={CID} revision=8 reason="clean start"')
+        self.assertTrue(out.accepted)
+        restarted = out.record
+        self.assertEqual(restarted["contribution_id"], CID)
+        self.assertEqual(restarted["tracking_issue"], rec["tracking_issue"])
+        self.assertEqual((restarted["generation"], restarted["revision"]), (3, 9))
+        self.assertEqual((restarted["phase"], restarted["activity"]), ("queued", "idle"))
+        self.assertIsNone(restarted["fork"])
+        self.assertIsNone(restarted["dossier_evidence_id"])
+        self.assertIsNone(restarted["scope_paths"])
+        self.assertIsNone(restarted["proposal_artifact"])
+        self.assertEqual(restarted["processed_publications"], [11, 12])
+        self.assertEqual(restarted["processed_review_comment_ids"], [])
+        self.assertEqual(restarted["pending_feedback_evidence_ids"], [])
+        self.assertEqual(restarted["budget"]["attempts_used"], 0)
+        self.assertEqual(out.event["kind"], "command:restart")
+        self.assertTrue(out.event["revision_bumped"])
+        schemas.validate("contribution", restarted)
+
+    def test_restart_is_abandoned_only_and_stale_proof(self):
+        self.assertFalse(apply(contribution(),
+                               f"/upstreaming restart contribution={CID} revision=0 reason=r").accepted)
+        abandoned = contribution(phase="abandoned", revision=2)
+        self.assertFalse(apply(abandoned,
+                               f"/upstreaming restart contribution={CID} revision=1 reason=r").accepted)
+
+    def test_restart_waits_for_writer_quiescence(self):
+        for rec in (contribution(phase="abandoned", active_work={"x": 1}),
+                    contribution(phase="abandoned", active_operation_id="op-1"),
+                    contribution(phase="abandoned", pending_publication={"x": 1})):
+            with self.subTest(record=rec):
+                self.assertFalse(apply(rec,
+                    f"/upstreaming restart contribution={CID} revision=0 reason=r").accepted)
+
+
 class TestHandoff(unittest.TestCase):
     def test_request_needs_evidence_and_head(self):
         rec = contribution()

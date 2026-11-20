@@ -49,6 +49,15 @@ class TestStatusLedger(unittest.TestCase):
         self.assertIn("/upstreaming force-develop revision=4", body)
         self.assertIn("<!-- upstreaming-ledger:", body)
 
+    def test_abandoned_ledger_offers_same_issue_restart(self):
+        record = contribution(phase="abandoned", activity="idle", revision=8,
+                              terminal_reason="restart requested")
+        event = lifecycle._event(record, record, "command:abandon", "command", "c", NOW, False)
+        event["sequence"] = 9
+        body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertIn('/upstreaming restart revision=8 reason="..."', body)
+        self.assertNotIn("/upstreaming resume", body)
+
     def test_publish_appends_one_app_authored_comment_for_written_event(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); _record, _event, path = self.records(root); api = FakeApi()

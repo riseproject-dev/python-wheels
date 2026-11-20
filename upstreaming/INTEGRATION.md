@@ -32,6 +32,11 @@ release-path rehearsal still need live evidence.
   overridden with an authorized stale-proof `force-develop` command.
 - Human approval starts at upstream handoff. No automatic upstream PR creation or
   production package publication is authorized.
+- An authorized exact-revision `restart` command may reactivate only an abandoned
+  contribution on the same tracking issue. It starts a new lifecycle generation
+  and queued investigation after clearing mutable dossier, scope, fork/PR, CI,
+  review, budget and operation state. The append-only event history and old-run
+  replay fence remain. Remote PR/repository cleanup is separate and explicit.
 - Keep gh-aw v1.2.2 until a stable, coordinated upgrade is reviewed. No alternate
   scheduler, publication route, salted branch or unverified-artifact fallback.
 - Only the investigator has approved unsandboxed internet access. It remains
