@@ -149,6 +149,13 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("disable `id-token: write`", text)
         self.assertIn("publication should fail out of the box", text)
         self.assertIn("Commit structure and history updates follow the upstream project's", text)
+        self.assertIn("add `riscv64`", text)
+        self.assertIn("to that same list", text)
+        self.assertIn("Do not introduce", text)
+        self.assertIn("Add a dedicated `runs-on: ubuntu-24.04-riscv` row only", text)
+        investigator = (WF / "upstreaming-investigator.md").read_text()
+        self.assertIn("Explicitly classify whether Linux", investigator)
+        self.assertIn("Recommend adding `riscv64` to the", investigator)
 
     def test_development_writers_do_not_wait_for_environment_review(self):
         worker = source("upstreaming-worker")

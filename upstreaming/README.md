@@ -186,7 +186,12 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
 4. **Development.** The next tick requests a `development_patch`. Before any
    edit, the worker must use its token-authenticated read-only GitHub research
    server to inspect per-file commit history, analogous accepted and rejected
-   PRs, relevant issues/reviews and repository contribution/release policy. Policy-sensitive files such as changelogs are changed only when that
+   PRs, relevant issues/reviews and repository contribution/release policy. The
+   existing architecture topology is authoritative: shared `ubuntu-latest` plus
+   an emulated/cross architecture list gets `riscv64` in that list, while a
+   dedicated RISC-V runner is used only for an existing native-per-architecture
+   pattern or documented incompatibility with the shared path. Policy-sensitive
+   files such as changelogs are changed only when that
    evidence establishes the convention. The fork organization is a credentialless
    shell with no package secrets or configured external OIDC trust, so existing
    OIDC/Twine/package-publisher syntax is not disabled or patched merely for fork
