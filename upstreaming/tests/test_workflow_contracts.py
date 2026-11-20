@@ -190,10 +190,22 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("awk 'NF { print; exit }'", script)
         self.assertIn("reactions?per_page=100", script)
         self.assertIn('riseproject-dev[bot]', script)
-        self.assertIn("-f content='+1'", script)
+        self.assertIn("-f content='eyes'", script)
+        self.assertNotIn("-f content='+1'", script)
         reconcile = controller["jobs"]["reconcile"]
         self.assertEqual(reconcile["concurrency"]["group"], "python-wheels-upstreaming-controller")
         self.assertFalse(reconcile["concurrency"]["cancel-in-progress"])
+        complete = next(step for step in reconcile["steps"]
+                        if step.get("name") == "Mark accepted commands complete")
+        self.assertEqual(complete["if"], "steps.policy.outputs.read_only == 'false'")
+        self.assertIn('.commands[] | select(.result == "accepted")', complete["run"])
+        self.assertIn("-f content='+1'", complete["run"])
+        self.assertIn('riseproject-dev[bot]', complete["run"])
+        self.assertIn("for attempt in 1 2 3 4", complete["run"])
+        publish_index = next(i for i, step in enumerate(reconcile["steps"])
+                             if step.get("name") == "Publish one validated state-only commit on main")
+        complete_index = reconcile["steps"].index(complete)
+        self.assertGreater(complete_index, publish_index)
 
     def test_worker_brackets_untrusted_output_with_stop_commands(self):
         worker = source("upstreaming-worker")

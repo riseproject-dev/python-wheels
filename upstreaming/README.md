@@ -239,12 +239,15 @@ commands** section with the current revision/head prefilled. Entries are never
 edited, so user commands and pipeline history remain interleaved chronologically.
 A rejected command receives a separate App-authored reply that quotes the exact
 command, pings its author, explains the rejection and shows a corrected form when
-one is known. A separate controller job promptly adds a `+1` reaction when the
-first nonblank line of a new or edited tracking-issue comment starts with
+one is known. A separate controller job promptly adds an `eyes` reaction when
+the first nonblank line of a new or edited tracking-issue comment starts with
 `/upstreaming `. This receipt job has no concurrency group, so queued
-reconciliation does not delay acknowledgement. The reaction does not parse,
-authorize or apply the command; the serialized controller remains the only
-command handler.
+reconciliation does not delay acknowledgement. The `eyes` reaction does not
+parse, authorize or apply the command; the serialized controller remains the
+only command handler. After that controller accepts the command and publishes
+its validated durable state commit, it idempotently adds `+1` to mark command
+execution complete. Rejected commands retain `eyes` and receive the actionable
+App-authored rejection reply instead of a completion reaction.
 
 Post a command as its own comment on the request issue. The issue says which
 contribution it applies to, so `contribution=` is optional (if given, it must
