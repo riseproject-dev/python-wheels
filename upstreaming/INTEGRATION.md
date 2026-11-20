@@ -197,7 +197,10 @@ later asks in ordinary natural language for a change that requires another
 file, the human-relay-backed repair may identify and change that additional
 exact path without command syntax. The trusted publisher admits only exact
 paths actually changed by that repair, applies all existing content and workflow
-safety checks, and persists the verified paths into contribution scope.
+safety checks, and persists the verified paths into contribution scope. Live
+contributions whose dossiers predate mandatory path coverage receive the same
+exact-path compatibility only during repair; new dossiers are marked complete
+and cannot use that legacy allowance.
 
 Previously merged implementation:
 
