@@ -91,9 +91,10 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
             feedback = collect.development_review_feedback(
                 api, cur, policy["command_authority"]["actor_ids"])
             if feedback:
-                ids = feedback["review_ids"] + feedback["comment_ids"]
+                ids = feedback["review_ids"] + feedback["comment_ids"] + feedback["conversation_comment_ids"]
                 eid = safe_id(f"review-{cur['fork']['repository_id']}-{cur['fork']['pr_number']}-{max(ids)}")
-                summaries = [item["body"] for item in feedback["reviews"] + feedback["comments"]]
+                summaries = [item["body"] for item in
+                             feedback["reviews"] + feedback["comments"] + feedback["conversation_comments"]]
                 ev = {"schema_version": 1, "evidence_id": eid, "contribution_id": cid,
                       "kind": "human_relay", "policy_version": policy["policy_version"],
                       "collected_at": now, "summary": "\n\n".join(summaries)[:8000],
@@ -106,7 +107,10 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
                            last_ci_evidence_id=eid,
                            processed_review_ids=((cur.get("processed_review_ids") or []) + feedback["review_ids"])[-256:],
                            processed_review_comment_ids=((cur.get("processed_review_comment_ids") or [])
-                                                         + feedback["comment_ids"])[-512:], updated_at=now)
+                                                         + feedback["comment_ids"])[-512:],
+                           processed_pr_conversation_comment_ids=(
+                               (cur.get("processed_pr_conversation_comment_ids") or [])
+                               + feedback["conversation_comment_ids"])[-512:], updated_at=now)
                 schemas.validate("contribution", cur)
                 obs.staged.extend([("evidence", ev), ("contributions", cur),
                                    ("events", lifecycle._event(before, cur, "development_review_feedback",

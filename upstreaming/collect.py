@@ -163,8 +163,15 @@ def development_review_feedback(api: Api, record: dict, authority: Iterable[int]
     allowed = {int(value) for value in authority}
     seen_reviews = set(record.get("processed_review_ids") or [])
     seen_comments = set(record.get("processed_review_comment_ids") or [])
+    seen_conversation = set(record.get("processed_pr_conversation_comment_ids") or [])
     reviews = api.paginate(f"/repos/{fork['name']}/pulls/{number}/reviews?per_page=100", max_pages=3)
     comments = api.paginate(f"/repos/{fork['name']}/pulls/{number}/comments?per_page=100", max_pages=5)
+    conversation = api.paginate(f"/repos/{fork['name']}/issues/{number}/comments?per_page=100", max_pages=5)
+    head_at = None
+    if conversation:
+        commit = api.get(f"/repos/{fork['name']}/commits/{head}")
+        head_at = datetime.fromisoformat(
+            ((commit.get("commit") or {}).get("committer") or {})["date"].replace("Z", "+00:00"))
     review_items = []
     for review in reviews:
         body = (review.get("body") or "").strip()
@@ -185,11 +192,25 @@ def development_review_feedback(api: Api, record: dict, authority: Iterable[int]
                               "reviewer": (comment.get("user") or {}).get("login"),
                               "path": comment.get("path"), "line": comment.get("line") or comment.get("original_line"),
                               "commit_id": head})
-    if not review_items and not comment_items:
+    conversation_items = []
+    for comment in conversation:
+        body = (comment.get("body") or "").strip()
+        created = comment.get("created_at")
+        if comment.get("id") in seen_conversation or (comment.get("user") or {}).get("id") not in allowed \
+                or not body or not created or head_at is None \
+                or datetime.fromisoformat(created.replace("Z", "+00:00")) < head_at:
+            continue
+        conversation_items.append({"id": comment["id"], "body": body[:8000],
+                                   "url": comment.get("html_url"),
+                                   "reviewer": (comment.get("user") or {}).get("login"),
+                                   "created_at": created, "commit_id": head})
+    if not review_items and not comment_items and not conversation_items:
         return None
     return {"reviews": review_items, "comments": comment_items,
+            "conversation_comments": conversation_items,
             "review_ids": [item["id"] for item in review_items],
-            "comment_ids": [item["id"] for item in comment_items]}
+            "comment_ids": [item["id"] for item in comment_items],
+            "conversation_comment_ids": [item["id"] for item in conversation_items]}
 
 
 def upstream_snapshots(api: Api, contributions: Iterable[dict], issues: list[dict], policy: dict) -> dict[str, dict]:

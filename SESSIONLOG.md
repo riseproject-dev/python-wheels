@@ -10,3 +10,9 @@
 - Autonomous recovery moved immutables to exact-head handoff, then exposed a same-tick race that retained and dispatched obsolete Work; added handoff cleanup and final-state relaunch filtering.
 - Fenced late non-publishing worker outcomes so an obsolete task cannot regress an already-authoritative exact-head handoff.
 - Confirmed autonomous queue progression from immutables handoff to python-isal development; fixed repeated green observation so handoff remains visibly `waiting_human`.
+- Split destination authority to the private `riseproject-upstreaming` App credentials and added a non-mutating workflow that validates both App installation boundaries and requested permissions.
+- Added App-authored rejected-command replies that quote and ping the author, and extended authorized development feedback ingestion to current-head PR conversation comments.
+- Confirmed python-isal completed trusted publication and automatically opened same-fork PR #1 while this migration was developed.
+- Enforced `riseproject-upstreaming[bot]` as both author and committer for every future pipeline-created destination commit, with trusted publisher normalization remaining authoritative.
+- Made destination token-mint failures durable `infra_error` publication outcomes so the controller self-heals through publish-only retry instead of spending another model run.
+- Verified a single manual controller tick recovered python-isal from a terminal failed Work by allocating revision 5 and returning control to the normal dispatcher path.
