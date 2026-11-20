@@ -282,23 +282,8 @@ jobs:
           GH_TOKEN: ${{ steps.ledger-token.outputs.token }}
         run: |
           set -euo pipefail
-          retry_api() {
-            local attempt delay=1
-            for attempt in 1 2 3 4; do
-              if gh api "$@"; then return 0; fi
-              [ "$attempt" -eq 4 ] && return 1
-              sleep "$delay"
-              delay=$((delay * 2))
-            done
-          }
-          jq -r '.commands[] | select(.result == "accepted") | .comment | select(type == "number")' \
-            report.json | sort -nu | while read -r comment; do
-              reactions=$(retry_api "/repos/$GITHUB_REPOSITORY/issues/comments/$comment/reactions?per_page=100")
-              jq -e 'any(.[]; .content == "+1" and .user.login == "riseproject-dev[bot]")' \
-                <<<"$reactions" >/dev/null || \
-                retry_api -X POST "/repos/$GITHUB_REPOSITORY/issues/comments/$comment/reactions" \
-                  -f content='+1' >/dev/null
-            done
+          uv run --no-project --with-requirements upstreaming/requirements.txt \
+            python -m upstreaming.command_reactions --out command-reactions/receipts.json
 
       - name: Append concise lifecycle entries to tracking issues
         if: steps.policy.outputs.read_only == 'false'
@@ -329,6 +314,7 @@ jobs:
           path: |
             status-ledger/receipts.json
             command-feedback/receipts.json
+            command-reactions/receipts.json
           if-no-files-found: ignore
           retention-days: 30
 

@@ -198,10 +198,8 @@ class TestWorkflowContracts(unittest.TestCase):
         complete = next(step for step in reconcile["steps"]
                         if step.get("name") == "Mark accepted commands complete")
         self.assertEqual(complete["if"], "steps.policy.outputs.read_only == 'false'")
-        self.assertIn('.commands[] | select(.result == "accepted")', complete["run"])
-        self.assertIn("-f content='+1'", complete["run"])
-        self.assertIn('riseproject-dev[bot]', complete["run"])
-        self.assertIn("for attempt in 1 2 3 4", complete["run"])
+        self.assertIn("upstreaming.command_reactions", complete["run"])
+        self.assertIn("command-reactions/receipts.json", complete["run"])
         publish_index = next(i for i, step in enumerate(reconcile["steps"])
                              if step.get("name") == "Publish one validated state-only commit on main")
         complete_index = reconcile["steps"].index(complete)
