@@ -174,6 +174,8 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("github.event.action == 'unlabeled'", filter_if)
         self.assertIn("github.event.label.name == 'upstreaming-request'", filter_if)
         self.assertIn("created", triggers["issue_comment"]["types"])
+        self.assertIn("contains(github.event.comment.body, '/upstreaming ')", filter_if)
+        self.assertNotIn("startsWith(github.event.comment.body", filter_if)
         self.assertIn("github.event_name == 'workflow_run'", controller["jobs"]["filter"]["if"])
 
     def test_command_acknowledgement_is_fast_idempotent_and_not_serialized(self):
