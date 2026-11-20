@@ -90,6 +90,8 @@ riscv64 job and retained wheel artifact. Validated worker `no_change` outcomes
 remain `no_change`, rather than becoming publication failures. Terminal queue
 Work is never resubmitted with the same graph ID: bounded retries receive a new
 revision, and exhaustion parks the contribution so it cannot block the queue.
+Pipeline-code and upstreaming-workflow pushes to `main` wake the controller;
+state-only commits do not match that trigger and therefore cannot recurse.
 
 The remaining orchestration gap was automatic continuation: rollout-disabled
 controller triggers left a completed investigation in `agent_running` until a
