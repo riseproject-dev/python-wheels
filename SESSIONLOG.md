@@ -40,3 +40,5 @@
 - Diagnosed dispatcher failures as queue payload-limit violations from embedding complete dossier research in Work, then added a bounded projection preserving IDs, exact paths, response contracts, path coverage, dependency findings and risks plus a pre-staging byte-budget guard.
 - Kept the complete dossier as committed evidence and added an immutable exact-ref path/raw URL/SHA-256 reference; trusted worker setup now fetches and verifies it into `/tmp/gh-aw/agent/dossier.json` for mandatory worker reading while the queue carries only a bounded projection.
 - Restored worker-facing wording that names the complete authoritative record as “the latest verified dossier,” while describing bounded `data` only as its queue-safe index.
+- Fixed command-completion reaction handling for controller ticks with no commands so post-commit bookkeeping cannot block dispatcher recovery and continuation.
+- Replaced report-only command completion reactions with a durable accepted-receipt scanner so failed post-commit ticks are backfilled idempotently, including the accepted py-webrtcvad resume command.
