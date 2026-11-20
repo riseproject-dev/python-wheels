@@ -51,94 +51,58 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build kornia-rs ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      KORNIA_RS_VERSION: ${{ matrix.version }}
-
-    steps:
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "kornia-rs"
+      version: "${{ matrix.version }}"
       # kornia-py is a member of the kornia-rs Cargo workspace and builds
       # against its sibling crates (kornia-image, kornia-io, ...), so the
       # checkout root has to be the workspace root, not kornia-py itself.
-      - name: Checkout kornia-rs v${{ env.KORNIA_RS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: kornia/kornia-rs
-          ref: v${{ env.KORNIA_RS_VERSION }}
-          persist-credentials: false
+      repository: "kornia/kornia-rs"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+      patches: true
 
-      - name: Apply patches
-        run: git apply -v python-wheels/patches/kornia-rs/${{ env.KORNIA_RS_VERSION }}/*.patch
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: kornia-py
-          output-dir: wheelhouse/
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # kornia-py ships no [tool.cibuildwheel]; the Rust toolchain its
-          # maturin backend needs is installed in-container here. cmake builds
-          # the turbojpeg feature's vendored libjpeg-turbo (patched above to
-          # drop its require-simd default, since libjpeg-turbo has no riscv64
-          # SIMD kernels).
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            dnf install -y cmake
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # torch/pillow are import-or-skip'd by the tests that use them
-          # (test_torch_zero_copy.py, test_io.py, test_against_pil_cv2.py);
-          # both are on the registry for our whole matrix, unlike opencv-python
-          # (cp37-abi3 only there, so left out - the cv2-guarded tests skip).
-          CIBW_TEST_REQUIRES: pytest numpy torch pillow
-          # test_image_benchmarks.py self-skips its dev-hardware ms ceilings when
-          # CI=true (its own doc: "shared GitHub Actions runners are too variable
-          # to gate on absolute ms"), but cibuildwheel's Linux container doesn't
-          # forward the runner's own CI=true, so it has to be passed through here.
-          CIBW_TEST_ENVIRONMENT_LINUX: PIP_ONLY_BINARY=numpy,torch,pillow CI=true
-          # test-sources resolves against the checkout root, not package-dir.
-          # tests/data is the workspace-level fixture dir several tests read
-          # via `Path(__file__).parents[2]`; benchmarks/ carries the `_bench`
-          # helper module test_against_pil_cv2.py imports off pyproject.toml's
-          # pythonpath.
-          CIBW_TEST_SOURCES: >-
-            kornia-py/tests
-            kornia-py/benchmarks
-            kornia-py/pyproject.toml
-            tests/data
-          # test_apriltag_decoder and (from 0.2.0) test_estimate_pose read
-          # tag36_11_00005.png out of the tests/data/apriltag-imgs git
-          # submodule (a 200+ MB clone of kornia/apriltag-imgs for one PNG),
-          # which the checkout above doesn't fetch; every other apriltag test
-          # runs off files already in tests/data. Deselecting a test a version
-          # doesn't have is a no-op, so both apply to every version.
-          CIBW_TEST_COMMAND: >-
-            cd kornia-py &&
-            python -c "import kornia_rs.kornia_rs as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest -v
-            --deselect tests/test_apriltag.py::test_apriltag_decoder
-            --deselect tests/test_apriltag.py::test_estimate_pose
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: kornia-rs-${{ env.KORNIA_RS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-package-dir: "kornia-py"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # kornia-py ships no [tool.cibuildwheel]; the Rust toolchain its
+      # maturin backend needs is installed in-container here. cmake builds
+      # the turbojpeg feature's vendored libjpeg-turbo (patched above to
+      # drop its require-simd default, since libjpeg-turbo has no riscv64
+      # SIMD kernels).
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && dnf install -y cmake"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # torch/pillow are import-or-skip'd by the tests that use them
+      # (test_torch_zero_copy.py, test_io.py, test_against_pil_cv2.py);
+      # both are on the registry for our whole matrix, unlike opencv-python
+      # (cp37-abi3 only there, so left out - the cv2-guarded tests skip).
+      cibw-test-requires: "pytest numpy torch pillow"
+      # test_image_benchmarks.py self-skips its dev-hardware ms ceilings when
+      # CI=true (its own doc: "shared GitHub Actions runners are too variable
+      # to gate on absolute ms"), but cibuildwheel's Linux container doesn't
+      # forward the runner's own CI=true, so it has to be passed through here.
+      cibw-test-environment-linux: "PIP_ONLY_BINARY=numpy,torch,pillow CI=true"
+      # test-sources resolves against the checkout root, not package-dir.
+      # tests/data is the workspace-level fixture dir several tests read
+      # via `Path(__file__).parents[2]`; benchmarks/ carries the `_bench`
+      # helper module test_against_pil_cv2.py imports off pyproject.toml's
+      # pythonpath.
+      cibw-test-sources: "kornia-py/tests kornia-py/benchmarks kornia-py/pyproject.toml tests/data"
+      # test_apriltag_decoder and (from 0.2.0) test_estimate_pose read
+      # tag36_11_00005.png out of the tests/data/apriltag-imgs git
+      # submodule (a 200+ MB clone of kornia/apriltag-imgs for one PNG),
+      # which the checkout above doesn't fetch; every other apriltag test
+      # runs off files already in tests/data. Deselecting a test a version
+      # doesn't have is a no-op, so both apply to every version.
+      cibw-test-command: "cd kornia-py && python -c \"import kornia_rs.kornia_rs as m; assert m.__file__.endswith('.so'), m.__file__\" && python -m pytest -v --deselect tests/test_apriltag.py::test_apriltag_decoder --deselect tests/test_apriltag.py::test_estimate_pose"
 
   publish:
     name: Publish kornia-rs ${{ matrix.version }}

@@ -52,66 +52,44 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build aerospike ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      AEROSPIKE_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "aerospike"
+      version: "${{ matrix.version }}"
+      repository: "aerospike/aerospike-client-python"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      checkout-submodules: "recursive"
 
-    steps:
-      - name: Checkout aerospike-client-python ${{ env.AEROSPIKE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: aerospike/aerospike-client-python
-          ref: ${{ env.AEROSPIKE_VERSION }}
-          submodules: recursive
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch aerospike-client-c source
-        run: git apply python-wheels/patches/aerospike/${{ env.AEROSPIKE_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # libyaml-devel is CRB-only, not EPEL (gotcha 51 doesn't apply); openssl-devel
-          # is in AppStream. Both resolve on riscv64, matching upstream's own yum install.
-          CIBW_BEFORE_ALL_LINUX: dnf install -y libyaml-devel openssl-devel
-          # Real Aerospike server is out of scope; instead prove the extension is
-          # compiled and client() exercises the real C cluster-init code path (the one
-          # the riscv64 as_arch_pause patch touches), failing fast against a closed port.
-          CIBW_TEST_COMMAND: |
-            python3 - <<'PYEOF'
-            import aerospike
-            from aerospike import exception
-            import aerospike_helpers
-            from aerospike_helpers import expressions
-            from aerospike_helpers.operations import operations
-            assert aerospike.__file__.endswith('.so'), aerospike.__file__
-            try:
-                aerospike.client({'hosts': [('127.0.0.1', 13000)], 'policies': {'timeout': 1000}})
-                raise SystemExit('expected a ConnectionError connecting to a closed port')
-            except exception.ConnectionError:
-                pass
-            PYEOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: aerospike-${{ env.AEROSPIKE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # libyaml-devel is CRB-only, not EPEL (gotcha 51 doesn't apply); openssl-devel
+      # is in AppStream. Both resolve on riscv64, matching upstream's own yum install.
+      cibw-before-all-linux: "dnf install -y libyaml-devel openssl-devel"
+      # Real Aerospike server is out of scope; instead prove the extension is
+      # compiled and client() exercises the real C cluster-init code path (the one
+      # the riscv64 as_arch_pause patch touches), failing fast against a closed port.
+      cibw-test-command: |
+        python3 - <<'PYEOF'
+        import aerospike
+        from aerospike import exception
+        import aerospike_helpers
+        from aerospike_helpers import expressions
+        from aerospike_helpers.operations import operations
+        assert aerospike.__file__.endswith('.so'), aerospike.__file__
+        try:
+            aerospike.client({'hosts': [('127.0.0.1', 13000)], 'policies': {'timeout': 1000}})
+            raise SystemExit('expected a ConnectionError connecting to a closed port')
+        except exception.ConnectionError:
+            pass
+        PYEOF
 
   publish:
     name: Publish aerospike ${{ matrix.version }}

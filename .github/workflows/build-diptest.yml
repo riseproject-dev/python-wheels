@@ -50,57 +50,28 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build diptest ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      DIPTEST_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "diptest"
+      version: "${{ matrix.version }}"
+      repository: "RUrlus/diptest"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
 
-    steps:
-      - name: Checkout diptest v${{ env.DIPTEST_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: RUrlus/diptest
-          ref: v${{ env.DIPTEST_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply python-wheels/patches/diptest/${{ env.DIPTEST_VERSION }}/*.patch
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,psutil
-            CMAKE_ARGS="-DDIPTEST_ENABLE_ARCH_FLAGS=OFF -DDIPTEST_ENABLE_OPENMP=ON"
-          # _diptest_core has no Py_mod_gil slot, so cp314t re-enables the GIL at
-          # import and warns; diptest's filterwarnings=error turns that into a
-          # collection error (gotcha 127). PYTHON_GIL=1 is a no-op on the other legs.
-          CIBW_TEST_ENVIRONMENT: PYTHON_GIL=1
-          CIBW_TEST_COMMAND: >-
-            pytest {project}/tests &&
-            python -c "from diptest import _has_openmp_support; assert _has_openmp_support"
-
-      - name: Store wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: diptest-${{ env.DIPTEST_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,psutil CMAKE_ARGS=\"-DDIPTEST_ENABLE_ARCH_FLAGS=OFF -DDIPTEST_ENABLE_OPENMP=ON\""
+      # _diptest_core has no Py_mod_gil slot, so cp314t re-enables the GIL at
+      # import and warns; diptest's filterwarnings=error turns that into a
+      # collection error (gotcha 127). PYTHON_GIL=1 is a no-op on the other legs.
+      cibw-test-environment: "PYTHON_GIL=1"
+      cibw-test-command: "pytest {project}/tests && python -c \"from diptest import _has_openmp_support; assert _has_openmp_support\""
 
   gpl_sources:
     needs: [setup]

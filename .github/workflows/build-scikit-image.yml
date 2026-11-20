@@ -51,87 +51,62 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build scikit-image ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      SCIKIT_IMAGE_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "scikit-image"
+      version: "${{ matrix.version }}"
+      repository: "scikit-image/scikit-image"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 300
 
-    steps:
-      - name: Checkout scikit-image v${{ env.SCIKIT_IMAGE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: scikit-image/scikit-image
-          ref: v${{ env.SCIKIT_IMAGE_VERSION }}
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Apply patches
-        run: git apply -v python-wheels/patches/scikit-image/${{ env.SCIKIT_IMAGE_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # numpy/scipy have riscv64 wheels only on our registry; cython/meson-python/
-          # pythran build from sdist there, same as upstream's own build-time resolution.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy
-          # Upstream's default test-extras ("test", "optional") pulls in SimpleITK, which has
-          # no riscv64 wheel and fails to build from source; use upstream's own aarch64/
-          # win_arm64/musllinux override (gotcha 336) instead.
-          CIBW_TEST_EXTRAS: test,optional_free_threaded
-          # 0.26.0's own tests pass raw itertools.product() generators to parametrize();
-          # pytest 9.1 deprecates that and this project's filterwarnings=error turns it
-          # into a collection error (fixed upstream post-0.26.0). Cap at the ceiling
-          # 0.26.0 was actually tested against (gotcha 339).
-          #
-          # skimage/morphology/grayreconstruct.py:216 (reconstruction(), reached from the
-          # h_maxima/h_minima/CircleModel/EllipseModel/ransac doctests) assigns
-          # `rec_img.shape = ...` in place; NumPy 2.5 deprecation-warns on in-place .shape
-          # assignment, which filterwarnings=error again turns fatal. scikit-image's own
-          # pyproject.toml only requires numpy>=2.0 with no upper bound, so cibuildwheel
-          # resolves the latest available (2.5.3) and hits a warning that didn't exist when
-          # 0.26.0 shipped. Same class of bug as pytest<9.1 above (gotcha 339/355): pin the
-          # test venv's numpy below the version that introduced the new deprecation, rather
-          # than patch scikit-image's own library code.
-          #
-          # Same class again, twice more (gotcha 339/355):
-          # - skimage/io/_plugins/pil_plugin.py:52 (pil_to_ndarray(), reached from
-          #   io.imread()/io.MultiImage, exercised by test_multi_image.py's
-          #   test_len/test_slicing/test_concatenate) calls the now-deprecated
-          #   `Image.getdata()`. Pillow deprecated it in favor of `get_flattened_data()`
-          #   in 12.1.0 (2026); scikit-image's pyproject.toml only requires pillow>=10.1
-          #   with no upper bound, so cibuildwheel resolves the latest available (12.3.0).
-          # - skimage/measure/fit.py:624 (CircleModel/EllipseModel._estimate(), reached
-          #   from the CircleModel doctest) calls `scipy.spatial.minkowski_distance`, and
-          #   skimage/transform/_thin_plate_splines.py:183 (ThinPlateSplineTransform._estimate(),
-          #   reached from its own doctest) calls `scipy.spatial.distance_matrix` — both
-          #   deprecated by SciPy in favor of `scipy.spatial.distance.minkowski`/`cdist` as
-          #   of SciPy 1.18.0. scikit-image's pyproject.toml only requires scipy>=1.11.4
-          #   with no upper bound, so cibuildwheel resolves the latest available (1.18.1).
-          # Pin both test venv deps below the version that introduced their respective new
-          # deprecation, rather than patch scikit-image's own library code.
-          CIBW_TEST_REQUIRES: pytest<9.1 numpy<2.5 Pillow<12.1.0 scipy<1.18
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: scikit-image-${{ env.SCIKIT_IMAGE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # numpy/scipy have riscv64 wheels only on our registry; cython/meson-python/
+      # pythran build from sdist there, same as upstream's own build-time resolution.
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy,scipy"
+      # Upstream's default test-extras ("test", "optional") pulls in SimpleITK, which has
+      # no riscv64 wheel and fails to build from source; use upstream's own aarch64/
+      # win_arm64/musllinux override (gotcha 336) instead.
+      cibw-test-extras: "test,optional_free_threaded"
+      # 0.26.0's own tests pass raw itertools.product() generators to parametrize();
+      # pytest 9.1 deprecates that and this project's filterwarnings=error turns it
+      # into a collection error (fixed upstream post-0.26.0). Cap at the ceiling
+      # 0.26.0 was actually tested against (gotcha 339).
+      #
+      # skimage/morphology/grayreconstruct.py:216 (reconstruction(), reached from the
+      # h_maxima/h_minima/CircleModel/EllipseModel/ransac doctests) assigns
+      # `rec_img.shape = ...` in place; NumPy 2.5 deprecation-warns on in-place .shape
+      # assignment, which filterwarnings=error again turns fatal. scikit-image's own
+      # pyproject.toml only requires numpy>=2.0 with no upper bound, so cibuildwheel
+      # resolves the latest available (2.5.3) and hits a warning that didn't exist when
+      # 0.26.0 shipped. Same class of bug as pytest<9.1 above (gotcha 339/355): pin the
+      # test venv's numpy below the version that introduced the new deprecation, rather
+      # than patch scikit-image's own library code.
+      #
+      # Same class again, twice more (gotcha 339/355):
+      # - skimage/io/_plugins/pil_plugin.py:52 (pil_to_ndarray(), reached from
+      #   io.imread()/io.MultiImage, exercised by test_multi_image.py's
+      #   test_len/test_slicing/test_concatenate) calls the now-deprecated
+      #   `Image.getdata()`. Pillow deprecated it in favor of `get_flattened_data()`
+      #   in 12.1.0 (2026); scikit-image's pyproject.toml only requires pillow>=10.1
+      #   with no upper bound, so cibuildwheel resolves the latest available (12.3.0).
+      # - skimage/measure/fit.py:624 (CircleModel/EllipseModel._estimate(), reached
+      #   from the CircleModel doctest) calls `scipy.spatial.minkowski_distance`, and
+      #   skimage/transform/_thin_plate_splines.py:183 (ThinPlateSplineTransform._estimate(),
+      #   reached from its own doctest) calls `scipy.spatial.distance_matrix` - both
+      #   deprecated by SciPy in favor of `scipy.spatial.distance.minkowski`/`cdist` as
+      #   of SciPy 1.18.0. scikit-image's pyproject.toml only requires scipy>=1.11.4
+      #   with no upper bound, so cibuildwheel resolves the latest available (1.18.1).
+      # Pin both test venv deps below the version that introduced their respective new
+      # deprecation, rather than patch scikit-image's own library code.
+      cibw-test-requires: "pytest<9.1 numpy<2.5 Pillow<12.1.0 scipy<1.18"
 
   publish:
     name: Publish scikit-image ${{ matrix.version }}

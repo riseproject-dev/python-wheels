@@ -51,70 +51,41 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build pytera ${{ matrix.version }} cp38-abi3-${{ matrix.libc }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         libc: ["manylinux", "musllinux"]
 
-    env:
-      PYTERA_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "pytera"
+      version: "${{ matrix.version }}"
+      repository: "PyO3Lab/pytera"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp38-abi3-${{ matrix.libc }}_riscv64"
 
-    steps:
-      - name: Checkout pytera v${{ env.PYTERA_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: PyO3Lab/pytera
-          ref: v${{ env.PYTERA_VERSION }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch pytera source
-        run: git apply python-wheels/patches/pytera/${{ env.PYTERA_VERSION }}/*.patch
+      patches: true
 
       # cibuildwheel rather than PyO3/maturin-action: on a riscv64 host the
       # action only maps riscv64gc-unknown-linux-gnu (to manylinux_2_39), so
       # the musllinux leg fell back to a host build and died on PEP 668 pip
       # installs; and a musl wheel cannot be tested on the glibc runner
       # anyway. cibuildwheel builds and tests each leg in its own pypa image.
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # pyo3's abi3-py38 feature is on unconditionally (Cargo.toml), so one
-          # cp38-abi3 wheel serves every interpreter; built on cp312 (our
-          # floor) and re-tested on cp313/cp314 via find_compatible_wheel.
-          CIBW_BUILD: >-
-            cp312-${{ matrix.libc }}_riscv64 cp313-${{ matrix.libc }}_riscv64
-            cp314-${{ matrix.libc }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest
-          # Run the tests from a staged copy, not the checkout: the root
-          # pytest.ini sets `pythonpath = . src`, which puts src/pytera (no
-          # compiled _core) ahead of the installed wheel. conftest.py reads
-          # templates/ from one level above tests/, so stage it alongside.
-          CIBW_TEST_SOURCES: tests templates
-          CIBW_TEST_COMMAND: >-
-            python -c "import pytera._core as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest -v tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pytera-${{ env.PYTERA_VERSION }}-cp38-abi3-${{ matrix.libc }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      # pyo3's abi3-py38 feature is on unconditionally (Cargo.toml), so one
+      # cp38-abi3 wheel serves every interpreter; built on cp312 (our
+      # floor) and re-tested on cp313/cp314 via find_compatible_wheel.
+      cibw-build: "cp312-${{ matrix.libc }}_riscv64 cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      # Run the tests from a staged copy, not the checkout: the root
+      # pytest.ini sets `pythonpath = . src`, which puts src/pytera (no
+      # compiled _core) ahead of the installed wheel. conftest.py reads
+      # templates/ from one level above tests/, so stage it alongside.
+      cibw-test-sources: "tests templates"
+      cibw-test-command: "python -c \"import pytera._core as m; assert m.__file__.endswith('.so'), m.__file__\" && python -m pytest -v tests"
 
   publish:
     name: Publish pytera ${{ matrix.version }}

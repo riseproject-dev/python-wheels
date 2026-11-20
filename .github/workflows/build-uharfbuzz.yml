@@ -52,8 +52,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build uharfbuzz ${{ matrix.version }} ${{ startsWith(matrix.version, '0.56.') && 'cp310' || 'cp311' }}-abi3-${{ matrix.libc }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -65,54 +63,30 @@ jobs:
         # is no second build.
         libc: [manylinux, musllinux]
 
-    env:
-      UHARFBUZZ_VERSION: ${{ matrix.version }}
-      ABI3_FLOOR: ${{ startsWith(matrix.version, '0.56.') && 'cp310' || 'cp311' }}
-
-    steps:
-      - name: Checkout uharfbuzz v${{ env.UHARFBUZZ_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: harfbuzz/uharfbuzz
-          ref: v${{ env.UHARFBUZZ_VERSION }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "uharfbuzz"
+      version: "${{ matrix.version }}"
+      repository: "harfbuzz/uharfbuzz"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ startsWith(matrix.version, '0.56.') && 'cp310' || 'cp311' }}-abi3-${{ matrix.libc }}_riscv64"
+      checkout-submodules: "recursive"
 
       # The extension statically links the vendored HarfBuzz C++ sources
       # (harfbuzz/, a git submodule); their licence isn't otherwise shipped
       # in the wheel. See patches/uharfbuzz/0.56.0 for details.
-      - name: Patch uharfbuzz source
-        run: git apply python-wheels/patches/uharfbuzz/${{ env.UHARFBUZZ_VERSION }}/00*.patch
+      patches: true
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ env.ABI3_FLOOR }}-${{ matrix.libc }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # The riscv64-compat patch leaves the checkout dirty relative to the
-          # tag, so setuptools_scm would otherwise compute a dev version.
-          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.UHARFBUZZ_VERSION }}
-          # Upstream's own repair-wheel-command pipes into a pipx-installed
-          # abi3audit, which the riscv64 image doesn't carry (gotcha 217);
-          # cibuildwheel's own default audit-command already abi3audits every
-          # abi3-tagged wheel natively once this repair step finishes.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: uharfbuzz-${{ env.UHARFBUZZ_VERSION }}-${{ env.ABI3_FLOOR }}-abi3-${{ matrix.libc }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ startsWith(matrix.version, '0.56.') && 'cp310' || 'cp311' }}-${{ matrix.libc }}_riscv64"
+      cibw-musllinux-riscv64-image: "quay.io/pypa/musllinux_1_2_riscv64"
+      # The riscv64-compat patch leaves the checkout dirty relative to the
+      # tag, so setuptools_scm would otherwise compute a dev version.
+      cibw-environment-linux: "SETUPTOOLS_SCM_PRETEND_VERSION=${{ matrix.version }}"
+      # Upstream's own repair-wheel-command pipes into a pipx-installed
+      # abi3audit, which the riscv64 image doesn't carry (gotcha 217);
+      # cibuildwheel's own default audit-command already abi3audits every
+      # abi3-tagged wheel natively once this repair step finishes.
+      cibw-repair-wheel-command-linux: "auditwheel repair -w {dest_dir} {wheel}"
 
   publish:
     name: Publish uharfbuzz ${{ matrix.version }}

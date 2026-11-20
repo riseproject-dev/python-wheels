@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       package:
-        description: Package name used in the uploaded artifact.
+        description: Package name used for checkout and patches.
         required: true
         type: string
       version:
@@ -41,6 +41,16 @@ on:
         required: false
         default: 1
         type: number
+      patches:
+        description: Apply patches/<package>/<version>/*.patch before building.
+        required: false
+        default: false
+        type: boolean
+      patches-required:
+        description: Fail when a patch glob matches no files.
+        required: false
+        default: true
+        type: boolean
       pre-build:
         description: Shell commands to run after checkout and before cibuildwheel.
         required: false
@@ -247,14 +257,48 @@ jobs:
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
+          path: ${{ inputs.package }}
           submodules: ${{ inputs['checkout-submodules'] }}
           fetch-depth: ${{ inputs['checkout-fetch-depth'] }}
           persist-credentials: false
+
+      - name: Checkout patches
+        if: inputs.patches
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        if: inputs.patches
+        env:
+          PATCHES: patches/${{ inputs.package }}/${{ inputs.version }}/*.patch
+          PATCHES_REQUIRED: ${{ inputs['patches-required'] }}
+        working-directory: ${{ inputs.package }}
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import subprocess
+          from pathlib import Path
+
+          repository = Path(os.environ["GITHUB_WORKSPACE"], "python-wheels")
+          pattern = os.environ["PATCHES"]
+          matches = sorted(glob.glob(str(repository / pattern)))
+          if not matches:
+              if os.environ["PATCHES_REQUIRED"] == "true":
+                  raise SystemExit(f"patch pattern matched no files: {pattern}")
+          else:
+              subprocess.run(["git", "apply", *matches], check=True)
+          PY
 
       - name: Prepare for cibuildwheel
         if: inputs['pre-build'] != ''
         env:
           COMMAND: ${{ inputs['pre-build'] }}
+        working-directory: ${{ inputs.package }}
         run: bash --noprofile --norc -euo pipefail -c "$COMMAND"
 
       - name: Configure cibuildwheel
@@ -293,9 +337,12 @@ jobs:
           CIBW_TEST_REQUIRES: ${{ inputs['cibw-test-requires'] }}
           CIBW_TEST_SKIP: ${{ inputs['cibw-test-skip'] }}
           CIBW_TEST_SOURCES: ${{ inputs['cibw-test-sources'] }}
+          PACKAGE: ${{ inputs.package }}
         run: |
           python3 - <<'PY'
           import os
+          import re
+          import shlex
           import uuid
 
           names = (
@@ -337,6 +384,19 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
               for name in names:
                   value = os.environ.get(name, "")
+                  package = os.environ["PACKAGE"]
+                  if name == "CIBW_TEST_SOURCES" and value:
+                      sources = []
+                      for source in shlex.split(value):
+                          if source.startswith("{project}"):
+                              source = source.replace("{project}", f"{{project}}/{package}", 1)
+                          elif not os.path.isabs(source):
+                              source = os.path.join(package, source)
+                          sources.append(source)
+                      value = " ".join(sources)
+                  elif value:
+                      value = value.replace("{project}", f"{{project}}/{package}")
+                      value = re.sub(r"/project(?=/|[\s:'\"]|$)", f"/project/{package}", value)
                   if not value:
                       continue
                   delimiter = f"cibw_{uuid.uuid4().hex}"
@@ -346,15 +406,16 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: ${{ inputs['cibw-package-dir'] }}
+          package-dir: ${{ inputs['cibw-package-dir'] == '.' && inputs.package || format('{0}/{1}', inputs.package, inputs['cibw-package-dir']) }}
           output-dir: ${{ inputs['cibw-output-dir'] }}
-          config-file: ${{ inputs['cibw-config-file'] }}
+          config-file: ${{ inputs['cibw-config-file'] != '' && format('{0}/{1}', inputs.package, inputs['cibw-config-file']) || '' }}
           extras: ${{ inputs['cibw-extras'] }}
 
       - name: Finish cibuildwheel build
         if: inputs['post-build'] != ''
         env:
           COMMAND: ${{ inputs['post-build'] }}
+        working-directory: ${{ inputs.package }}
         run: bash --noprofile --norc -euo pipefail -c "$COMMAND"
 
       - name: Upload wheels

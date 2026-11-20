@@ -53,53 +53,28 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build zstd ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      ZSTD_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "zstd"
+      version: "${{ matrix.version }}"
+      repository: "sergey-dryabzhinsky/python-zstd"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "recursive"
 
-    steps:
-      - name: Checkout zstd v${{ env.ZSTD_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: sergey-dryabzhinsky/python-zstd
-          ref: v${{ env.ZSTD_VERSION }}
-          submodules: recursive
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch zstd source
-        run: git apply python-wheels/patches/zstd/${{ env.ZSTD_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_REQUIRES: pytest
-          # Upstream's own suite (setup.py test); test_speed.py is a set of
-          # 30-second throughput benchmarks with no assertions.
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; l = sorted(str(p).rsplit('/', 1)[-1] for p in m.files('zstd') if 'LICENSE' in str(p)); assert l == ['LICENSE', 'LICENSE.zstd'], l"
-            && python -m pytest -q {package}/tests --ignore={package}/tests/test_speed.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: zstd-${{ env.ZSTD_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-test-requires: "pytest"
+      # Upstream's own suite (setup.py test); test_speed.py is a set of
+      # 30-second throughput benchmarks with no assertions.
+      cibw-test-command: "python -c \"import importlib.metadata as m; l = sorted(str(p).rsplit('/', 1)[-1] for p in m.files('zstd') if 'LICENSE' in str(p)); assert l == ['LICENSE', 'LICENSE.zstd'], l\" && python -m pytest -q {package}/tests --ignore={package}/tests/test_speed.py"
 
   publish:
     name: Publish zstd ${{ matrix.version }}

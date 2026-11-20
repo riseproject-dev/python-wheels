@@ -61,8 +61,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build truss-transfer ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -78,61 +76,28 @@ jobs:
               cp311-manylinux_riscv64 cp312-manylinux_riscv64
               cp313-manylinux_riscv64 cp314-manylinux_riscv64
 
-    env:
-      TRUSS_TRANSFER_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "truss-transfer"
+      version: "${{ matrix.version }}"
+      repository: "basetenlabs/truss"
+      ref: "8c0fc9c13cac7eba8dc31ca3874a6981226ffadd"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 360
 
-    steps:
-      - name: Checkout truss ${{ env.TRUSS_TRANSFER_REF }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: basetenlabs/truss
-          ref: ${{ env.TRUSS_TRANSFER_REF }}
-          persist-credentials: false
-
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch truss-transfer source
-        run: git apply python-wheels/patches/truss-transfer/${{ env.TRUSS_TRANSFER_VERSION }}/00*.patch
-
-      - name: Stage LICENSE beside truss-transfer's pyproject.toml
+      patches: true
+      pre-build: |-
         # maturin only globs LICEN[CS]E* next to pyproject.toml, so upstream's wheel ships no licence text.
-        run: cp LICENSE truss-transfer/LICENSE
+        cp LICENSE truss-transfer/LICENSE
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: truss-transfer
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream's yum install of openssl-devel/perl-IPC-Cmd is dropped: Cargo.lock has no openssl-sys (reqwest uses rustls/ring).
-          CIBW_BEFORE_ALL_LINUX: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_SOURCES: truss-transfer/example-bptr-manifest.json
-          CIBW_TEST_COMMAND: >-
-            python -c "import truss_transfer, truss_transfer.truss_transfer as m; assert m.__file__.endswith('.so'), m.__file__; assert truss_transfer.__version__ == '${{ env.TRUSS_TRANSFER_VERSION }}', truss_transfer.__version__; print(truss_transfer.__version__)" &&
-            mkdir -p /static-bptr /cache &&
-            cp truss-transfer/example-bptr-manifest.json /static-bptr/static-bptr-manifest.json &&
-            rm -rf tmp_no_cache tmp_fs_enabled tmp_range_enabled &&
-            BASETEN_FS_ENABLED=0 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_no_cache/test')" &&
-            test -d tmp_no_cache/test &&
-            BASETEN_FS_ENABLED=1 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=0 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_fs_enabled/test')" &&
-            BASETEN_FS_ENABLED=1 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=0 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_fs_enabled/test')" &&
-            BASETEN_FS_ENABLED=0 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=1 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_range_enabled/test')" &&
-            test -d tmp_fs_enabled/test &&
-            test -d tmp_range_enabled/test
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: truss-transfer-${{ env.TRUSS_TRANSFER_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-package-dir: "truss-transfer"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # Upstream's yum install of openssl-devel/perl-IPC-Cmd is dropped: Cargo.lock has no openssl-sys (reqwest uses rustls/ring).
+      cibw-before-all-linux: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-sources: "truss-transfer/example-bptr-manifest.json"
+      cibw-test-command: "python -c \"import truss_transfer, truss_transfer.truss_transfer as m; assert m.__file__.endswith('.so'), m.__file__; assert truss_transfer.__version__ == '${{ matrix.version }}', truss_transfer.__version__; print(truss_transfer.__version__)\" && mkdir -p /static-bptr /cache && cp truss-transfer/example-bptr-manifest.json /static-bptr/static-bptr-manifest.json && rm -rf tmp_no_cache tmp_fs_enabled tmp_range_enabled && BASETEN_FS_ENABLED=0 python -c \"import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_no_cache/test')\" && test -d tmp_no_cache/test && BASETEN_FS_ENABLED=1 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=0 python -c \"import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_fs_enabled/test')\" && BASETEN_FS_ENABLED=1 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=0 python -c \"import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_fs_enabled/test')\" && BASETEN_FS_ENABLED=0 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=1 python -c \"import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_range_enabled/test')\" && test -d tmp_fs_enabled/test && test -d tmp_range_enabled/test"
 
   publish:
     name: Publish truss-transfer ${{ matrix.version }}

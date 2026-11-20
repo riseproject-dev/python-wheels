@@ -51,67 +51,40 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build numcodecs ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      NUMCODECS_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "numcodecs"
+      version: "${{ matrix.version }}"
+      repository: "zarr-developers/numcodecs"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 300
+      checkout-submodules: "true"
 
-    steps:
-      - name: Checkout numcodecs v${{ env.NUMCODECS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: zarr-developers/numcodecs
-          ref: v${{ env.NUMCODECS_VERSION }}
-          submodules: true
-          persist-credentials: false
+      patches: true
 
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: python-wheels
-          persist-credentials: false
-
-      - name: Patch numcodecs source
-        run: git apply python-wheels/patches/numcodecs/${{ env.NUMCODECS_VERSION }}/*.patch
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Repeats upstream's [tool.cibuildwheel] environment, which this replaces.
-          # numpy resolves from our registry; the patch dirties the tree, so pin the
-          # version setuptools_scm would otherwise derive from git. numcodecs' own
-          # meson.build calls setuptools_scm.get_version() without dist_name (see
-          # src/numcodecs/_build_utils/gitversion.py), so only the unsuffixed
-          # SETUPTOOLS_SCM_PRETEND_VERSION is honored, not the _FOR_NUMCODECS form.
-          CIBW_ENVIRONMENT: >-
-            DISABLE_NUMCODECS_AVX2=1
-            SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.NUMCODECS_VERSION }}
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy
-          # test_zstd shells out to the zstd CLI, which the manylinux image lacks;
-          # its availability check raises instead of skipping when it is missing.
-          CIBW_BEFORE_TEST_LINUX: dnf -y install zstd
-          CIBW_TEST_EXTRAS: test,test_extras,msgpack
-          # Upstream's wheel job only imports numcodecs; run the bundled suite instead.
-          # Since 0.17.0 the suite lives in a top-level tests/ dir, not inside the
-          # package, so it must be staged and run directly rather than via --pyargs.
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_COMMAND: python -c "import importlib.metadata as md, numcodecs.blosc, numcodecs.zstd, numcodecs.lz4, numcodecs.vlen, numcodecs.compat_ext, numcodecs._shuffle, numcodecs.fletcher32, numcodecs.jenkins as j; assert j.__file__.endswith('.so'), j.__file__; assert any(str(p).endswith('.dist-info/licenses/LICENSE.zstd') for p in md.files('numcodecs'))" && python -m pytest tests -q
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: numcodecs-${{ env.NUMCODECS_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Repeats upstream's [tool.cibuildwheel] environment, which this replaces.
+      # numpy resolves from our registry; the patch dirties the tree, so pin the
+      # version setuptools_scm would otherwise derive from git. numcodecs' own
+      # meson.build calls setuptools_scm.get_version() without dist_name (see
+      # src/numcodecs/_build_utils/gitversion.py), so only the unsuffixed
+      # SETUPTOOLS_SCM_PRETEND_VERSION is honored, not the _FOR_NUMCODECS form.
+      cibw-environment-linux: "DISABLE_NUMCODECS_AVX2=1 SETUPTOOLS_SCM_PRETEND_VERSION=${{ matrix.version }}  PIP_ONLY_BINARY=numpy"
+      # test_zstd shells out to the zstd CLI, which the manylinux image lacks;
+      # its availability check raises instead of skipping when it is missing.
+      cibw-before-test-linux: "dnf -y install zstd"
+      cibw-test-extras: "test,test_extras,msgpack"
+      # Upstream's wheel job only imports numcodecs; run the bundled suite instead.
+      # Since 0.17.0 the suite lives in a top-level tests/ dir, not inside the
+      # package, so it must be staged and run directly rather than via --pyargs.
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-command: "python -c \"import importlib.metadata as md, numcodecs.blosc, numcodecs.zstd, numcodecs.lz4, numcodecs.vlen, numcodecs.compat_ext, numcodecs._shuffle, numcodecs.fletcher32, numcodecs.jenkins as j; assert j.__file__.endswith('.so'), j.__file__; assert any(str(p).endswith('.dist-info/licenses/LICENSE.zstd') for p in md.files('numcodecs'))\" && python -m pytest tests -q"
 
   publish:
     name: Publish numcodecs ${{ matrix.version }}
