@@ -90,7 +90,8 @@ class TestWorkflowContracts(unittest.TestCase):
 
     def test_native_workers_explicitly_dispatch_controller_after_terminal_jobs(self):
         for profile, needs in (("upstreaming-worker", {"safe_outputs", "publish"}),
-                               ("upstreaming-investigator", {"safe_outputs", "record", "notify"})):
+                               ("upstreaming-investigator", {"safe_outputs", "record", "notify"}),
+                               ("upstreaming-dispatcher", {"safe_outputs"})):
             config = source(profile)
             job = config["jobs"]["continuation"]
             self.assertEqual(set(job["needs"]), needs)
