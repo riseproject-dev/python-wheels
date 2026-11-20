@@ -149,7 +149,8 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
                 obs.staged.append(("contributions", cur))
             if verdict.state == "passed" and cur["phase"] == "development" and not cur.get("debug_commits"):
                 before = cur
-                cur = dict(cur, phase="handoff", activity="waiting_human", clean_head_sha=head["head"],
+                cur = dict(cur, phase="handoff", activity="waiting_human", active_work=None,
+                           clean_head_sha=head["head"],
                            handoff_request={"command_id": f"observation-{eid}", "head": head["head"],
                                             "revision": cur["revision"]},
                            pending_human_action={"kind": "approve_handoff", "requested_at": now,
