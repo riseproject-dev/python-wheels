@@ -108,8 +108,8 @@ pre-agent-steps:
         git fetch -q --no-tags --depth=200 upstream HEAD
         git checkout -q -B riscv64 FETCH_HEAD
       fi
-      git config user.name "riseproject-upstreaming"
-      git config user.email "noreply@riseproject.dev"
+      git config user.name "riseproject-dev[bot]"
+      git config user.email "330740410+riseproject-dev[bot]@users.noreply.github.com"
       echo "checked out $(git rev-parse HEAD) into ./fork"
 jobs:
   safe_outputs:
