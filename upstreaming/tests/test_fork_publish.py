@@ -67,6 +67,14 @@ class _ForkFixture:
         with self.assertRaisesRegex(fork_publish.PublishRejected, "did not acknowledge"):
             fork_publish.check_proposal(self.proposal(reason_ids=[]), self.record, self.task)
         fork_publish.check_proposal(self.proposal(reason_ids=["ci-1"]), self.record, self.task)
+        self.task["context"] = {"reason_evidence": [{"kind": "human_relay", "data": {
+            "comments": [{"id": 20}], "conversation_comments": [{"id": 30}]}}]}
+        with self.assertRaisesRegex(fork_publish.PublishRejected, "responses for feedback"):
+            fork_publish.check_proposal(self.proposal(reason_ids=["ci-1"]), self.record, self.task)
+        fork_publish.check_proposal(self.proposal(
+            reason_ids=["ci-1"], feedback_responses=[
+                {"comment_id": 20, "summary": "Updated the matrix."},
+                {"comment_id": 30, "summary": "Enabled the test workflow."}]), self.record, self.task)
 
     def fork_head(self):
         return git(self.fork_bare, "rev-parse", "refs/heads/riscv64")

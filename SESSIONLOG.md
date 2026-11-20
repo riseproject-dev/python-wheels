@@ -25,3 +25,4 @@
 - Fixed review and CI reconciliation so pending human feedback survives head changes, every repair carries and acknowledges all feedback evidence, `fix_needed` cannot be overwritten before dispatch, and any executed build or test failure returns handoff to automated development repair.
 - Replaced the rejected workflow-glob approach with complete dossier path coverage and natural-language review scope extension: human-relay-backed repairs may add exact changed paths, which trusted publication verifies and persists without requiring command syntax.
 - Added an exact-path repair compatibility flag for live contributions whose dossiers predate mandatory path coverage; new dossiers are marked coverage-complete and cannot use the legacy allowance.
+- Added trusted post-publication review acknowledgements: every addressed feedback item gets a short App-authored response, inline review threads are resolved after replying, and marker/readback checks make retries idempotent.
