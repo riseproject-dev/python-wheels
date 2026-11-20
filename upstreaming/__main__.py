@@ -200,8 +200,11 @@ def cmd_plan(args) -> int:
         for evidence_id in req.get("reason_ids") or []:
             evidence = snap.evidence.get(evidence_id)
             if evidence:
-                reason_evidence.append({key: evidence.get(key) for key in
-                                        ("evidence_id", "kind", "summary", "limitations")})
+                item = {key: evidence.get(key) for key in
+                        ("evidence_id", "kind", "summary", "limitations")}
+                if evidence.get("kind") == "human_relay":
+                    item["data"] = evidence.get("data")
+                reason_evidence.append(item)
         nodes.append(work.node(req, rec, control_repo_id=args.control_repo_id,
                                allowed_paths=rec.get("scope_paths") or ctr.get("allowed_paths")
                                or [".github/workflows/*"],

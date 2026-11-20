@@ -187,11 +187,17 @@ addition to the target riscv64 job and wheel contract. Failures confined to
 package publishing, upload, or release-request validation remain non-blocking in
 the intentionally credentialless destination organization. A build or test
 failure discovered after handoff automatically returns the contribution to
-revisioned development repair. When a dossier approves any file under
-`.github/workflows/`, the admitted scope is normalized to the bounded
-`.github/workflows/*` glob so review and CI repair can update a sibling test,
-build, or release workflow. Existing publisher checks still reject unsafe
-workflow content and every non-workflow path remains explicitly scoped.
+revisioned development repair.
+
+The investigation dossier assesses path coverage separately for build, test,
+release, packaging, documentation and native sources. Its multi-path
+`allowed_paths` must cover every path found by that assessment and is preserved
+through contribution state, Work and publication. If an authorized reviewer
+later asks in ordinary natural language for a change that requires another
+file, the human-relay-backed repair may identify and change that additional
+exact path without command syntax. The trusted publisher admits only exact
+paths actually changed by that repair, applies all existing content and workflow
+safety checks, and persists the verified paths into contribution scope.
 
 Previously merged implementation:
 

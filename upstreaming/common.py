@@ -83,19 +83,6 @@ def validate_scope_paths(paths: list[str]) -> list[str]:
     return paths
 
 
-def normalize_workflow_scope(paths: list[str]) -> list[str]:
-    """Use one bounded workflow-directory scope when any workflow is approved.
-
-    Architecture integration and its test/release validation commonly span
-    sibling workflow files. Exact-file scope strands review-driven repair, while
-    the publisher still applies its workflow-content safety policy to this glob.
-    """
-    result = [path for path in paths if not path.startswith(".github/workflows/")]
-    if len(result) != len(paths):
-        result.insert(0, ".github/workflows/*")
-    return validate_scope_paths(list(dict.fromkeys(result)))
-
-
 def normalize_distribution(name: str) -> str:
     """PEP 503 name normalization."""
     return re.sub(r"[-_.]+", "-", name).lower()

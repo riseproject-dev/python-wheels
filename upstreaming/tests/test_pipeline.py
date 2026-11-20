@@ -258,6 +258,13 @@ class TestPublicationRetry(unittest.TestCase):
               "operation": None, "artifact": None}
         self.assertIsNone(self.final(self.tick(rec, [ok]))["pending_publication"])
 
+    def test_verified_review_paths_are_persisted_in_contribution_scope(self):
+        self.rec["scope_paths"] = ["build.yml"]
+        op = {"operation_id": "op-1", "proposed": {"changed_files": ["build.yml", "test.yml"]}}
+        updated, _ = reconcile.apply_publication(
+            self.rec, {"status": "published", "operation": op}, now=self.now.isoformat())
+        self.assertEqual(updated["scope_paths"], ["build.yml", "test.yml"])
+
 
 class TestDispatchRecovery(unittest.TestCase):
     """A requested task whose dispatch never reached the queue (live run

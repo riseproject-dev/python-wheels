@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from upstreaming import (capacity, ci_evidence, collect, commands, common, controller, recovery,
+from upstreaming import (capacity, ci_evidence, collect, commands, controller, recovery,
                                     release, triggers)
 from upstreaming.tests.helpers import (NOW, OWNER, SHA_A, SHA_B, comment, contribution,
                                                   policy)
@@ -255,14 +255,6 @@ class TestDevelopmentReviewFeedback(unittest.TestCase):
         self.assertIsNone(collect.development_review_feedback(self.Api(), rec, [OWNER["id"]]))
 
 
-class TestScopeNormalization(unittest.TestCase):
-    def test_workflow_files_share_a_bounded_repair_scope(self):
-        self.assertEqual(common.normalize_workflow_scope([
-            ".github/workflows/wheels.yml", "README.rst", ".github/workflows/test.yml"]),
-            [".github/workflows/*", "README.rst"])
-        self.assertEqual(common.normalize_workflow_scope(["src/port.c"]), ["src/port.c"])
-
-
 class TestTriggers(unittest.TestCase):
     def test_semantics(self):
         doc = {"on": {"push": {"branches": ["main"], "paths": ["docs/**", "!docs/x/**"]}}}
@@ -411,7 +403,7 @@ class TestTick(unittest.TestCase):
         self.assertEqual(final["dossier_evidence_id"], ev[0]["evidence_id"])
         self.assertEqual((final["phase"], final["activity"], final["revision"]), ("provisioning", "waiting_capacity", 1))
         self.assertEqual(final["admission_class"], "configuration_integration")
-        self.assertEqual(final["scope_paths"], [".github/workflows/*"])
+        self.assertEqual(final["scope_paths"], [".github/workflows/*", "README.rst"])
         self.assertIsNone(final["pending_human_action"])
         self.assertIsNone(final["proposal_artifact"])
         self.assertEqual(len(out.report["provision_requests"]), 1)

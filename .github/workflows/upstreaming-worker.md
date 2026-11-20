@@ -311,7 +311,14 @@ re-applies your series in a fresh repository, validates it against the
 approved scope and pushes it to `riscv64` itself. Anything outside
 `allowed_paths`, any `{debug}` commit when `upstream_facing` is true, any
 `pull_request_target`, new secret, or interpolation of untrusted event text into
-scripts is rejected.
+scripts is rejected. For a repair backed by authorized review feedback,
+`review_scope_extension` is true. Natural-language review feedback may require
+an exact file that the original dossier missed. Research the request, include
+that exact repository-relative path in `changed_files`, and make the requested
+change without asking the reviewer to use command syntax. The trusted publisher
+will admit only the exact changed paths in this repair and persist verified
+additions to contribution scope. This does not permit globs or unrelated files.
+Inline review comment paths are present in the human-relay evidence data.
 
 ## Mandatory change-history research
 
