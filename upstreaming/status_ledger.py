@@ -40,6 +40,8 @@ def _command_lines(record: dict) -> list[str]:
                   f'/upstreaming abandon revision={revision} reason="..."']
     if record.get("paused") or record.get("blocked_reason"):
         lines.append(f'/upstreaming resume revision={revision} reason="..."')
+    if phase == "abandoned":
+        lines.append(f'/upstreaming restart revision={revision} reason="..."')
     if phase == "parked":
         paths = ",".join(record.get("scope_paths") or [".github/workflows/*"])
         admission = record.get("admission_class") or "configuration_integration"

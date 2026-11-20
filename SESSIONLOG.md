@@ -31,3 +31,4 @@
 - Added a hash-pinned gh-aw v1.2.2 console guard that preserves canonical agent evidence while preventing untrusted model or MCP text from being parsed as GitHub Actions workflow commands.
 - Replaced console-byte rewriting with GitHub's native stop-commands protocol: trusted pre/post agent steps bracket exact output with a random step-output token and always restore command processing.
 - Required investigator and worker dependency audits to use the RISE simple index plus `PIP_PREFER_BINARY=true` when public PyPI lacks compatible riscv64 build/test wheels, and updated both mirrored porting-skill paths with resolver-scope guidance.
+- Added a stale-proof `/upstreaming restart` command for abandoned contributions that keeps the same tracking issue and append-only ledger while starting a fresh queued lifecycle generation after writer quiescence.

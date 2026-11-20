@@ -264,6 +264,7 @@ work that moved meanwhile:
 
 ```text
 /upstreaming resume revision=1 reason="quota back"
+/upstreaming restart revision=8 reason="Restart from a fresh investigation."
 /upstreaming force-develop revision=2 class=configuration_integration paths=".github/workflows/*" reason="Concrete override scope."
 /upstreaming approve-handoff revision=3 head=<clean head sha>
 ```
@@ -302,6 +303,13 @@ None of these perform remote writes.
   current-revision `force-develop` instead records a bounded override scope and
   proceeds directly to automatic provisioning. Duplicates, timers and
   prerequisite changes never resume a parked contribution.
+- **Restart after abandon** requires the exact current revision and fails while
+  Work, a writer operation or publication is active. It preserves the same
+  tracking issue, contribution identity, append-only event ledger and old-run
+  replay fence, increments `generation` and revision, then clears the old
+  dossier, scope, fork/PR, CI/review cursors, budget consumption and mutable
+  operation state before returning to queued investigation. It does not delete
+  or close remote resources; perform that explicit cleanup while abandoned.
 - **Handoff**: `request-handoff` needs executed CI evidence for the exact
   head. `approve-handoff` binds to the clean head after `{debug}` removal.
   Any new change made before submission clears the approval.

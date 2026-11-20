@@ -46,6 +46,9 @@ GRAMMAR: dict[str, dict[str, str]] = {
     "revise-scope": {"contribution": _ID, "revision": _INT, "proposal": _ID},
     "block": {"contribution": _ID, "revision": _INT, "reason": _REASON},
     "abandon": {"contribution": _ID, "revision": _INT, "reason": _REASON},
+    # Start a new lifecycle generation on the same tracking issue. This is
+    # deliberately allowed only after abandon and requires an exact revision.
+    "restart": {"contribution": _ID, "revision": _INT, "reason": _REASON},
     "resolve-operation": {
         "operation": _ID,
         "disposition": r"confirmed|not-launched|failed",

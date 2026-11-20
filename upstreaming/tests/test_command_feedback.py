@@ -27,6 +27,14 @@ class FakeApi:
 
 
 class TestCommandFeedback(unittest.TestCase):
+    def test_rejected_restart_has_actionable_template(self):
+        receipt = {"comment_id": 42, "actor": {"login": "luhenry"}, "verb": "restart",
+                   "reason": "stale revision 7, current is 8"}
+        original = {"body": "/upstreaming restart revision=7 reason=r",
+                    "user": {"login": "luhenry"}}
+        body = command_feedback.render(receipt, original)
+        self.assertIn('/upstreaming restart revision=7 reason="..."', body)
+
     def test_rejected_command_is_quoted_pings_author_and_shows_expected_form(self):
         receipt = {"schema_version": 1, "command_id": "comment-42", "command_version": 1,
                    "comment_id": 42, "issue_number": 1138, "actor": {"id": 660779, "login": "luhenry"},

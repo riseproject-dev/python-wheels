@@ -64,7 +64,8 @@ class Outcome:
 
 def _event(before: dict, after: dict, kind: str, cause_type: str, cause_id: str | None,
            now: str, bumped: bool) -> dict:
-    keys = ("phase", "activity", "paused", "revision", "blocked_reason", "parked_reason")
+    keys = ("phase", "activity", "paused", "revision", "generation",
+            "blocked_reason", "parked_reason")
     return {
         "schema_version": 1,
         "contribution_id": after["contribution_id"],
@@ -158,6 +159,43 @@ def _reject(record: dict, reason: str) -> Outcome:
     return Outcome(record, False, reason, None)
 
 
+def _restart_generation(record: dict, now: str) -> dict:
+    """Reset mutable lifecycle state while retaining identity and replay fences."""
+    rec = copy.deepcopy(record)
+    rec.update({
+        "generation": int(record.get("generation", 0)) + 1,
+        "phase": "queued", "activity": "idle", "paused": False,
+        "blocked_reason": None, "parked_reason": None, "terminal_reason": None,
+        "previous_phase": None,
+        "owners": {"primary": None, "backup": None, "submitter": None,
+                   "handoff_reviewer": None},
+        "admission_class": None,
+        "upstream": {"repository_id": None, "full_name": record["upstream"]["full_name"],
+                     "base_ref": None, "base_sha": None},
+        "fork": None, "upstream_pr": None, "target_contract_id": None,
+        "prerequisite_ids": [], "active_operation_id": None,
+        "queue_work_id": None, "queue_claim_handle": None, "queue_result_id": None,
+        "proposal_artifact": None, "publication_operation_id": None,
+        "pending_publication": None,
+        # Keep processed_publications as a replay fence against old run artifacts.
+        "processed_review_ids": [], "processed_review_comment_ids": [],
+        "processed_pr_conversation_comment_ids": [],
+        "pending_feedback_evidence_ids": [], "active_work": None,
+        "dossier_evidence_id": None, "scope_coverage_complete": False,
+        "scope_paths": None, "debug_commits": [], "clean_head_sha": None,
+        "handoff_request": None, "handoff_approval": None,
+        "last_ci_evidence_id": None, "merge": None, "retirement": None,
+        "release_acceptance": None, "pending_human_action": None,
+        "next_poll_at": None, "updated_at": now,
+    })
+    budget = record["budget"]
+    rec["budget"] = {"policy_id": budget["policy_id"], "attempts_used": 0,
+                     "no_progress_streak": 0, "clusters": {},
+                     "spent_estimate_usd_cents": 0}
+    _bump(rec)
+    return rec
+
+
 def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, now: str,
                   verified_pr: dict | None = None, provisioning: dict | None = None,
                   backup_user: dict | None = None) -> Outcome:
@@ -184,7 +222,7 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
     # Everything that (re)activates or approves work must name the current revision.
     if cmd.verb not in ("pause", "block", "park", "abandon") and rev != cur:
         return _reject(record, f"stale revision {rev}, current is {cur}")
-    if phase in TERMINAL and cmd.verb != "authorize-followup":
+    if phase in TERMINAL and cmd.verb not in ("authorize-followup", "restart"):
         return _reject(record, f"contribution is terminal ({phase})")
 
     rec = copy.deepcopy(record)
@@ -226,6 +264,15 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
         rec["phase"] = "abandoned"
         rec["terminal_reason"] = a["reason"]
         rec["activity"] = "idle"
+    elif v == "restart":
+        if phase != "abandoned":
+            return _reject(record, f"restart needs phase abandoned, not {phase}")
+        if record.get("active_work"):
+            return _reject(record, "cannot restart while Work is active")
+        if record.get("active_operation_id") or record.get("pending_publication"):
+            return _reject(record, "cannot restart while a writer operation is active")
+        rec = _restart_generation(record, now)
+        bumped = True
     elif v == "request-handoff":
         if phase != "development":
             return _reject(record, f"request-handoff needs phase development, not {phase}")
@@ -424,6 +471,7 @@ def new_contribution(*, contribution_id: str, project_id: str, issue: dict, upst
         "contribution_id": contribution_id,
         "project_id": project_id,
         "revision": 0,
+        "generation": 0,
         "phase": "queued",
         "activity": "idle",
         "paused": False,
