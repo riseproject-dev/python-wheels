@@ -89,12 +89,44 @@ def dispatch_recovery(contributions: dict[str, dict], *, runs: list[dict] | None
     for key, c in pending:
         aw = c["active_work"]
         state = queue_works.get(work.graph_id(aw["dedupe_key"]))
-        if state not in (None, "available"):
-            continue      # claimed, running or finished: the worker outcome or the deadline decides
+        if state not in (None, "available", "completed", "cancelled"):
+            continue      # a live Claim is resolved by the worker outcome or deadline
         requested = datetime.fromisoformat(aw["requested_at"])
         after = [r for r in runs if datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) >= requested]
         entry = {"contribution": c["contribution_id"], "task": aw["task"], "queue_state": state,
                  "dispatcher_runs": [r["id"] for r in after]}
+        if state in ("completed", "cancelled"):
+            # Work graphs are immutable and terminal. Reusing the same graph
+            # can only fail. Allocate a new revision for a bounded automatic
+            # retry, or park the contribution so it cannot block the queue.
+            attempt = aw.get("attempt", 1)
+            if attempt < limit:
+                revision = c["revision"] + 1
+                fresh_aw = dict(aw, revision=revision, attempt=attempt + 1,
+                                dedupe_key=f"{c['contribution_id']}@{revision}:{aw['task']}",
+                                requested_at=iso,
+                                deadline_at=(now + timedelta(hours=controller.WORK_DEADLINE_HOURS)).isoformat(),
+                                dispatched_run_id=None)
+                new = dict(c, revision=revision, activity="agent_running", active_work=fresh_aw,
+                           pending_human_action=None, updated_at=iso)
+                contributions[key] = new
+                schemas.validate("contribution", new)
+                staged.extend([("contributions", new),
+                               ("events", lifecycle._event(c, new, "terminal_work_retry", "recovery",
+                                                           f"queue-{state}-{attempt + 1}", iso, True))])
+                relaunch.append({"type": "relaunch_dispatcher", "contribution_id": new["contribution_id"]})
+                report.append(entry | {"decision": f"new revision for terminal Work, attempt {attempt + 1} of {limit}"})
+            else:
+                new = dict(c, phase="parked", activity="idle", active_work=None, pending_human_action=None,
+                           parked_reason=f"automatic worker retries exhausted after terminal queue state {state}",
+                           updated_at=iso)
+                contributions[key] = new
+                schemas.validate("contribution", new)
+                staged.extend([("contributions", new),
+                               ("events", lifecycle._event(c, new, "worker_retries_exhausted", "recovery",
+                                                           f"queue-{state}", iso, True))])
+                report.append(entry | {"decision": "parked: automatic worker retries exhausted"})
+            continue
         if any(r.get("status") != "completed" for r in after):
             report.append(entry | {"decision": "dispatcher running"})
             continue
@@ -188,6 +220,11 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
         new["activity"] = "idle"
     elif status == "rejected":
         new["activity"] = "idle" if fclass == "stale" else "fix_needed"
+        if fclass != "stale":
+            # A failed immutable Work graph cannot be submitted again. A new
+            # repair attempt gets a new revision and therefore a new graph ID.
+            new["revision"] += 1
+            new["clean_head_sha"] = None
     elif status == "investigation":
         # Investigation artifacts are evidence, never patch proposals. Keeping
         # one in proposal_artifact would make base-branch CI look like patch CI

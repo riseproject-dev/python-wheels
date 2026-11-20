@@ -43,7 +43,8 @@ def contract_for(record: dict, contracts: dict[str, dict]) -> dict:
     data = c.get("data") or {}
     return {"required_job_patterns": data.get("required_job_patterns") or ["riscv64"],
             "expected_wheels": data.get("expected_wheels") or [],
-            "require_wheel_artifact": data.get("require_wheel_artifact", True)}
+            "require_wheel_artifact": data.get("require_wheel_artifact", True),
+            "required_runner_label": data.get("required_runner_label")}
 
 
 def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dict[str, dict],
@@ -118,7 +119,8 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
         snap = collect.ci_snapshot(api, repo_for_ci, head["head"])
         ctr = contract_for(cur, contracts)
         verdict = collect.evaluate_snapshot(snap, required_job_patterns=ctr["required_job_patterns"],
-                                            expected_wheels=ctr["expected_wheels"])
+                                            expected_wheels=ctr["expected_wheels"],
+                                            required_runner_label=ctr["required_runner_label"])
         if verdict.state == "passed" and ctr["require_wheel_artifact"] \
                 and not collect.wheel_names_from_artifacts(snap):
             # Green jobs without a riscv64 wheel artifact are not wheel success.

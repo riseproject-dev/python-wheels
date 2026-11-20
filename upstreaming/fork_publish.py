@@ -118,20 +118,22 @@ def _rewrite_app_identity(repo: Path, start: str, head: str) -> str:
     return parent
 
 
-def check_proposal(proposal: dict, record: dict, task: dict) -> None:
+def check_proposal(proposal: dict, record: dict, task: dict, *, allow_no_change: bool = False) -> None:
     """Static checks before any network access."""
     schemas.validate("proposal", proposal)
     if proposal["contribution_id"] != record["contribution_id"] or task["contribution_id"] != record["contribution_id"]:
         raise PublishRejected("proposal/task/record contribution mismatch")
     if proposal["expected_revision"] != task["revision"] or proposal["expected_head"] != task["expected_head"]:
         raise PublishRejected("proposal does not answer the admitted task (revision/head)")
+    fork = (record.get("fork") or {}).get("name") or ""
+    if not fork.startswith(FORK_ORG + "/") or task["fork"] != fork:
+        raise PublishRejected("task fork is not the recorded contribution fork")
+    if proposal["outcome"] == "no_change" and allow_no_change:
+        return
     if proposal["outcome"] != "patch" or proposal["operation"] == "none":
         raise PublishRejected(f"nothing to publish (outcome {proposal['outcome']})")
     if proposal["operation"] not in task["allowed_operations"]:
         raise PublishRejected(f"operation {proposal['operation']} not allowed for this task")
-    fork = (record.get("fork") or {}).get("name") or ""
-    if not fork.startswith(FORK_ORG + "/") or task["fork"] != fork:
-        raise PublishRejected("task fork is not the recorded contribution fork")
     if task.get("fork_repository_id") != record["fork"].get("repository_id") or not record["fork"].get("repository_id"):
         raise PublishRejected("task fork repository ID is not the approved one")
     if proposal.get("fork_repository_id") not in (None, record["fork"]["repository_id"]):
@@ -310,19 +312,26 @@ def preflight(*, record: dict, task: dict, proposal: dict, fork_lookup: Callable
     returns the single fork name to mint a token for, taken from the trusted
     task and confirmed against the fork's current repository ID and org."""
     try:
-        check_proposal(proposal, record, task)
+        check_proposal(proposal, record, task, allow_no_change=True)
     except (PublishRejected, schemas.SchemaError) as e:
-        return {"publish": False, "reason": str(e), "fork_name": "", "failure_class": "validation"}
+        return {"publish": False, "status": "rejected", "reason": str(e), "fork_name": "",
+                "failure_class": "validation"}
+    if proposal["outcome"] == "no_change":
+        return {"publish": False, "status": "no_change", "reason": proposal.get("diagnosis"),
+                "fork_name": "", "failure_class": None}
     try:
         repo = fork_lookup(task["fork"])
     except Exception as e:
-        return {"publish": False, "reason": f"could not read the fork: {e}", "fork_name": "",
-                "failure_class": "infrastructure"}
+        return {"publish": False, "status": "infra_error", "reason": f"could not read the fork: {e}",
+                "fork_name": "", "failure_class": "infrastructure"}
     if repo.get("id") != record["fork"]["repository_id"] or not repo.get("full_name", "").startswith(FORK_ORG + "/"):
-        return {"publish": False, "reason": "fork repository identity changed", "fork_name": "", "failure_class": "stale"}
+        return {"publish": False, "status": "rejected", "reason": "fork repository identity changed",
+                "fork_name": "", "failure_class": "stale"}
     if repo.get("archived"):
-        return {"publish": False, "reason": "fork is archived", "fork_name": "", "failure_class": "stale"}
-    return {"publish": True, "reason": None, "fork_name": repo["full_name"].split("/", 1)[1], "failure_class": None}
+        return {"publish": False, "status": "rejected", "reason": "fork is archived", "fork_name": "",
+                "failure_class": "stale"}
+    return {"publish": True, "status": "publish", "reason": None,
+            "fork_name": repo["full_name"].split("/", 1)[1], "failure_class": None}
 
 
 def main(argv=None) -> int:

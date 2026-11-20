@@ -391,7 +391,7 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         # not request it again. Cleared by the task's outcome or by timeout.
         from datetime import timedelta
         claimed = dict(c, activity="agent_running", updated_at=now, active_work={
-            "dedupe_key": work["dedupe_key"], "task": kind, "revision": c["revision"],
+            "dedupe_key": work["dedupe_key"], "task": kind, "revision": c["revision"], "attempt": 1,
             "requested_at": now,
             "deadline_at": (inputs.now + timedelta(hours=WORK_DEADLINE_HOURS)).isoformat(),
             "dispatched_run_id": None, "reason_ids": reason_ids})
