@@ -49,45 +49,26 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build bauplan ${{ matrix.version }} manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 1440
-
-    env:
-      BAUPLAN_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout bauplan v${{ env.BAUPLAN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: BauplanLabs/bauplan
-          ref: v${{ env.BAUPLAN_VERSION }}
-          persist-credentials: false
-
-      # Upstream builds the CLI on the runner and downloads a protoc release,
-      # which ships no riscv64 binary; both happen in the manylinux container
-      # here, with protoc from Rocky 10's CRB repo.
-      - name: Build wheels
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
-        with:
-          target: riscv64gc-unknown-linux-gnu
-          args: >-
-            --release --out dist
-            -i python3.12 python3.13 python3.14
-          manylinux: '2_39'
-          before-script-linux: |
-            set -euo pipefail
-            git config --global --add safe.directory "*"
-            yum install -y protobuf-compiler protobuf-devel
-            cargo build --release --bin bauplan
-            rm -f python/data/scripts/.gitkeep python/data/scripts/.gitignore
-            cp target/release/bauplan python/data/scripts/
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: bauplan-${{ env.BAUPLAN_VERSION }}-manylinux_riscv64
-          path: dist/*.whl
-          if-no-files-found: error
+    # Upstream builds the CLI on the runner and downloads a protoc release,
+    # which ships no riscv64 binary; both happen in the manylinux container
+    # here, with protoc from Rocky 10's CRB repo.
+    uses: $/.github/workflows/_build-maturin.yml
+    with:
+      package: bauplan
+      version: ${{ matrix.version }}
+      repository: BauplanLabs/bauplan
+      ref: v${{ matrix.version }}
+      artifact-tag: manylinux_riscv64
+      timeout-minutes: 1440
+      maturin-args: >-
+        --release -i python3.12 python3.13 python3.14
+      maturin-before-script-linux: |
+        set -euo pipefail
+        git config --global --add safe.directory "*"
+        yum install -y protobuf-compiler protobuf-devel
+        cargo build --release --bin bauplan
+        rm -f python/data/scripts/.gitkeep python/data/scripts/.gitignore
+        cp target/release/bauplan python/data/scripts/
 
   test_wheels:
     name: Test bauplan ${{ matrix.version }} on Python ${{ matrix.python-version }}

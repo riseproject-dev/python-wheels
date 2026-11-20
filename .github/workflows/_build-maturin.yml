@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+name: Build wheels with maturin
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Package name used for the uploaded artifact.
+        required: true
+        type: string
+      version:
+        description: Package version being built.
+        required: true
+        type: string
+      repository:
+        description: Upstream owner/repository to check out.
+        required: true
+        type: string
+      ref:
+        description: Upstream ref to check out.
+        required: true
+        type: string
+      artifact-tag:
+        description: Platform or ABI suffix used in the uploaded artifact name.
+        required: true
+        type: string
+      timeout-minutes:
+        description: Build job timeout in minutes.
+        required: false
+        default: 60
+        type: number
+      checkout-submodules:
+        description: actions/checkout submodules value (false, true, or recursive).
+        required: false
+        default: 'false'
+        type: string
+      maturin-args:
+        description: Arguments passed to maturin build, excluding the output directory.
+        required: true
+        type: string
+      maturin-target:
+        description: Rust target passed to maturin-action.
+        required: false
+        default: riscv64gc-unknown-linux-gnu
+        type: string
+      maturin-manylinux:
+        description: Manylinux compatibility level passed to maturin-action.
+        required: false
+        default: '2_39'
+        type: string
+      maturin-version:
+        description: Maturin version installed by maturin-action.
+        required: false
+        default: ''
+        type: string
+      maturin-working-directory:
+        description: Source-relative directory in which maturin runs.
+        required: false
+        default: .
+        type: string
+      maturin-output-directory:
+        description: Working-directory-relative wheel output directory.
+        required: false
+        default: dist
+        type: string
+      maturin-before-script-linux:
+        description: Script run by maturin-action before the Linux build.
+        required: false
+        default: git config --global --add safe.directory "*"
+        type: string
+      cargo-profile-release-lto:
+        description: CARGO_PROFILE_RELEASE_LTO value exported for the build.
+        required: false
+        default: ''
+        type: string
+      cargo-profile-release-codegen-units:
+        description: CARGO_PROFILE_RELEASE_CODEGEN_UNITS value exported for the build.
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build_wheel:
+    name: Build ${{ inputs.package }} ${{ inputs.version }} ${{ inputs['artifact-tag'] }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: ${{ inputs['timeout-minutes'] }}
+    steps:
+      - name: Checkout ${{ inputs.repository }} ${{ inputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          submodules: ${{ inputs['checkout-submodules'] }}
+          persist-credentials: false
+
+      - name: Validate maturin configuration
+        env:
+          ARGS: ${{ inputs['maturin-args'] }}
+          WORKING_DIRECTORY: ${{ inputs['maturin-working-directory'] }}
+          OUTPUT_DIRECTORY: ${{ inputs['maturin-output-directory'] }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import shlex
+
+          args = shlex.split(os.environ["ARGS"])
+          if any(
+              arg in {"-o", "--out"}
+              or arg.startswith("--out=")
+              or (arg.startswith("-o") and not arg.startswith("--"))
+              for arg in args
+          ):
+              raise SystemExit("maturin-args must not set the output directory")
+          PY
+          for directory in "$WORKING_DIRECTORY" "$OUTPUT_DIRECTORY"; do
+            case "$directory" in
+              ''|/*|../*|*/../*|*/..)
+                echo "directory must be a non-empty relative path without ..: $directory" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Configure Cargo release profile
+        if: inputs['cargo-profile-release-lto'] != '' || inputs['cargo-profile-release-codegen-units'] != ''
+        env:
+          LTO: ${{ inputs['cargo-profile-release-lto'] }}
+          CODEGEN_UNITS: ${{ inputs['cargo-profile-release-codegen-units'] }}
+        run: |
+          if [ -n "$LTO" ]; then
+            echo "CARGO_PROFILE_RELEASE_LTO=$LTO" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$CODEGEN_UNITS" ]; then
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=$CODEGEN_UNITS" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          maturin-version: ${{ inputs['maturin-version'] }}
+          target: ${{ inputs['maturin-target'] }}
+          args: ${{ inputs['maturin-args'] }} --out ${{ inputs['maturin-output-directory'] }}
+          working-directory: ${{ inputs['maturin-working-directory'] }}
+          manylinux: ${{ inputs['maturin-manylinux'] }}
+          before-script-linux: ${{ inputs['maturin-before-script-linux'] }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ inputs.package }}-${{ inputs.version }}-${{ inputs['artifact-tag'] }}
+          path: ${{ inputs['maturin-working-directory'] }}/${{ inputs['maturin-output-directory'] }}/*.whl
+          if-no-files-found: error

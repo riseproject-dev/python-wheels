@@ -49,44 +49,25 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build squawk-cli ${{ matrix.version }} manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 1440
-
-    env:
-      SQUAWK_CLI_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout squawk v${{ env.SQUAWK_CLI_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: sbdchd/squawk
-          ref: v${{ env.SQUAWK_CLI_VERSION }}
-          persist-credentials: false
-
-      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
-      # with no ABI tag, so a single native build covers every interpreter.
-      # `maturin-version` left unset because upstream's v1.7.1 pin predates
-      # maturin's riscv64 release assets (gotcha 344).
-      - name: Build wheel
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
-        with:
-          command: build
-          target: riscv64gc-unknown-linux-gnu
-          working-directory: crates/squawk
-          args: --release --locked --out dist
-          manylinux: '2_39'
-          # `perl-core` replaces upstream's `perl-IPC-Cmd`: Rocky 10 also lacks
-          # FindBin, which openssl-src's vendored OpenSSL build needs.
-          before-script-linux: |
-            git config --global --add safe.directory "*"
-            dnf -y install perl-core
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: squawk-cli-${{ env.SQUAWK_CLI_VERSION }}-manylinux_riscv64
-          path: crates/squawk/dist/*.whl
-          if-no-files-found: error
+    # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+    # with no ABI tag, so a single native build covers every interpreter.
+    # `maturin-version` left unset because upstream's v1.7.1 pin predates
+    # maturin's riscv64 release assets (gotcha 344).
+    uses: $/.github/workflows/_build-maturin.yml
+    with:
+      package: squawk-cli
+      version: ${{ matrix.version }}
+      repository: sbdchd/squawk
+      ref: v${{ matrix.version }}
+      artifact-tag: manylinux_riscv64
+      timeout-minutes: 1440
+      maturin-args: --release --locked
+      maturin-working-directory: crates/squawk
+      # `perl-core` replaces upstream's `perl-IPC-Cmd`: Rocky 10 also lacks
+      # FindBin, which openssl-src's vendored OpenSSL build needs.
+      maturin-before-script-linux: |
+        git config --global --add safe.directory "*"
+        dnf -y install perl-core
 
   test_wheel:
     name: Test squawk-cli ${{ matrix.version }} on Python ${{ matrix.python-version }}
