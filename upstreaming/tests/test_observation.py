@@ -256,10 +256,10 @@ class TestTriggers(unittest.TestCase):
         self.assertFalse(triggers.push_triggers({True: {"push": {"tags": ["v*"]}}}, ["a"])[0])
         self.assertEqual(triggers.classify_commit(["upstreaming-state/a", "ci_scripts/b"]), "mixed")
 
-    def test_repository_state_only_push_triggers_nothing(self):
+    def test_repository_state_only_push_refreshes_only_the_website(self):
         root = Path(__file__).resolve().parents[2]
         findings = triggers.audit(root / ".github/workflows", ["upstreaming-state/contributions/x.json"])
-        self.assertEqual([f.workflow for f in findings if f.triggered], [])
+        self.assertEqual([f.workflow for f in findings if f.triggered], ["website.yml"])
         self.assertEqual(triggers.workflow_run_consumers(root / ".github/workflows"),
                          ["upstreaming-controller.yml"])
 
