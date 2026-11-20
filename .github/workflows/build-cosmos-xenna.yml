@@ -49,130 +49,110 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cosmos-xenna ${{ matrix.version }} manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
 
-    env:
-      COSMOS_XENNA_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout cosmos-xenna v${{ env.COSMOS_XENNA_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: nvidia-cosmos/cosmos-xenna
-          ref: v${{ env.COSMOS_XENNA_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        env:
-          # abi3-py312 (Cargo.toml's pyo3 feature set) covers every GIL-ful
-          # interpreter with one wheel; requires-python is >=3.12, so there is
-          # no cp310/cp311 leg to drop here. musllinux is dropped: rustup.rs
-          # ships no riscv64 musl toolchain. One identifier only, matching
-          # upstream's own release-from-tag.yml (python-version: ['3.12'],
-          # no cp313/cp314 leg at all): cibuildwheel gives each CIBW_BUILD
-          # identifier its own fresh test venv, and grpcio (a CIBW_TEST_REQUIRES
-          # dep of ray[default], no riscv64 wheel anywhere) is not abi3 - it
-          # source-builds again, from scratch, per interpreter. Real log (run
-          # 43753003895, job 132930934627) shows this costing ~2.5h *twice*
-          # (grpcio installed again at 01:22:00Z, a second time, for the
-          # cp313 test venv, after the cp312 one already finished at
-          # 22:45:23Z) on top of the ~6h8m one build+test cycle already
-          # needs, which is what actually ran the 480-minute timeout out -
-          # the raise to 480m (previous commit) did take effect (cancelled
-          # at duration_ms=28768746, ~479.5m, not the old 360), it just was
-          # never going to be enough for 3 full cycles. Testing the abi3
-          # wheel under cp313/cp314 too, beyond what upstream's own CI does,
-          # was this port's own addition, not upstream's.
-          CIBW_BUILD: cp312-manylinux_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cosmos_xenna ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container here.
-          # aws-lc-sys (pulled in by rustls' default crypto provider) ships
-          # prebuilt riscv64gc bindings, and cmake is already in the image.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Test-install only: ray[default] pulls py-spy directly and
-          # cryptography transitively (opencensus -> google-api-core ->
-          # google-auth, unbounded). Both specs are satisfied by our
-          # registry's riscv64 wheels, but an unbounded pip install picks
-          # PyPI's newer release instead and source-builds it, which fails
-          # (py-spy 0.4.3: rustc error in its own source; cryptography
-          # 50.0.2: openssl-sys can't find openssl.pc).
-          # Upstream's own ci.yml sets this so test code scales resource requirements
-          # down to fit small CI runners (cosmos_xenna/utils/ci.py); cibuildwheel's
-          # podman container doesn't forward host env vars, so without it these tests
-          # ask for more CPUs than this runner has and fail with "Not enough CPU
-          # resources".
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=cryptography,py-spy IS_RUNNING_IN_CICD=1
-          # tqdm: cosmos_xenna/file_distribution/_file_distribution.py does a
-          # top-level `import tqdm`, but tqdm is not in pyproject.toml's
-          # `dependencies` (or any `[project.optional-dependencies]` group) -
-          # upstream's own uv.lock only carries it in because tqdm is a
-          # transitive dep of huggingface-hub/transformers (the `examples`
-          # extra), and `uv sync`'s default groups pull `examples` in locally.
-          # A plain `pip install cosmos-xenna` does not get tqdm at all, so
-          # this is really an upstream packaging gap, not a cibuildwheel-only
-          # issue, but we can't edit upstream's install_requires from here.
-          # It only bites at test time: --pyargs imports file_distribution
-          # (via pipelines.v1 / pipelines.private.pipelines) during
-          # collection, so it has to be listed here explicitly. tqdm is pure
-          # Python (py3-none-any), so it installs the same from either index
-          # with no riscv64 build step - no py-spy/cryptography-style
-          # resolver risk.
-          CIBW_TEST_REQUIRES: pytest tqdm
-          # The test files already ship inside the wheel itself (same as
-          # upstream's own published wheels), so --pyargs runs them straight
-          # against the installed, compiled package with no staging needed.
-          # "not slow" matches pyproject.toml's own default addopts, which a
-          # plain `pytest` invocation picks up from the checkout but --pyargs
-          # does not; upstream's separate `pytest -m 'slow'` CI step is
-          # dropped as disproportionate for a shared riscv64 runner.
-          #
-          # Deselect pipelines/v1/test_serving.py::test_serving: it builds a
-          # pipeline that deliberately includes a stage named
-          # _SegfaultingStage (cosmos_xenna/pipelines/private/specs.py:616's
-          # process_data calls ctypes.string_at on a bad pointer to simulate
-          # a crashed worker, testing serving mode's resilience to it). The
-          # real cp312 job log (run 43082742242, job 130739334072) shows this
-          # stage's worker genuinely segfaulting as designed ("Fatal Python
-          # error: Segmentation fault", stack through ctypes.string_at ->
-          # specs.py:616 -> stage_worker.py), the test itself then failing
-          # with _queue.Empty (the serving queue never got a result from the
-          # dead worker) - and after pytest prints its own full summary ("1
-          # failed, 548 passed, ... in 1069.33s"), the *whole* test process
-          # (not a Ray worker - the top-level `env ... pytest` command,
-          # confirmed by bash's own job-control line naming its PID) crashes
-          # with another, separate SIGSEGV. Ray's cleanup of a worker that
-          # died this way (closing the Plasma/object-store shared memory,
-          # tearing down raylet sockets) is evidently not safe on this
-          # architecture once that worker's crash leaves shared state
-          # corrupted - a genuine riscv64-specific Ray/ctypes-crash-handling
-          # gap, not a bug in cosmos_xenna's own code, and well beyond what a
-          # patch at this port's level can fix. Deselecting the one test that
-          # exercises this intentionally-crashing scenario avoids it; nothing
-          # else in the suite does this on purpose.
-          CIBW_TEST_COMMAND: >-
-            python -c "import cosmos_xenna._cosmos_xenna as m; assert m.__file__.endswith('.so'), m.__file__"
-            && python -m pytest --pyargs cosmos_xenna -q -m "not slow"
-            --deselect pipelines/v1/test_serving.py::test_serving
-        with:
-          output-dir: wheelhouse/
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cosmos-xenna-${{ env.COSMOS_XENNA_VERSION }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cosmos-xenna"
+      version: "${{ matrix.version }}"
+      repository: "nvidia-cosmos/cosmos-xenna"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "manylinux_riscv64"
+      timeout-minutes: 480
+      # abi3-py312 (Cargo.toml's pyo3 feature set) covers every GIL-ful
+      # interpreter with one wheel; requires-python is >=3.12, so there is
+      # no cp310/cp311 leg to drop here. musllinux is dropped: rustup.rs
+      # ships no riscv64 musl toolchain. One identifier only, matching
+      # upstream's own release-from-tag.yml (python-version: ['3.12'],
+      # no cp313/cp314 leg at all): cibuildwheel gives each CIBW_BUILD
+      # identifier its own fresh test venv, and grpcio (a CIBW_TEST_REQUIRES
+      # dep of ray[default], no riscv64 wheel anywhere) is not abi3 - it
+      # source-builds again, from scratch, per interpreter. Real log (run
+      # 43753003895, job 132930934627) shows this costing ~2.5h *twice*
+      # (grpcio installed again at 01:22:00Z, a second time, for the
+      # cp313 test venv, after the cp312 one already finished at
+      # 22:45:23Z) on top of the ~6h8m one build+test cycle already
+      # needs, which is what actually ran the 480-minute timeout out -
+      # the raise to 480m (previous commit) did take effect (cancelled
+      # at duration_ms=28768746, ~479.5m, not the old 360), it just was
+      # never going to be enough for 3 full cycles. Testing the abi3
+      # wheel under cp313/cp314 too, beyond what upstream's own CI does,
+      # was this port's own addition, not upstream's.
+      cibw-build: "cp312-manylinux_riscv64"
+      # cosmos_xenna ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container here.
+      # aws-lc-sys (pulled in by rustls' default crypto provider) ships
+      # prebuilt riscv64gc bindings, and cmake is already in the image.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Test-install only: ray[default] pulls py-spy directly and
+      # cryptography transitively (opencensus -> google-api-core ->
+      # google-auth, unbounded). Both specs are satisfied by our
+      # registry's riscv64 wheels, but an unbounded pip install picks
+      # PyPI's newer release instead and source-builds it, which fails
+      # (py-spy 0.4.3: rustc error in its own source; cryptography
+      # 50.0.2: openssl-sys can't find openssl.pc).
+      # Upstream's own ci.yml sets this so test code scales resource requirements
+      # down to fit small CI runners (cosmos_xenna/utils/ci.py); cibuildwheel's
+      # podman container doesn't forward host env vars, so without it these tests
+      # ask for more CPUs than this runner has and fail with "Not enough CPU
+      # resources".
+      cibw-test-environment: "PIP_ONLY_BINARY=cryptography,py-spy IS_RUNNING_IN_CICD=1"
+      # tqdm: cosmos_xenna/file_distribution/_file_distribution.py does a
+      # top-level `import tqdm`, but tqdm is not in pyproject.toml's
+      # `dependencies` (or any `[project.optional-dependencies]` group) -
+      # upstream's own uv.lock only carries it in because tqdm is a
+      # transitive dep of huggingface-hub/transformers (the `examples`
+      # extra), and `uv sync`'s default groups pull `examples` in locally.
+      # A plain `pip install cosmos-xenna` does not get tqdm at all, so
+      # this is really an upstream packaging gap, not a cibuildwheel-only
+      # issue, but we can't edit upstream's install_requires from here.
+      # It only bites at test time: --pyargs imports file_distribution
+      # (via pipelines.v1 / pipelines.private.pipelines) during
+      # collection, so it has to be listed here explicitly. tqdm is pure
+      # Python (py3-none-any), so it installs the same from either index
+      # with no riscv64 build step - no py-spy/cryptography-style
+      # resolver risk.
+      cibw-test-requires: "pytest tqdm"
+      # The test files already ship inside the wheel itself (same as
+      # upstream's own published wheels), so --pyargs runs them straight
+      # against the installed, compiled package with no staging needed.
+      # "not slow" matches pyproject.toml's own default addopts, which a
+      # plain `pytest` invocation picks up from the checkout but --pyargs
+      # does not; upstream's separate `pytest -m 'slow'` CI step is
+      # dropped as disproportionate for a shared riscv64 runner.
+      #
+      # Deselect pipelines/v1/test_serving.py::test_serving: it builds a
+      # pipeline that deliberately includes a stage named
+      # _SegfaultingStage (cosmos_xenna/pipelines/private/specs.py:616's
+      # process_data calls ctypes.string_at on a bad pointer to simulate
+      # a crashed worker, testing serving mode's resilience to it). The
+      # real cp312 job log (run 43082742242, job 130739334072) shows this
+      # stage's worker genuinely segfaulting as designed ("Fatal Python
+      # error: Segmentation fault", stack through ctypes.string_at ->
+      # specs.py:616 -> stage_worker.py), the test itself then failing
+      # with _queue.Empty (the serving queue never got a result from the
+      # dead worker) - and after pytest prints its own full summary ("1
+      # failed, 548 passed, ... in 1069.33s"), the *whole* test process
+      # (not a Ray worker - the top-level `env ... pytest` command,
+      # confirmed by bash's own job-control line naming its PID) crashes
+      # with another, separate SIGSEGV. Ray's cleanup of a worker that
+      # died this way (closing the Plasma/object-store shared memory,
+      # tearing down raylet sockets) is evidently not safe on this
+      # architecture once that worker's crash leaves shared state
+      # corrupted - a genuine riscv64-specific Ray/ctypes-crash-handling
+      # gap, not a bug in cosmos_xenna's own code, and well beyond what a
+      # patch at this port's level can fix. Deselecting the one test that
+      # exercises this intentionally-crashing scenario avoids it; nothing
+      # else in the suite does this on purpose.
+      cibw-test-command: >
+        python -c "import cosmos_xenna._cosmos_xenna as m; assert m.__file__.endswith('.so'), m.__file__"
+        && python -m pytest --pyargs cosmos_xenna -q -m "not slow"
+        --deselect pipelines/v1/test_serving.py::test_serving
   publish:
     name: Publish cosmos-xenna ${{ matrix.version }}
     needs: [setup, build_wheels]

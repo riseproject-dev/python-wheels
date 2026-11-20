@@ -49,8 +49,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build iceoryx2 ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -75,58 +73,41 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
 
-    env:
-      ICEORYX2_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout iceoryx2 v${{ env.ICEORYX2_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: eclipse-iceoryx/iceoryx2
-          ref: v${{ env.ICEORYX2_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: iceoryx2-ffi/python
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # iceoryx2-ffi/python ships no [tool.cibuildwheel], so the Rust
-          # toolchain its maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_REQUIRES: pytest
-          # cibuildwheel's copy_test_sources() resolves CIBW_TEST_SOURCES
-          # relative to the host checkout root (where actions/checkout put
-          # the whole iceoryx2 repo), not package-dir -- so this must be the
-          # full path down to the python bindings' tests/ (gotcha 23). It
-          # then stages the dir at that same relative path under the empty
-          # test_cwd, so CIBW_TEST_COMMAND must use the same path too.
-          CIBW_TEST_SOURCES: iceoryx2-ffi/python/tests
-          # iox2.testing.generate_isolated_config() (used throughout tests/)
-          # gives each test its own shared-memory/config namespace, so this
-          # is safe to run concurrently with other jobs on a shared runner.
-          # Upstream's own files are *_tests.py, which pytest's default
-          # python_files (test_*.py/*_test.py) never matches when pointed at
-          # the directory, so recursive collection finds nothing. Mirror
-          # upstream's own `poe test` (pyproject.toml: `pytest tests/*`) and
-          # pass the expanded file list instead of the directory.
-          CIBW_TEST_COMMAND: >-
-            python -c "import iceoryx2._iceoryx2 as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest -v iceoryx2-ffi/python/tests/*
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: iceoryx2-${{ env.ICEORYX2_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "iceoryx2"
+      version: "${{ matrix.version }}"
+      repository: "eclipse-iceoryx/iceoryx2"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 180
+      cibw-package-dir: "iceoryx2-ffi/python"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # iceoryx2-ffi/python ships no [tool.cibuildwheel], so the Rust
+      # toolchain its maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      # cibuildwheel's copy_test_sources() resolves CIBW_TEST_SOURCES
+      # relative to the host checkout root (where actions/checkout put
+      # the whole iceoryx2 repo), not package-dir -- so this must be the
+      # full path down to the python bindings' tests/ (gotcha 23). It
+      # then stages the dir at that same relative path under the empty
+      # test_cwd, so CIBW_TEST_COMMAND must use the same path too.
+      cibw-test-sources: "iceoryx2-ffi/python/tests"
+      # iox2.testing.generate_isolated_config() (used throughout tests/)
+      # gives each test its own shared-memory/config namespace, so this
+      # is safe to run concurrently with other jobs on a shared runner.
+      # Upstream's own files are *_tests.py, which pytest's default
+      # python_files (test_*.py/*_test.py) never matches when pointed at
+      # the directory, so recursive collection finds nothing. Mirror
+      # upstream's own `poe test` (pyproject.toml: `pytest tests/*`) and
+      # pass the expanded file list instead of the directory.
+      cibw-test-command: >
+        python -c "import iceoryx2._iceoryx2 as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -m pytest -v iceoryx2-ffi/python/tests/*
 
   publish:
     name: Publish iceoryx2 ${{ matrix.version }}

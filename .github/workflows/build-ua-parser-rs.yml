@@ -49,8 +49,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build ua-parser-rs ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -70,60 +68,45 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
 
-    env:
-      UA_PARSER_RS_VERSION: ${{ matrix.version }}
-
-    steps:
-      # ua-parser-rs is a pyo3/maturin wheel living at `ua-parser-rs/` inside
-      # the ua-parser/uap-python monorepo (moved there from ua-parser/uap-rust
-      # -- the crate's own Cargo.toml still points `homepage`/`repository` at
-      # the old location).
-      - name: Checkout uap-python ua-parser-rs-${{ env.UA_PARSER_RS_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ua-parser/uap-python
-          ref: ua-parser-rs-${{ env.UA_PARSER_RS_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ua-parser-rs
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # ua-parser-rs ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest pyyaml
-          # CIBW_TEST_SOURCES resolves against the checkout root (the
-          # uap-python monorepo), not package-dir: staging the top-level
-          # `ua_parser` package plus the uap-core submodule it tests against
-          # lets the test command install and exercise the real ua_parser.regex
-          # backend that wraps this wheel, same as upstream's own CI does.
-          CIBW_TEST_SOURCES: tests uap-core src pyproject.toml README.rst
-          # ua_parser_rs's top-level __init__.py is maturin's own pyi-stub shim
-          # ('from .ua_parser_rs import *', matching the official PyPI wheel) --
-          # the compiled extension is the ua_parser_rs.ua_parser_rs submodule.
-          CIBW_TEST_COMMAND: >-
-            python -c "import ua_parser_rs;
-            assert ua_parser_rs.ua_parser_rs.__file__.endswith(('.so', '.pyd')), ua_parser_rs.ua_parser_rs.__file__;
-            e = ua_parser_rs.UserAgentExtractor([('(Chrome)/([0-9]+)', None, None, None, None, None)]);
-            r = e.extract('Mozilla/5.0 Chrome/120');
-            assert r is not None and r.family == 'Chrome' and r.major == '120', r" &&
-            python -m pip install . &&
-            python -m pytest -v tests/test_core.py -k regex
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ua_parser_rs-${{ env.UA_PARSER_RS_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # ua-parser-rs is a pyo3/maturin wheel living at `ua-parser-rs/` inside
+    # the ua-parser/uap-python monorepo (moved there from ua-parser/uap-rust
+    # -- the crate's own Cargo.toml still points `homepage`/`repository` at
+    # the old location).
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "ua_parser_rs"
+      version: "${{ matrix.version }}"
+      repository: "ua-parser/uap-python"
+      ref: "ua-parser-rs-${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 90
+      checkout-submodules: "true"
+      cibw-package-dir: "ua-parser-rs"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # ua-parser-rs ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest pyyaml"
+      # CIBW_TEST_SOURCES resolves against the checkout root (the
+      # uap-python monorepo), not package-dir: staging the top-level
+      # `ua_parser` package plus the uap-core submodule it tests against
+      # lets the test command install and exercise the real ua_parser.regex
+      # backend that wraps this wheel, same as upstream's own CI does.
+      cibw-test-sources: "tests uap-core src pyproject.toml README.rst"
+      # ua_parser_rs's top-level __init__.py is maturin's own pyi-stub shim
+      # ('from .ua_parser_rs import *', matching the official PyPI wheel) --
+      # the compiled extension is the ua_parser_rs.ua_parser_rs submodule.
+      cibw-test-command: >
+        python -c "import ua_parser_rs;
+        assert ua_parser_rs.ua_parser_rs.__file__.endswith(('.so', '.pyd')), ua_parser_rs.ua_parser_rs.__file__;
+        e = ua_parser_rs.UserAgentExtractor([('(Chrome)/([0-9]+)', None, None, None, None, None)]);
+        r = e.extract('Mozilla/5.0 Chrome/120');
+        assert r is not None and r.family == 'Chrome' and r.major == '120', r" &&
+        python -m pip install . &&
+        python -m pytest -v tests/test_core.py -k regex
 
   publish:
     name: Publish ua-parser-rs ${{ matrix.version }}

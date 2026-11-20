@@ -52,8 +52,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build wreq ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -70,73 +68,54 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
 
-    env:
-      WREQ_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout wreq-python v${{ env.WREQ_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: 0x676e67/wreq-python
-          ref: v${{ env.WREQ_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # btls-sys runs bindgen (libclang) and `git apply`s its BoringSSL patches.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            dnf install -y clang-devel git
-          # From 0.12.2 on, wreq-python's own Cargo.toml [patch.crates-io] pins
-          # wreq/wreq-util/btls to exact git revs, so a plain lockfile already
-          # resolves to those; the 0.12.1-only --precise pin below is no longer
-          # just unneeded but breaks the build, since cargo reads a --precise
-          # value against a git-patched dependency as a git ref, and
-          # "6.0.0-rc.29" isn't one in 0x676e67/wreq.
-          # From 0.13.0 on, wreq-python's [patch.crates-io] also floats netty to
-          # branch=main; netty's own Cargo.toml separately patches http2 to a git
-          # rev for a Connection::extended_connect_protocol method no http2 release
-          # has yet ("Remove once an http2 release includes" it, per netty's own
-          # comment), but a dependency's [patch] table is only honoured for the
-          # top-level workspace, so wreq-python's build never picks it up and
-          # resolves crates.io's http2 instead, which is missing that method. Add
-          # the same patch to wreq-python's own Cargo.toml before locking.
-          CIBW_BEFORE_BUILD_LINUX: >-
-            ${{ matrix.version == '0.12.1' && format('cargo generate-lockfile && cargo update -p wreq --precise {0}', env.WREQ_CRATE_VERSION) ||
-            matrix.version == '0.13.0' && 'sed -i ''/^\[patch.crates-io\]/a http2 = { git = "https://github.com/0x676e67/http2", rev = "c932fc91f3139f5613a579b7b11df2860d66745c" }'' Cargo.toml && cargo generate-lockfile' ||
-            'cargo generate-lockfile' }}
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            MATURIN_PEP517_ARGS="--features jemalloc"
-            CARGO_BUILD_JOBS=2
-          # Upstream's tests job serves httpbin on localhost:8080 from the kennethreitz/httpbin
-          # container, i.e. under gunicorn: httpbin answers every chunked (streamed-body)
-          # request with a 501 unless SERVER_SOFTWARE is gunicorn, so the Werkzeug dev
-          # server behind `python -m httpbin.core` fails the body-stream tests.
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-rerunfailures httpbin gunicorn
-          # The body-stream and multipart tests open these by a repo-root-relative path.
-          CIBW_TEST_SOURCES: tests README.md Cargo.toml LICENSE
-          CIBW_TEST_COMMAND: >-
-            python -m gunicorn -b 127.0.0.1:8080 -k gthread --threads 8 httpbin:app > httpbin.log 2>&1 & HTTPBIN_PID=$!;
-            python -c "import wreq.wreq as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            for i in $(seq 60); do
-            python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/get', timeout=2)" 2>/dev/null && break;
-            sleep 1; done &&
-            python -m pytest -v tests; rc=$?;
-            kill $HTTPBIN_PID; [ $rc = 0 ] || tail -n 50 httpbin.log; exit $rc
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: wreq-${{ env.WREQ_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "wreq"
+      version: "${{ matrix.version }}"
+      repository: "0x676e67/wreq-python"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 360
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # btls-sys runs bindgen (libclang) and `git apply`s its BoringSSL patches.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+        dnf install -y clang-devel git
+      # From 0.12.2 on, wreq-python's own Cargo.toml [patch.crates-io] pins
+      # wreq/wreq-util/btls to exact git revs, so a plain lockfile already
+      # resolves to those; the 0.12.1-only --precise pin below is no longer
+      # just unneeded but breaks the build, since cargo reads a --precise
+      # value against a git-patched dependency as a git ref, and
+      # "6.0.0-rc.29" isn't one in 0x676e67/wreq.
+      # From 0.13.0 on, wreq-python's [patch.crates-io] also floats netty to
+      # branch=main; netty's own Cargo.toml separately patches http2 to a git
+      # rev for a Connection::extended_connect_protocol method no http2 release
+      # has yet ("Remove once an http2 release includes" it, per netty's own
+      # comment), but a dependency's [patch] table is only honoured for the
+      # top-level workspace, so wreq-python's build never picks it up and
+      # resolves crates.io's http2 instead, which is missing that method. Add
+      # the same patch to wreq-python's own Cargo.toml before locking.
+      cibw-before-build-linux: >
+        ${{ matrix.version == '0.12.1' && format('cargo generate-lockfile && cargo update -p wreq --precise {0}', env.WREQ_CRATE_VERSION) ||
+        matrix.version == '0.13.0' && 'sed -i ''/^\[patch.crates-io\]/a http2 = { git = "https://github.com/0x676e67/http2", rev = "c932fc91f3139f5613a579b7b11df2860d66745c" }'' Cargo.toml && cargo generate-lockfile' ||
+        'cargo generate-lockfile' }}
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" MATURIN_PEP517_ARGS=\"--features jemalloc\" CARGO_BUILD_JOBS=2"
+      # Upstream's tests job serves httpbin on localhost:8080 from the kennethreitz/httpbin
+      # container, i.e. under gunicorn: httpbin answers every chunked (streamed-body)
+      # request with a 501 unless SERVER_SOFTWARE is gunicorn, so the Werkzeug dev
+      # server behind `python -m httpbin.core` fails the body-stream tests.
+      cibw-test-requires: "pytest pytest-asyncio pytest-rerunfailures httpbin gunicorn"
+      # The body-stream and multipart tests open these by a repo-root-relative path.
+      cibw-test-sources: "tests README.md Cargo.toml LICENSE"
+      cibw-test-command: >
+        python -m gunicorn -b 127.0.0.1:8080 -k gthread --threads 8 httpbin:app > httpbin.log 2>&1 & HTTPBIN_PID=$!;
+        python -c "import wreq.wreq as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        for i in $(seq 60); do
+        python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/get', timeout=2)" 2>/dev/null && break;
+        sleep 1; done &&
+        python -m pytest -v tests; rc=$?;
+        kill $HTTPBIN_PID; [ $rc = 0 ] || tail -n 50 httpbin.log; exit $rc
 
   publish:
     name: Publish wreq ${{ matrix.version }}

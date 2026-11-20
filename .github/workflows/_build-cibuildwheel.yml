@@ -41,6 +41,16 @@ on:
         required: false
         default: 1
         type: number
+      checkout-fetch-tags:
+        description: Whether actions/checkout fetches tags.
+        required: false
+        default: false
+        type: boolean
+      checkout-sparse-checkout:
+        description: Newline-separated sparse-checkout patterns.
+        required: false
+        default: ''
+        type: string
       patches:
         description: Apply patches/<package>/<version>/*.patch before building.
         required: false
@@ -260,6 +270,8 @@ jobs:
           path: ${{ inputs.package }}
           submodules: ${{ inputs['checkout-submodules'] }}
           fetch-depth: ${{ inputs['checkout-fetch-depth'] }}
+          fetch-tags: ${{ inputs['checkout-fetch-tags'] }}
+          sparse-checkout: ${{ inputs['checkout-sparse-checkout'] }}
           persist-credentials: false
 
       - name: Checkout patches
@@ -388,15 +400,20 @@ jobs:
                   if name == "CIBW_TEST_SOURCES" and value:
                       sources = []
                       for source in shlex.split(value):
-                          if source.startswith("{project}"):
+                          if source.startswith((f"{{project}}/{package}", f"/project/{package}")):
+                              pass
+                          elif source.startswith("{project}"):
                               source = source.replace("{project}", f"{{project}}/{package}", 1)
+                          elif source == "/project" or source.startswith("/project/"):
+                              source = source.replace("/project", f"/project/{package}", 1)
                           elif not os.path.isabs(source):
                               source = os.path.join(package, source)
                           sources.append(source)
                       value = " ".join(sources)
                   elif value:
-                      value = value.replace("{project}", f"{{project}}/{package}")
-                      value = re.sub(r"/project(?=/|[\s:'\"]|$)", f"/project/{package}", value)
+                      suffix = rf"/{re.escape(package)}(?=/|[\s:'\"]|$)"
+                      value = re.sub(rf"\{{project\}}(?!{suffix})", f"{{project}}/{package}", value)
+                      value = re.sub(rf"/project(?!{suffix})(?=/|[\s:'\"]|$)", f"/project/{package}", value)
                   if not value:
                       continue
                   delimiter = f"cibw_{uuid.uuid4().hex}"

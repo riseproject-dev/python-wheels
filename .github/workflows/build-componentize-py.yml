@@ -50,59 +50,40 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build componentize-py ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      COMPONENTIZE_PY_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout componentize-py v${{ env.COMPONENTIZE_PY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: bytecodealliance/componentize-py
-          ref: v${{ env.COMPONENTIZE_PY_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # build.rs cross-compiles CPython and the runtime shims to
-          # wasm32-wasip2 using WASI-SDK's clang; WASI-SDK itself has to run
-          # natively on the build host. Upstream's own CI only ever downloads
-          # x86_64/arm64 WASI-SDK releases, but the WASI-SDK project also
-          # publishes a riscv64-linux host build from wasi-sdk-33 onward
-          # (its own CI cross-compiles that artifact), so fetching it
-          # ourselves closes a gap in upstream's download helper rather than
-          # needing a patch to build.rs (which honors WASI_SDK_PATH as-is).
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            $HOME/.cargo/bin/rustup target add wasm32-wasip2 &&
-            curl -LO https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${{ env.WASI_SDK_VERSION }}/wasi-sdk-${{ env.WASI_SDK_VERSION }}.0-riscv64-linux.tar.gz &&
-            tar xf wasi-sdk-${{ env.WASI_SDK_VERSION }}.0-riscv64-linux.tar.gz &&
-            mv wasi-sdk-${{ env.WASI_SDK_VERSION }}.0-riscv64-linux /opt/wasi-sdk
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            MATURIN_PEP517_ARGS="--features pyo3"
-          # No wheel-level test suite ships in the source tree: upstream
-          # tests via `cargo test` against wasmtime-cli, never packaged.
-          CIBW_TEST_COMMAND: >-
-            python -c "from componentize_py import componentize_py as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            componentize-py --help
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: componentize-py-${{ env.COMPONENTIZE_PY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "componentize-py"
+      version: "${{ matrix.version }}"
+      repository: "bytecodealliance/componentize-py"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 360
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # build.rs cross-compiles CPython and the runtime shims to
+      # wasm32-wasip2 using WASI-SDK's clang; WASI-SDK itself has to run
+      # natively on the build host. Upstream's own CI only ever downloads
+      # x86_64/arm64 WASI-SDK releases, but the WASI-SDK project also
+      # publishes a riscv64-linux host build from wasi-sdk-33 onward
+      # (its own CI cross-compiles that artifact), so fetching it
+      # ourselves closes a gap in upstream's download helper rather than
+      # needing a patch to build.rs (which honors WASI_SDK_PATH as-is).
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+        $HOME/.cargo/bin/rustup target add wasm32-wasip2 &&
+        curl -LO https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${{ env.WASI_SDK_VERSION }}/wasi-sdk-${{ env.WASI_SDK_VERSION }}.0-riscv64-linux.tar.gz &&
+        tar xf wasi-sdk-${{ env.WASI_SDK_VERSION }}.0-riscv64-linux.tar.gz &&
+        mv wasi-sdk-${{ env.WASI_SDK_VERSION }}.0-riscv64-linux /opt/wasi-sdk
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" MATURIN_PEP517_ARGS=\"--features pyo3\""
+      # No wheel-level test suite ships in the source tree: upstream
+      # tests via `cargo test` against wasmtime-cli, never packaged.
+      cibw-test-command: >
+        python -c "from componentize_py import componentize_py as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        componentize-py --help
 
   publish:
     name: Publish componentize-py ${{ matrix.version }}

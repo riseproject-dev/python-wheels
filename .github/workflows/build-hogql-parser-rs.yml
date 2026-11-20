@@ -56,50 +56,31 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build hogql-parser-rs ${{ matrix.version }} cp312-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
-
-    env:
-      HOGQL_PARSER_RS_VERSION: ${{ matrix.version }}
-
-    steps:
-      # The crate lives at rust/hogql/parser inside an ~80-member Cargo
-      # workspace (rust/Cargo.toml); sparse-checkout skips the rest of the
-      # multi-GB posthog monorepo (Django app, frontend, ...).
-      - name: Checkout posthog rust/ workspace
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: PostHog/posthog
-          ref: ${{ env.HOGQL_PARSER_RS_REF }}
-          sparse-checkout: rust
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: rust/hogql/parser
-          output-dir: wheelhouse/
-          # pyo3 carries abi3-py312 unconditionally, so one cp312-abi3 wheel
-          # covers every interpreter, matching upstream's own PyPI wheels.
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          only: cp312-manylinux_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_COMMAND: >-
-            python -c "import hogql_parser_rs as m;
-            assert m.hogql_parser_rs.__file__.endswith('.so'), m.hogql_parser_rs.__file__;
-            import json;
-            r = json.loads(m.parse_expr_json('1 + 2'));
-            assert r.get('error') is not True, r"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: hogql-parser-rs-${{ env.HOGQL_PARSER_RS_VERSION }}-cp312-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # The crate lives at rust/hogql/parser inside an ~80-member Cargo
+    # workspace (rust/Cargo.toml); sparse-checkout skips the rest of the
+    # multi-GB posthog monorepo (Django app, frontend, ...).
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "hogql-parser-rs"
+      version: "${{ matrix.version }}"
+      repository: "PostHog/posthog"
+      ref: "c30d2736928729ea424b08003c9cea2006b7606b"
+      checkout-sparse-checkout: "rust"
+      artifact-tag: "cp312-abi3-manylinux_riscv64"
+      cibw-package-dir: "rust/hogql/parser"
+      # pyo3 carries abi3-py312 unconditionally, so one cp312-abi3 wheel
+      # covers every interpreter, matching upstream's own PyPI wheels.
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "cp312-manylinux_riscv64"
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-command: >
+        python -c "import hogql_parser_rs as m;
+        assert m.hogql_parser_rs.__file__.endswith('.so'), m.hogql_parser_rs.__file__;
+        import json;
+        r = json.loads(m.parse_expr_json('1 + 2'));
+        assert r.get('error') is not True, r"
 
   publish:
     name: Publish hogql-parser-rs ${{ matrix.version }}

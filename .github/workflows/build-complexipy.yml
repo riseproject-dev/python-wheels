@@ -49,58 +49,42 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build complexipy ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      COMPLEXIPY_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout complexipy ${{ env.COMPLEXIPY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: rohaquinlop/complexipy
-          ref: ${{ env.COMPLEXIPY_VERSION }}
-          persist-credentials: false
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # Only manylinux: rustup.rs ships no riscv64 musl host toolchain, so
-          # musllinux can't build (same reason build-fastuuid.yml skips it).
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # complexipy ships no [tool.cibuildwheel], so the Rust toolchain its
-          # maturin backend needs is installed in-container here and put on
-          # PATH for the build.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
-          # Tests live at the repo root; stage them (and pyproject.toml, for
-          # [tool.pytest.ini_options]) into the test working directory so
-          # `import complexipy` resolves to the installed wheel, not the
-          # repo's own complexipy/ source directory (which is left unstaged).
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_REQUIRES: pytest
-          # Mirrors upstream's quick-tests job: pytest suite, then the CLI
-          # console script exercised with the same exclude/ignore flags
-          # upstream's own CI runs against tests/src.
-          CIBW_TEST_COMMAND: >-
-            python -c "import complexipy._complexipy as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest -v tests &&
-            complexipy tests/src --exclude "exclude_dir/**" --ignore-complexity &&
-            complexipy tests/src --exclude "**/test_exclude*.py" --ignore-complexity
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: complexipy-${{ env.COMPLEXIPY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "complexipy"
+      version: "${{ matrix.version }}"
+      repository: "rohaquinlop/complexipy"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      # Only manylinux: rustup.rs ships no riscv64 musl host toolchain, so
+      # musllinux can't build (same reason build-fastuuid.yml skips it).
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # complexipy ships no [tool.cibuildwheel], so the Rust toolchain its
+      # maturin backend needs is installed in-container here and put on
+      # PATH for the build.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      # Tests live at the repo root; stage them (and pyproject.toml, for
+      # [tool.pytest.ini_options]) into the test working directory so
+      # `import complexipy` resolves to the installed wheel, not the
+      # repo's own complexipy/ source directory (which is left unstaged).
+      cibw-test-sources: "tests pyproject.toml"
+      cibw-test-requires: "pytest"
+      # Mirrors upstream's quick-tests job: pytest suite, then the CLI
+      # console script exercised with the same exclude/ignore flags
+      # upstream's own CI runs against tests/src.
+      cibw-test-command: >
+        python -c "import complexipy._complexipy as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -m pytest -v tests &&
+        complexipy tests/src --exclude "exclude_dir/**" --ignore-complexity &&
+        complexipy tests/src --exclude "**/test_exclude*.py" --ignore-complexity
 
   publish:
     name: Publish complexipy ${{ matrix.version }}

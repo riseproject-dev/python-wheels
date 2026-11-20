@@ -49,8 +49,6 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build tach ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -68,59 +66,37 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
 
-    env:
-      TACH_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout tach v${{ env.TACH_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: gauge-sh/tach
-          ref: v${{ env.TACH_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # tach ships no [tool.cibuildwheel]; the Rust toolchain its maturin
-          # backend needs is installed in-container here (gotcha 10).
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          # ruff_linter's dependency graph is heavy enough to SIGABRT (alloc
-          # failure) at cargo's default parallelism on these 4-core runners.
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            CARGO_BUILD_JOBS=2
-          # Upstream's own pytest suite (python/tests); test_version.py reads
-          # pyproject.toml/Cargo.toml two levels above, and test_export.py
-          # needs a real .git ancestor (upstream runs pytest from the full
-          # clone), so stage those too.
-          CIBW_TEST_SOURCES: python/tests pyproject.toml Cargo.toml .git
-          CIBW_TEST_REQUIRES: pytest==9.1.1 pytest-mock==3.15.1
-          # git_ops.py's is_github_actions() branch avoids repo.active_branch
-          # (which errors on the detached HEAD actions/checkout leaves), but
-          # only fires when these are set; cibuildwheel's test container
-          # doesn't forward the host's own GITHUB_* env.
-          CIBW_TEST_ENVIRONMENT: >-
-            GITHUB_ACTIONS=true
-            GITHUB_EVENT_NAME=${{ github.event_name }}
-            GITHUB_REF_NAME=${{ github.ref_name }}
-            GITHUB_HEAD_REF=${{ github.head_ref }}
-          CIBW_TEST_COMMAND: >-
-            python -c "import tach.extension as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest python/tests -v
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tach-${{ env.TACH_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "tach"
+      version: "${{ matrix.version }}"
+      repository: "gauge-sh/tach"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 360
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # tach ships no [tool.cibuildwheel]; the Rust toolchain its maturin
+      # backend needs is installed in-container here (gotcha 10).
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      # ruff_linter's dependency graph is heavy enough to SIGABRT (alloc
+      # failure) at cargo's default parallelism on these 4-core runners.
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\" CARGO_BUILD_JOBS=2"
+      # Upstream's own pytest suite (python/tests); test_version.py reads
+      # pyproject.toml/Cargo.toml two levels above, and test_export.py
+      # needs a real .git ancestor (upstream runs pytest from the full
+      # clone), so stage those too.
+      cibw-test-sources: "python/tests pyproject.toml Cargo.toml .git"
+      cibw-test-requires: "pytest==9.1.1 pytest-mock==3.15.1"
+      # git_ops.py's is_github_actions() branch avoids repo.active_branch
+      # (which errors on the detached HEAD actions/checkout leaves), but
+      # only fires when these are set; cibuildwheel's test container
+      # doesn't forward the host's own GITHUB_* env.
+      cibw-test-environment: "GITHUB_ACTIONS=true GITHUB_EVENT_NAME=${{ github.event_name }} GITHUB_REF_NAME=${{ github.ref_name }} GITHUB_HEAD_REF=${{ github.head_ref }}"
+      cibw-test-command: >
+        python -c "import tach.extension as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -m pytest python/tests -v
 
   publish:
     name: Publish tach ${{ matrix.version }}
