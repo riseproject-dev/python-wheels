@@ -18,3 +18,4 @@
 - Verified a single manual controller tick recovered python-isal from a terminal failed Work by allocating revision 5 and returning control to the normal dispatcher path.
 - Simplified rare destination-token failure handling: rely on bounded terminal-Work retry and accept the occasional extra model run instead of adding a publish-only token-error state path.
 - Removed the one-time App boundary validation workflow; production token minting and exact readback remain the authoritative checks.
+- Added a Just the Docs upstreaming status page generated from durable contribution state, with project, tracking issue, status, development/upstream PR links, and update time; website builds now refresh it on contribution-state changes.
