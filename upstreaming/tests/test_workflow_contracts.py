@@ -105,6 +105,16 @@ class TestWorkflowContracts(unittest.TestCase):
                                                    "permission-contents", "permission-actions"})
             self.assertIn("upstreaming-controller.yml", str(job))
 
+    def test_controller_pipeline_push_wakeup_excludes_state_commits(self):
+        controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
+        trigger = controller.get("on", controller.get(True))["push"]
+        self.assertEqual(trigger["branches"], ["main"])
+        self.assertIn("upstreaming/**", trigger["paths"])
+        self.assertIn(".github/workflows/upstreaming-*.yml", trigger["paths"])
+        self.assertNotIn("upstreaming-state/**", trigger["paths"])
+        condition = controller["jobs"]["filter"]["if"]
+        self.assertIn("github.event_name == 'push'", condition)
+
     def test_controller_posts_append_only_app_authored_issue_ledger(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         steps = controller["jobs"]["reconcile"]["steps"]
