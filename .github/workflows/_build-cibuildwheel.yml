@@ -15,9 +15,14 @@ on:
         required: true
         type: string
       source:
-        description: Source provider (checkout or pypi-sdist).
+        description: Source provider (checkout, pypi-sdist, or artifact-sdist).
         required: false
         default: checkout
+        type: string
+      source-artifact:
+        description: Artifact containing the sdist when source is artifact-sdist.
+        required: false
+        default: ''
         type: string
       repository:
         description: Upstream owner/repository to check out when source is checkout.
@@ -272,6 +277,7 @@ jobs:
       - name: Validate source configuration
         env:
           SOURCE: ${{ inputs.source }}
+          SOURCE_ARTIFACT: ${{ inputs['source-artifact'] }}
           REPOSITORY: ${{ inputs.repository }}
         run: |
           case "$SOURCE" in
@@ -279,6 +285,9 @@ jobs:
               test -n "$REPOSITORY"
               ;;
             pypi-sdist) ;;
+            artifact-sdist)
+              test -n "$SOURCE_ARTIFACT"
+              ;;
             *)
               echo "unsupported source: $SOURCE" >&2
               exit 1
@@ -298,29 +307,24 @@ jobs:
           sparse-checkout: ${{ inputs['checkout-sparse-checkout'] }}
           persist-credentials: false
 
-      - name: Download and extract PyPI sdist
+      - name: Download PyPI sdist
         if: inputs.source == 'pypi-sdist'
         env:
           PACKAGE: ${{ inputs.package }}
           VERSION: ${{ inputs.version }}
-          DESTINATION: ${{ inputs.package }}
+          ARCHIVE_DIRECTORY: ${{ runner.temp }}/source-sdist
         run: |
           python3 - <<'PY'
           import hashlib
           import json
           import os
-          import shutil
-          import stat
-          import tarfile
-          import tempfile
           import urllib.parse
           import urllib.request
-          import zipfile
-          from pathlib import Path, PurePosixPath
+          from pathlib import Path
 
           distribution = os.environ["PACKAGE"]
           version = os.environ["VERSION"]
-          destination = Path(os.environ["GITHUB_WORKSPACE"], os.environ["DESTINATION"])
+          archive_directory = Path(os.environ["ARCHIVE_DIRECTORY"])
           api = "https://pypi.org/pypi/{}/{}/json".format(
               urllib.parse.quote(distribution, safe=""),
               urllib.parse.quote(version, safe=""),
@@ -345,7 +349,8 @@ jobs:
           if filename != sdist["filename"]:
               raise SystemExit(f"unsafe PyPI sdist filename: {sdist['filename']}")
 
-          archive = Path(os.environ["RUNNER_TEMP"], filename)
+          archive_directory.mkdir()
+          archive = archive_directory / filename
           digest = hashlib.sha256()
           request = urllib.request.Request(
               sdist["url"],
@@ -359,7 +364,39 @@ jobs:
           if digest.hexdigest() != expected:
               raise SystemExit(f"SHA-256 mismatch for {filename}")
 
-          staging = Path(tempfile.mkdtemp(prefix="pypi-sdist-", dir=os.environ["RUNNER_TEMP"]))
+          print(f"Downloaded {filename} with SHA-256 {expected}")
+          PY
+
+      - name: Download sdist artifact
+        if: inputs.source == 'artifact-sdist'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ inputs['source-artifact'] }}
+          path: ${{ runner.temp }}/source-sdist
+
+      - name: Extract sdist
+        if: inputs.source == 'pypi-sdist' || inputs.source == 'artifact-sdist'
+        env:
+          ARCHIVE_DIRECTORY: ${{ runner.temp }}/source-sdist
+          DESTINATION: ${{ inputs.package }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          import stat
+          import tarfile
+          import tempfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive_directory = Path(os.environ["ARCHIVE_DIRECTORY"])
+          archives = [path for path in archive_directory.rglob("*") if path.is_file()]
+          if len(archives) != 1:
+              raise SystemExit(
+                  f"expected exactly one sdist file in {archive_directory}, found {len(archives)}"
+              )
+          archive = archives[0]
+          staging = Path(tempfile.mkdtemp(prefix="source-sdist-", dir=os.environ["RUNNER_TEMP"]))
           if tarfile.is_tarfile(archive):
               with tarfile.open(archive) as source:
                   source.extractall(staging, filter="data")
@@ -369,18 +406,19 @@ jobs:
                       path = PurePosixPath(member.filename)
                       mode = member.external_attr >> 16
                       if path.is_absolute() or ".." in path.parts or stat.S_ISLNK(mode):
-                          raise SystemExit(f"unsafe path in {filename}: {member.filename}")
+                          raise SystemExit(f"unsafe path in {archive.name}: {member.filename}")
                   source.extractall(staging)
           else:
-              raise SystemExit(f"unsupported PyPI sdist archive: {filename}")
+              raise SystemExit(f"unsupported sdist archive: {archive.name}")
 
           roots = [path for path in staging.iterdir() if path.name != "__MACOSX"]
           if len(roots) != 1 or not roots[0].is_dir():
-              raise SystemExit(f"expected one source directory in {filename}")
+              raise SystemExit(f"expected one source directory in {archive.name}")
+          destination = Path(os.environ["GITHUB_WORKSPACE"], os.environ["DESTINATION"])
           if destination.exists():
               raise SystemExit(f"source destination already exists: {destination}")
           shutil.move(roots[0], destination)
-          print(f"Downloaded {filename} with SHA-256 {expected}")
+          print(f"Extracted {archive.name} to {destination}")
           PY
 
       - name: Checkout patches

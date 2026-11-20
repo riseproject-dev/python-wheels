@@ -97,7 +97,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: tilelang-${{ env.TILELANG_VERSION }}-sdist
+          name: tilelang-${{ matrix.version }}-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -105,64 +105,45 @@ jobs:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
     name: Build tilelang ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      TILELANG_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: tilelang-${{ env.TILELANG_VERSION }}-sdist
-          path: dist/
-
-      - id: sdist_path
-        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ${{ steps.sdist_path.outputs.path }}
-        env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_ARCHS: riscv64
-          CIBW_SKIP: '*-musllinux_*'
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD_FRONTEND: build
-          # Upstream's own [tool.cibuildwheel.linux] always sets USE_CUDA=ON
-          # and USE_ROCM=ON and installs a CUDA toolkit via dnf; override for
-          # the CPU-only build upstream documents but never ships itself
-          # (docs/get_started/Installation.md: "USE_CUDA: ... set to OFF to
-          # build a CPU version", "USE_LLVM: enable LLVM backend for CPU
-          # codegen"). USE_LLVM=ON auto-detects llvm-config from PATH.
-          CIBW_BEFORE_ALL_LINUX: dnf -y --enablerepo=crb install llvm-devel
-          CIBW_ENVIRONMENT_LINUX: >-
-            USE_CUDA=OFF USE_ROCM=OFF USE_LLVM=ON
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_INDEX_STRATEGY=unsafe-best-match
-          CIBW_TEST_ENVIRONMENT_LINUX: >-
-            PIP_ONLY_BINARY=:all:
-            UV_ONLY_BINARY=:all:
-          # Mirror upstream's own repair-wheel-command, dropping the
-          # CUDA-only excludes (no libcuda/CUDA toolkit in a CPU-only build).
-          # libtvm_ffi.so/libz3.so* come from the apache-tvm-ffi/z3-solver
-          # dependency wheels, not bundled here.
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            auditwheel -v repair --exclude libtvm_ffi.so --exclude 'libz3.so*' -w {dest_dir} {wheel}
-          CIBW_TEST_COMMAND: 'python -c "import tilelang; print(tilelang.__version__)"'
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tilelang-${{ env.TILELANG_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: tilelang
+      version: ${{ matrix.version }}
+      source: artifact-sdist
+      source-artifact: tilelang-${{ matrix.version }}-sdist
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      timeout-minutes: 600
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-skip: "*-musllinux_*"
+      cibw-build-frontend: build
+      # Upstream's own [tool.cibuildwheel.linux] always sets USE_CUDA=ON
+      # and USE_ROCM=ON and installs a CUDA toolkit via dnf; override for
+      # the CPU-only build upstream documents but never ships itself
+      # (docs/get_started/Installation.md: "USE_CUDA: ... set to OFF to
+      # build a CPU version", "USE_LLVM: enable LLVM backend for CPU
+      # codegen"). USE_LLVM=ON auto-detects llvm-config from PATH.
+      cibw-before-all-linux: dnf -y --enablerepo=crb install llvm-devel
+      cibw-environment-linux: >
+        USE_CUDA=OFF
+        USE_ROCM=OFF
+        USE_LLVM=ON
+        UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        UV_INDEX_STRATEGY=unsafe-best-match
+      cibw-test-environment-linux: >
+        PIP_ONLY_BINARY=:all:
+        UV_ONLY_BINARY=:all:
+      # Mirror upstream's own repair-wheel-command, dropping the
+      # CUDA-only excludes (no libcuda/CUDA toolkit in a CPU-only build).
+      # libtvm_ffi.so/libz3.so* come from the apache-tvm-ffi/z3-solver
+      # dependency wheels, not bundled here.
+      cibw-repair-wheel-command-linux: >
+        auditwheel -v repair --exclude libtvm_ffi.so --exclude 'libz3.so*' -w {dest_dir} {wheel}
+      cibw-test-command: python -c "import tilelang; print(tilelang.__version__)"
 
   publish:
     name: Publish tilelang ${{ matrix.version }}

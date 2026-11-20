@@ -98,7 +98,7 @@ jobs:
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: cchardet-${{ env.CCHARDET_VERSION }}-sdist
+          name: cchardet-${{ matrix.version }}-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -106,118 +106,92 @@ jobs:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
     name: Build cchardet ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      CCHARDET_VERSION: ${{ matrix.version }}
+    # Upstream's own cibuildwheel config (test-command/test-sources in
+    # pyproject.toml) runs tools/wheel_smoke.py, but MANIFEST.in doesn't
+    # ship tools/ in the sdist, so this reproduces that same script here.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: cchardet
+      version: ${{ matrix.version }}
+      source: artifact-sdist
+      source-artifact: cchardet-${{ matrix.version }}-sdist
+      pre-build: |-
+        cat > riscv64_test_cchardet.py <<'EOF'
+        import json
+        import os
+        import subprocess
+        import sys
+        import sysconfig
+        import tempfile
+        from pathlib import Path
 
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: cchardet-${{ env.CCHARDET_VERSION }}-sdist
-          path: dist/
-
-      - name: Extract sdist and stage the wheel smoke test
-        # Upstream's own cibuildwheel config (test-command/test-sources in
-        # pyproject.toml) runs tools/wheel_smoke.py, but MANIFEST.in doesn't
-        # ship tools/ in the sdist, so this reproduces that same script here.
-        run: |
-          mkdir pkg
-          tar xzf dist/*.tar.gz --strip-components=1 -C pkg
-          cat > pkg/riscv64_test_cchardet.py <<'EOF'
-          import json
-          import os
-          import subprocess
-          import sys
-          import sysconfig
-          import tempfile
-          from pathlib import Path
-
-          import cchardet
+        import cchardet
 
 
-          def main() -> None:
-              # Upstream only added this assertion in tools/wheel_smoke.py starting at
-              # v2.3.0; v2.2.0's _cchardet extension doesn't declare free-threading
-              # support, so CPython 3.14t legitimately re-enables the GIL on import.
-              version = tuple(int(p) for p in os.environ["CCHARDET_VERSION"].split("."))
-              if sysconfig.get_config_var("Py_GIL_DISABLED") and version >= (2, 3, 0):
-                  assert not getattr(sys, "_is_gil_enabled")()
+        def main() -> None:
+            # Upstream only added this assertion in tools/wheel_smoke.py starting at
+            # v2.3.0; v2.2.0's _cchardet extension doesn't declare free-threading
+            # support, so CPython 3.14t legitimately re-enables the GIL on import.
+            version = tuple(int(p) for p in os.environ["CCHARDET_VERSION"].split("."))
+            if sysconfig.get_config_var("Py_GIL_DISABLED") and version >= (2, 3, 0):
+                assert not getattr(sys, "_is_gil_enabled")()
 
-              package_dir = Path(cchardet.__file__).parent
-              assert (package_dir / "py.typed").is_file()
-              assert (package_dir / "_cchardet.pyi").is_file()
+            package_dir = Path(cchardet.__file__).parent
+            assert (package_dir / "py.typed").is_file()
+            assert (package_dir / "_cchardet.pyi").is_file()
 
-              expected = cchardet.detect(b"plain ASCII")
-              assert expected["encoding"] == "ASCII"
-              assert cchardet.detect(bytearray(b"plain ASCII")) == expected
-              assert cchardet.detect(memoryview(b"plain ASCII"), max_bytes=32) == expected
+            expected = cchardet.detect(b"plain ASCII")
+            assert expected["encoding"] == "ASCII"
+            assert cchardet.detect(bytearray(b"plain ASCII")) == expected
+            assert cchardet.detect(memoryview(b"plain ASCII"), max_bytes=32) == expected
 
-              french = ("Français, où êtes-vous ? Voilà l'été.").encode(
-                  "windows-1252"
-              )
-              candidates = cchardet.detect_all(french)
-              assert candidates
-              assert candidates[0] == cchardet.detect(french)
-              assert candidates[0]["language"] == "fr"
+            french = ("Français, où êtes-vous ? Voilà l'été.").encode(
+                "windows-1252"
+            )
+            candidates = cchardet.detect_all(french)
+            assert candidates
+            assert candidates[0] == cchardet.detect(french)
+            assert candidates[0]["language"] == "fr"
 
-              detector = cchardet.UniversalDetector()
-              detector.feed(french[:10])
-              detector.feed(french[10:])
-              detector.close()
-              assert detector.result == candidates[0]
+            detector = cchardet.UniversalDetector()
+            detector.feed(french[:10])
+            detector.feed(french[10:])
+            detector.close()
+            assert detector.result == candidates[0]
 
-              with tempfile.TemporaryDirectory() as directory:
-                  sample = Path(directory) / "sample.txt"
-                  sample.write_bytes(french)
-                  output = subprocess.check_output(
-                      [sys.executable, "-m", "cchardet", "--json", str(sample)],
-                      text=True,
-                  )
-                  assert json.loads(output)["language"] == "fr"
+            with tempfile.TemporaryDirectory() as directory:
+                sample = Path(directory) / "sample.txt"
+                sample.write_bytes(french)
+                output = subprocess.check_output(
+                    [sys.executable, "-m", "cchardet", "--json", str(sample)],
+                    text=True,
+                )
+                assert json.loads(output)["language"] == "fr"
 
 
-          if __name__ == "__main__":
-              main()
-          EOF
-
-      - name: Build and test wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: pkg
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # CIBW_TEST_SOURCES is relative to the cwd, not package-dir, hence "pkg/".
-          CIBW_TEST_SOURCES: pkg/riscv64_test_cchardet.py
-          CIBW_TEST_COMMAND: python pkg/riscv64_test_cchardet.py
-          # A job-level `env:` never reaches the Linux container (gotcha 129), so the
-          # test script's os.environ["CCHARDET_VERSION"] read needs it via CIBW_ENVIRONMENT.
-          CIBW_ENVIRONMENT: CCHARDET_VERSION=${{ env.CCHARDET_VERSION }}
-
-      - name: Verify the wheel ships the compiled extension
-        run: |
-          python3 - wheelhouse/*.whl <<'EOF'
-          import sys, zipfile
-          names = zipfile.ZipFile(sys.argv[1]).namelist()
-          assert any(n.startswith("cchardet/_cchardet") and n.endswith(".so") for n in names), names
-          assert any(n.endswith(".dist-info/licenses/COPYING") for n in names), names
-          print("ok")
-          EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cchardet-${{ matrix.version }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
+        if __name__ == "__main__":
+            main()
+        EOF
+      post-build: |-
+        python3 - $GITHUB_WORKSPACE/wheelhouse/*.whl <<'EOF'
+        import sys, zipfile
+        names = zipfile.ZipFile(sys.argv[1]).namelist()
+        assert any(n.startswith("cchardet/_cchardet") and n.endswith(".so") for n in names), names
+        assert any(n.endswith(".dist-info/licenses/COPYING") for n in names), names
+        print("ok")
+        EOF
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      timeout-minutes: 90
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-test-command: python {project}/riscv64_test_cchardet.py
+      # A job-level `env:` never reaches the Linux container (gotcha 129), so the
+      # test script's os.environ["CCHARDET_VERSION"] read needs it via CIBW_ENVIRONMENT.
+      cibw-environment-linux: CCHARDET_VERSION=${{ matrix.version }}
   publish:
     name: Publish cchardet ${{ matrix.version }}
     needs: [setup, build_sdist, build_wheels]

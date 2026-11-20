@@ -70,7 +70,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: mercurial-${{ env.MERCURIAL_VERSION }}-sdist
+          name: mercurial-${{ matrix.version }}-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -78,46 +78,26 @@ jobs:
     needs: [setup, fetch_source]
     if: needs.setup.outputs.versions != '[]'
     name: Build mercurial ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      MERCURIAL_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: mercurial-${{ env.MERCURIAL_VERSION }}-sdist
-          path: dist/
-
-      - id: sdist_path
-        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ${{ steps.sdist_path.outputs.path }}
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors upstream's own [tool.cibuildwheel] environment (pyproject.toml);
-          # the riscv64 image ships no msgfmt (CLAUDE.md gotcha 532).
-          CIBW_BEFORE_ALL_LINUX: dnf install -y gettext
-          CIBW_ENVIRONMENT: MERCURIAL_SETUP_FORCE_TRANSLATIONS=1
-          CIBW_TEST_COMMAND: >-
-            hg version -v &&
-            python -c "from mercurial import policy; assert policy.policy == b'c', policy.policy"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: mercurial-${{ env.MERCURIAL_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: mercurial
+      version: ${{ matrix.version }}
+      source: artifact-sdist
+      source-artifact: mercurial-${{ matrix.version }}-sdist
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # Mirrors upstream's own [tool.cibuildwheel] environment (pyproject.toml);
+      # the riscv64 image ships no msgfmt (CLAUDE.md gotcha 532).
+      cibw-before-all-linux: dnf install -y gettext
+      cibw-environment-linux: MERCURIAL_SETUP_FORCE_TRANSLATIONS=1
+      cibw-test-command: >
+        hg version -v &&
+        python -c "from mercurial import policy; assert policy.policy == b'c', policy.policy"
 
   publish:
     name: Publish mercurial ${{ matrix.version }}

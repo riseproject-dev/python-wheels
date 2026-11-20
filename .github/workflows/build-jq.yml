@@ -86,7 +86,7 @@ jobs:
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: jq-${{ env.JQ_VERSION }}-sdist
+          name: jq-${{ matrix.version }}-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -94,54 +94,32 @@ jobs:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
     name: Build jq ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      JQ_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: jq
+      version: ${{ matrix.version }}
+      source: artifact-sdist
+      source-artifact: jq-${{ matrix.version }}-sdist
+      pre-build: |-
+        set -euo pipefail
 
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: jq-${{ env.JQ_VERSION }}-sdist
-          path: dist/
-
-      - name: Extract sdist and stage vendored licence texts
-        run: |
-          set -euo pipefail
-          mkdir src
-          tar xzf dist/*.tar.gz --strip-components=1 -C src
-
-          # setuptools' default license-files glob (LICEN[CS]E*) picks these up from
-          # the project root; jq statically links both libjq and oniguruma into the
-          # extension, so their (both BSD) licence texts need to ship alongside
-          # jq.py's own LICENSE.
-          jq_tarball="$(ls src/deps/*.tar.gz)"
-          jq_dir="$(basename "${jq_tarball}" .tar.gz)"
-          tar xzf "${jq_tarball}" -O "${jq_dir}/COPYING" > src/LICENSE.jq
-          tar xzf "${jq_tarball}" -O "${jq_dir}/vendor/oniguruma/COPYING" > src/LICENSE.oniguruma
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: src
-        env:
-          CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: jq-${{ env.JQ_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+        # setuptools' default license-files glob (LICEN[CS]E*) picks these up from
+        # the project root; jq statically links both libjq and oniguruma into the
+        # extension, so their (both BSD) licence texts need to ship alongside
+        # jq.py's own LICENSE.
+        jq_tarball="$(ls deps/*.tar.gz)"
+        jq_dir="$(basename "${jq_tarball}" .tar.gz)"
+        tar xzf "${jq_tarball}" -O "${jq_dir}/COPYING" > LICENSE.jq
+        tar xzf "${jq_tarball}" -O "${jq_dir}/vendor/oniguruma/COPYING" > LICENSE.oniguruma
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-test-requires: pytest
+      cibw-test-command: pytest {package}/tests
 
   publish:
     name: Publish jq ${{ matrix.version }}

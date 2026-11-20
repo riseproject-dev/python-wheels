@@ -94,7 +94,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-sdist
+          name: pyjoulescope-driver-${{ matrix.version }}-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -102,132 +102,109 @@ jobs:
     needs: [setup, build_sdist]
     if: needs.setup.outputs.versions != '[]'
     name: Build pyjoulescope-driver ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PYJOULESCOPE_DRIVER_VERSION: ${{ matrix.version }}
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: pyjoulescope-driver
+      version: ${{ matrix.version }}
+      source: artifact-sdist
+      source-artifact: pyjoulescope-driver-${{ matrix.version }}-sdist
+      pre-build: |-
+        cat > collect-licenses.sh <<'COLLECT_EOF'
+        #!/bin/bash
+        # SPDX-FileCopyrightText: 2026 The RISE Project
+        # SPDX-License-Identifier: MIT
+        #
+        # Stage, at the project root, the licence of every shared library
+        # auditwheel vendors out of the build image alongside libudev.
+        # The patched setup.cfg's LICENSE.* glob copies them into the wheel.
+        set -euo pipefail
 
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-sdist
-          path: dist/
+        project="${1:?usage: collect-licenses.sh <project-dir>}"
 
-      - name: Extract the sdist and stage the licence-collection script
-        run: |
-          mkdir sdist
-          tar xzf dist/*.tar.gz --strip-components=1 -C sdist
-          cat > collect-licenses.sh <<'COLLECT_EOF'
-          #!/bin/bash
-          # SPDX-FileCopyrightText: 2026 The RISE Project
-          # SPDX-License-Identifier: MIT
-          #
-          # Stage, at the project root, the licence of every shared library
-          # auditwheel vendors out of the build image alongside libudev.
-          # The patched setup.cfg's LICENSE.* glob copies them into the wheel.
-          set -euo pipefail
+        # ldd is transitive, so the linked lib alone covers its whole closure;
+        # ldd does not list the root itself, so resolve that too.
+        mapfile -t libs < <(
+            {
+                ldd /usr/lib64/libudev.so | tr ' ' '\n' | grep '^/'
+                readlink -f /usr/lib64/libudev.so
+            } | sort -u
+        )
 
-          project="${1:?usage: collect-licenses.sh <project-dir>}"
+        # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+        # glibc and the gcc runtime are on auditwheel's manylinux allowlist and
+        # are never vendored into the wheel.
+        mapfile -t pkgs < <(
+            rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$'
+        )
 
-          # ldd is transitive, so the linked lib alone covers its whole closure;
-          # ldd does not list the root itself, so resolve that too.
-          mapfile -t libs < <(
-              {
-                  ldd /usr/lib64/libudev.so | tr ' ' '\n' | grep '^/'
-                  readlink -f /usr/lib64/libudev.so
-              } | sort -u
-          )
+        for pkg in "${pkgs[@]}"; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
 
-          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
-          # glibc and the gcc runtime are on auditwheel's manylinux allowlist and
-          # are never vendored into the wheel.
-          mapfile -t pkgs < <(
-              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
-                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
-                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$'
-          )
+            # Some subpackages leave the licence to a sibling of the same source RPM.
+            if [ -z "${files[0]:-}" ]; then
+                srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                mapfile -t files < <(
+                    rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                        awk -v s="$srpm" '$1 == s { print $2 }' |
+                        xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                )
+            fi
 
-          for pkg in "${pkgs[@]}"; do
-              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+            # Others mark it %doc rather than %license, and the image installs no docs.
+            if [ -z "${files[0]:-}" ]; then
+                dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+            fi
 
-              # Some subpackages leave the licence to a sibling of the same source RPM.
-              if [ -z "${files[0]:-}" ]; then
-                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
-                  mapfile -t files < <(
-                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
-                          awk -v s="$srpm" '$1 == s { print $2 }' |
-                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
-                  )
-              fi
+            for f in "${files[@]}"; do
+                [ -f "$f" ] || continue
+                cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+            done
+            compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                { echo "no licence file found for $pkg" >&2; exit 1; }
+        done
 
-              # Others mark it %doc rather than %license, and the image installs no docs.
-              if [ -z "${files[0]:-}" ]; then
-                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
-                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
-              fi
+        ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+        COLLECT_EOF
+      post-build: |-
+        python3 - $GITHUB_WORKSPACE/wheelhouse/*.whl <<'EOF'
+        import sys, zipfile
+        names = zipfile.ZipFile(sys.argv[1]).namelist()
+        sos = sorted(n for n in names if n.endswith(".so"))
+        print("\n".join(sos))
+        assert any(n.startswith("pyjoulescope_driver/binding.") for n in sos), sos
 
-              for f in "${files[@]}"; do
-                  [ -f "$f" ] || continue
-                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
-              done
-              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
-                  { echo "no licence file found for $pkg" >&2; exit 1; }
-          done
-
-          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
-          COLLECT_EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: sdist
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # libudev-devel doesn't exist on Rocky 10; systemd-devel provides libudev.so/libudev.h instead (gotcha 252)
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y systemd-devel &&
-            bash {project}/collect-licenses.sh {package}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: pytest --pyargs pyjoulescope_driver
-
-      - name: Verify the wheel ships the compiled extension and licences
-        run: |
-          python3 - wheelhouse/*.whl <<'EOF'
-          import sys, zipfile
-          names = zipfile.ZipFile(sys.argv[1]).namelist()
-          sos = sorted(n for n in names if n.endswith(".so"))
-          print("\n".join(sos))
-          assert any(n.startswith("pyjoulescope_driver/binding.") for n in sos), sos
-
-          lic = sorted(n.split(".dist-info/licenses/", 1)[1] for n in names
-                       if ".dist-info/licenses/" in n and not n.endswith("/"))
-          print("\n".join(lic))
-          expected_files = {
-              "LICENSE.txt",
-              "third-party/libusb/COPYING",
-              "third-party/miniz/LICENSE",
-              "third-party/tinyprintf/tinyprintf_LICENSE.BSD-new",
-          }
-          assert expected_files <= set(lic), expected_files - set(lic)
-          expected_pkgs = {"libcap", "systemd-libs"}
-          have_pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.") and f != "LICENSE.txt"}
-          assert expected_pkgs <= have_pkgs, expected_pkgs - have_pkgs
-          EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+        lic = sorted(n.split(".dist-info/licenses/", 1)[1] for n in names
+                     if ".dist-info/licenses/" in n and not n.endswith("/"))
+        print("\n".join(lic))
+        expected_files = {
+            "LICENSE.txt",
+            "third-party/libusb/COPYING",
+            "third-party/miniz/LICENSE",
+            "third-party/tinyprintf/tinyprintf_LICENSE.BSD-new",
+        }
+        assert expected_files <= set(lic), expected_files - set(lic)
+        expected_pkgs = {"libcap", "systemd-libs"}
+        have_pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.") and f != "LICENSE.txt"}
+        assert expected_pkgs <= have_pkgs, expected_pkgs - have_pkgs
+        EOF
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      timeout-minutes: 90
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      # libudev-devel doesn't exist on Rocky 10; systemd-devel provides libudev.so/libudev.h instead (gotcha 252)
+      cibw-before-all-linux: >
+        dnf install -y systemd-devel &&
+        bash {project}/collect-licenses.sh {package}
+      cibw-environment-linux: PIP_ONLY_BINARY=numpy
+      cibw-test-requires: pytest
+      cibw-test-command: pytest --pyargs pyjoulescope_driver
 
   gpl_sources:
     name: Collect GPL sources for pyjoulescope-driver ${{ matrix.version }}
