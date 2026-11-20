@@ -112,7 +112,7 @@ def dispatch_recovery(contributions: dict[str, dict], *, runs: list[dict] | None
                 contributions[key] = new
                 schemas.validate("contribution", new)
                 staged.extend([("contributions", new),
-                               ("events", lifecycle._event(c, new, "terminal_work_retry", "recovery",
+                               ("events", lifecycle._event(c, new, "terminal_work_retry", "observation",
                                                            f"queue-{state}-{attempt + 1}", iso, True))])
                 relaunch.append({"type": "relaunch_dispatcher", "contribution_id": new["contribution_id"]})
                 report.append(entry | {"decision": f"new revision for terminal Work, attempt {attempt + 1} of {limit}"})
@@ -123,7 +123,7 @@ def dispatch_recovery(contributions: dict[str, dict], *, runs: list[dict] | None
                 contributions[key] = new
                 schemas.validate("contribution", new)
                 staged.extend([("contributions", new),
-                               ("events", lifecycle._event(c, new, "worker_retries_exhausted", "recovery",
+                               ("events", lifecycle._event(c, new, "worker_retries_exhausted", "observation",
                                                            f"queue-{state}", iso, True))])
                 report.append(entry | {"decision": "parked: automatic worker retries exhausted"})
             continue
