@@ -104,6 +104,14 @@ class TestWorkflowContracts(unittest.TestCase):
                                                    "permission-contents", "permission-actions"})
             self.assertIn("upstreaming-controller.yml", str(job))
 
+    def test_controller_reconciles_current_main_not_stale_event_sha(self):
+        controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
+        for job_name in ("observe", "reconcile"):
+            checkout = next(step for step in controller["jobs"][job_name]["steps"]
+                            if str(step.get("uses", "")).startswith("actions/checkout@"))
+            self.assertEqual(checkout["with"]["ref"], "main")
+            self.assertFalse(checkout["with"]["persist-credentials"])
+
     def test_controller_uses_publication_artifact_not_overall_run_status(self):
         text = (WF / "upstreaming-controller.yml").read_text()
         self.assertIn('actions/workflows/$wf/runs?per_page=20', text)
