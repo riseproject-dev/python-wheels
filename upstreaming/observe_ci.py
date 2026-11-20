@@ -86,6 +86,33 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
             entry["note"] = "awaiting initial development patch"
             obs.report.append(entry)
             continue
+        if not cur.get("active_work") and cur["activity"] != "agent_running":
+            feedback = collect.development_review_feedback(
+                api, cur, policy["command_authority"]["actor_ids"])
+            if feedback:
+                ids = feedback["review_ids"] + feedback["comment_ids"]
+                eid = safe_id(f"review-{cur['fork']['repository_id']}-{cur['fork']['pr_number']}-{max(ids)}")
+                summaries = [item["body"] for item in feedback["reviews"] + feedback["comments"]]
+                ev = {"schema_version": 1, "evidence_id": eid, "contribution_id": cid,
+                      "kind": "human_relay", "policy_version": policy["policy_version"],
+                      "collected_at": now, "summary": "\n\n".join(summaries)[:8000],
+                      "limitations": [], "data": feedback, "digests": {"head": head["head"]}}
+                schemas.validate("evidence", ev)
+                before = cur
+                cur = dict(cur, revision=cur["revision"] + 1, phase="development", activity="fix_needed",
+                           active_work=None, active_operation_id=None, clean_head_sha=None,
+                           handoff_request=None, handoff_approval=None, pending_human_action=None,
+                           last_ci_evidence_id=eid,
+                           processed_review_ids=((cur.get("processed_review_ids") or []) + feedback["review_ids"])[-256:],
+                           processed_review_comment_ids=((cur.get("processed_review_comment_ids") or [])
+                                                         + feedback["comment_ids"])[-512:], updated_at=now)
+                schemas.validate("contribution", cur)
+                obs.staged.extend([("evidence", ev), ("contributions", cur),
+                                   ("events", lifecycle._event(before, cur, "development_review_feedback",
+                                                               "observation", eid, now, True))])
+                entry["review_feedback"] = eid
+                obs.report.append(entry)
+                continue
         upstream_facing = cur.get("upstream_pr") is not None
         repo_for_ci = cur["upstream"]["full_name"] if upstream_facing else fork
         snap = collect.ci_snapshot(api, repo_for_ci, head["head"])

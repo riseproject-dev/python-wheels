@@ -153,6 +153,45 @@ def tracking_issues(api: Api, contributions: Iterable[dict], intake_issues: list
     return issues
 
 
+def development_review_feedback(api: Api, record: dict, authority: Iterable[int]) -> dict | None:
+    """Return new authorized review feedback bound to the current fork head."""
+    fork = record.get("fork") or {}
+    number = fork.get("pr_number")
+    head = fork.get("head_sha")
+    if record.get("phase") not in ("development", "handoff") or not fork.get("name") or not number or not head:
+        return None
+    allowed = {int(value) for value in authority}
+    seen_reviews = set(record.get("processed_review_ids") or [])
+    seen_comments = set(record.get("processed_review_comment_ids") or [])
+    reviews = api.paginate(f"/repos/{fork['name']}/pulls/{number}/reviews?per_page=100", max_pages=3)
+    comments = api.paginate(f"/repos/{fork['name']}/pulls/{number}/comments?per_page=100", max_pages=5)
+    review_items = []
+    for review in reviews:
+        body = (review.get("body") or "").strip()
+        if review.get("id") in seen_reviews or review.get("commit_id") != head \
+                or (review.get("user") or {}).get("id") not in allowed \
+                or review.get("state") != "CHANGES_REQUESTED" or not body:
+            continue
+        review_items.append({"id": review["id"], "body": body[:8000], "url": review.get("html_url"),
+                             "reviewer": (review.get("user") or {}).get("login"), "commit_id": head})
+    comment_items = []
+    for comment in comments:
+        body = (comment.get("body") or "").strip()
+        if comment.get("id") in seen_comments or comment.get("commit_id") != head \
+                or (comment.get("user") or {}).get("id") not in allowed or not body:
+            continue
+        comment_items.append({"id": comment["id"], "body": body[:8000], "url": comment.get("html_url"),
+                              "review_id": comment.get("pull_request_review_id"),
+                              "reviewer": (comment.get("user") or {}).get("login"),
+                              "path": comment.get("path"), "line": comment.get("line") or comment.get("original_line"),
+                              "commit_id": head})
+    if not review_items and not comment_items:
+        return None
+    return {"reviews": review_items, "comments": comment_items,
+            "review_ids": [item["id"] for item in review_items],
+            "comment_ids": [item["id"] for item in comment_items]}
+
+
 def upstream_snapshots(api: Api, contributions: Iterable[dict], issues: list[dict], policy: dict) -> dict[str, dict]:
     """Verify source IDs and initial immutable bases before task admission.
     Errors are data: urgent commands must still run when an upstream is absent."""
