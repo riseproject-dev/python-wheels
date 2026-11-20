@@ -34,6 +34,9 @@ def status_label(state: dict) -> str:
     activity = ACTIVITY_LABELS.get(
         state["activity"], state["activity"].replace("_", " ")
     )
+    if state.get("paused"):
+        pending = f"; {activity} pending" if activity else ""
+        return f"Paused ({phase}{pending})"
     return f"{phase} ({activity})" if activity else phase
 
 

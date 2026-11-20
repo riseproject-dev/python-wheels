@@ -36,8 +36,9 @@ def _command_lines(record: dict) -> list[str]:
     lines = []
     phase = record["phase"]
     if phase not in ("released", "abandoned", "superseded", "no_work", "already_released"):
-        lines += [f'/upstreaming pause revision={revision} reason="..."',
-                  f'/upstreaming park revision={revision} reason="..."',
+        if not record.get("paused"):
+            lines.append(f'/upstreaming pause revision={revision} reason="..."')
+        lines += [f'/upstreaming park revision={revision} reason="..."',
                   f'/upstreaming abandon revision={revision} reason="..."']
     if record.get("paused") or record.get("blocked_reason"):
         lines.append(f'/upstreaming resume revision={revision} reason="..."')
@@ -59,11 +60,17 @@ def render(event: dict, record: dict, run_url: str) -> str:
     revision = event.get("to", {}).get("revision", record["revision"])
     phase = event.get("to", {}).get("phase", record["phase"])
     activity = event.get("to", {}).get("activity", record["activity"])
+    underlying_activity = activity
+    if record.get("paused"):
+        activity = "paused"
     kind = event["kind"]
     message = MESSAGES.get(kind, kind.replace("_", " ").replace(":", ": ").capitalize() + ".")
     if kind == "development_review_feedback" and record.get("paused"):
         message = ("Recorded authorized development-PR change feedback. Repair remains pending, "
                    "but no Work was requested because the contribution is paused.")
+    elif kind == "command:pause":
+        pending = underlying_activity.replace("_", " ")
+        message = f"Paused automatic work. Pending lifecycle activity `{pending}` is retained until resume."
     visible = f"**Upstreaming r{revision} · {phase}/{activity}** — {message} [Workflow run]({run_url})"
     commands = _command_lines(record)
     details = ""

@@ -235,8 +235,12 @@ compiler and action updates: [`dependencies/README.md`](dependencies/README.md).
 The `riseproject-dev` App appends a concise 1-2 line ledger comment after every
 durable lifecycle event. Each entry shows revision, phase/activity, action,
 outcome and controller workflow link, followed by a folded **Possible next
-commands** section with the current revision/head prefilled. Entries are never
-edited, so user commands and pipeline history remain interleaved chronologically.
+commands** section with the current revision/head prefilled. A paused record is
+shown primarily as `phase/paused`; its retained underlying activity is described
+as pending until resume, never as current automatic activity. The public status
+page likewise shows `Paused` first and includes the retained phase/activity only
+as context. Entries are never edited, so user commands and pipeline history
+remain interleaved chronologically.
 A rejected command receives a separate App-authored reply that quotes the exact
 command, pings its author, explains the rejection and shows a corrected form when
 one is known. A separate controller job promptly adds an `eyes` reaction when
