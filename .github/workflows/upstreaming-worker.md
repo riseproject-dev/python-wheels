@@ -68,6 +68,15 @@ safe-outputs:
   noop:
     report-as-issue: false
 pre-agent-steps:
+  - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+    with:
+      enable-cache: false
+  - name: Guard the Actions log from untrusted workflow commands
+    env:
+      GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions
+    run: |
+      set -euo pipefail
+      uv run --no-project python -m upstreaming.gh_aw_log_guard "$GH_AW_ACTIONS_DIR"
   - name: Check out the contribution fork at the expected head (read-only)
     env:
       GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions
