@@ -101,82 +101,62 @@ jobs:
     needs: [setup, plan]
     if: needs.setup.outputs.versions != '[]'
     name: Build obstore ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    # 360 wasn't enough: cp311-abi3 stalled compiling the full arrow +
-    # object_store + reqwest/rustls stack under runner contention and hit
-    # the job timeout mid-build (still running, not crashed).
-    timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
-    env:
-      OBSTORE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout obstore py-v${{ env.OBSTORE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: developmentseed/obstore
-          ref: py-v${{ env.OBSTORE_VERSION }}
-          persist-credentials: false
-
-      - name: Stage the licence beside obstore's pyproject.toml
-        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
-        # in this monorepo is obstore/ -- so upstream's published wheels carry
-        # no licence text at all, only the classifier.
-        run: cp LICENSE obstore/LICENSE
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: obstore
-          output-dir: wheelhouse/
-        env:
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # obstore ships no [tool.cibuildwheel], so the Rust toolchain its
-          # maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            MATURIN_PEP517_ARGS="${{ matrix.features }}"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # arro3-core (used by tests/test_list.py) has no riscv64 wheel on
-          # public PyPI, only on our own registry.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=arro3-core
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio docker minio requests arro3-core
-          CIBW_TEST_SOURCES: tests
-          # tests/test_fsspec.py and tests/auth/ need a live Planetary
-          # Computer/minio endpoint (fsspec, pystac); the handful of other
-          # tests needing a running minio container are deselected below --
-          # everything else runs against MemoryStore/LocalStore or constructs
-          # requests without ever reaching a server. matrix.test_ignore (from
-          # the plan job) additionally drops tests/test_list.py below 0.9.0:
-          # it imports polars/pyarrow at module scope and polars has no
-          # riscv64 wheel on either index.
-          CIBW_TEST_COMMAND: >-
-            python -c "import obstore._obstore as m; assert m.__file__.endswith('.so'), m.__file__"
-            && python -m pytest -v tests
-            --ignore=tests/test_fsspec.py
-            --ignore=tests/auth
-            ${{ matrix.test_ignore }}
-            --deselect tests/test_delete.py::test_delete_prefix
-            --deselect tests/test_buffered.py::test_open_reader_with_prefix
-            --deselect tests/test_head.py::test_head_with_prefix
-            --deselect tests/store/test_s3.py::test_list_async
-            --deselect tests/store/test_s3.py::test_get_async
-            --deselect tests/store/test_sign.py::test_sign_roundtrip_with_prefix
-            --deselect tests/store/test_sign.py::test_sign_batch_roundtrip_with_prefix
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: obstore-${{ env.OBSTORE_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # 360 wasn't enough: cp311-abi3 stalled compiling the full arrow +
+    # object_store + reqwest/rustls stack under runner contention and hit
+    # the job timeout mid-build (still running, not crashed).
+    # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+    # in this monorepo is obstore/ -- so upstream's published wheels carry
+    # no licence text at all, only the classifier.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "obstore"
+      version: "${{ matrix.version }}"
+      repository: "developmentseed/obstore"
+      ref: "py-v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.tag }}-manylinux_riscv64"
+      timeout-minutes: 480
+      pre-build: "cp LICENSE obstore/LICENSE"
+      cibw-package-dir: "obstore"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.build }}"
+      # obstore ships no [tool.cibuildwheel], so the Rust toolchain its
+      # maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: >
+        PATH="$PATH:$HOME/.cargo/bin"
+        MATURIN_PEP517_ARGS="${{ matrix.features }}"
+      # arro3-core (used by tests/test_list.py) has no riscv64 wheel on
+      # public PyPI, only on our own registry.
+      cibw-test-environment: "PIP_ONLY_BINARY=arro3-core"
+      cibw-test-requires: "pytest pytest-asyncio docker minio requests arro3-core"
+      cibw-test-sources: "tests"
+      # tests/test_fsspec.py and tests/auth/ need a live Planetary
+      # Computer/minio endpoint (fsspec, pystac); the handful of other
+      # tests needing a running minio container are deselected below --
+      # everything else runs against MemoryStore/LocalStore or constructs
+      # requests without ever reaching a server. matrix.test_ignore (from
+      # the plan job) additionally drops tests/test_list.py below 0.9.0:
+      # it imports polars/pyarrow at module scope and polars has no
+      # riscv64 wheel on either index.
+      cibw-test-command: >
+        python -c "import obstore._obstore as m; assert m.__file__.endswith('.so'), m.__file__"
+        && python -m pytest -v tests
+        --ignore=tests/test_fsspec.py
+        --ignore=tests/auth
+        ${{ matrix.test_ignore }}
+        --deselect tests/test_delete.py::test_delete_prefix
+        --deselect tests/test_buffered.py::test_open_reader_with_prefix
+        --deselect tests/test_head.py::test_head_with_prefix
+        --deselect tests/store/test_s3.py::test_list_async
+        --deselect tests/store/test_s3.py::test_get_async
+        --deselect tests/store/test_sign.py::test_sign_roundtrip_with_prefix
+        --deselect tests/store/test_sign.py::test_sign_batch_roundtrip_with_prefix
 
   publish:
     name: Publish obstore ${{ matrix.version }}

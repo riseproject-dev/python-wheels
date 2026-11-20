@@ -55,65 +55,43 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build surrealdb ${{ matrix.version }} cp39-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 480
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "surrealdb"
+      version: "${{ matrix.version }}"
+      repository: "surrealdb/surrealdb.py"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "cp39-abi3-manylinux_riscv64"
+      timeout-minutes: 480
+      pre-build: |-
+        cat > test_surrealdb_embedded.py <<'EOF'
+        import surrealdb._surrealdb_ext as ext
+        assert ext.__file__.endswith('.so'), ext.__file__
 
-    env:
-      SURREALDB_VERSION: ${{ matrix.version }}
+        from surrealdb import Surreal
 
-    steps:
-      - name: Checkout surrealdb.py v${{ env.SURREALDB_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: surrealdb/surrealdb.py
-          ref: v${{ env.SURREALDB_VERSION }}
-          persist-credentials: false
-
-      - name: Write the wheel test
-        run: |
-          cat > test_surrealdb_embedded.py <<'EOF'
-          import surrealdb._surrealdb_ext as ext
-          assert ext.__file__.endswith('.so'), ext.__file__
-
-          from surrealdb import Surreal
-
-          with Surreal("mem://") as db:
-              db.use("test", "test")
-              created = db.create("person", {"name": "Jane", "age": 30})
-              assert created["name"] == "Jane", created
-              people = db.select("person")
-              assert len(people) == 1 and people[0]["age"] == 30, people
-          EOF
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ARCHS: riscv64
-          # pyo3 carries `abi3-py39` workspace-wide (Cargo.toml), so every interpreter
-          # yields the same cp39-abi3 wheel: cibuildwheel compiles once on cp312 and
-          # reuses it for cp313/cp314 while still running the test suite on each.
-          # cp314t is skipped: the stable ABI a wheel like this ships has no
-          # free-threaded build.
-          CIBW_BUILD: "cp312-* cp313-* cp314-*"
-          # rustup.rs ships no riscv64 musl toolchain.
-          CIBW_SKIP: "*-musllinux_*"
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=aiohttp,pydantic-core,websockets
-          CIBW_TEST_SOURCES: test_surrealdb_embedded.py
-          CIBW_TEST_COMMAND: python test_surrealdb_embedded.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: surrealdb-${{ env.SURREALDB_VERSION }}-cp39-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+        with Surreal("mem://") as db:
+            db.use("test", "test")
+            created = db.create("person", {"name": "Jane", "age": 30})
+            assert created["name"] == "Jane", created
+            people = db.select("person")
+            assert len(people) == 1 and people[0]["age"] == 30, people
+        EOF
+      # pyo3 carries `abi3-py39` workspace-wide (Cargo.toml), so every interpreter
+      # yields the same cp39-abi3 wheel: cibuildwheel compiles once on cp312 and
+      # reuses it for cp313/cp314 while still running the test suite on each.
+      # cp314t is skipped: the stable ABI a wheel like this ships has no
+      # free-threaded build.
+      cibw-build: "cp312-* cp313-* cp314-*"
+      # rustup.rs ships no riscv64 musl toolchain.
+      cibw-skip: "*-musllinux_*"
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: >
+        PATH="$PATH:$HOME/.cargo/bin"
+        PIP_ONLY_BINARY=aiohttp,pydantic-core,websockets
+      cibw-test-sources: "test_surrealdb_embedded.py"
+      cibw-test-command: "python test_surrealdb_embedded.py"
 
   publish:
     name: Publish surrealdb ${{ matrix.version }}

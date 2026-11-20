@@ -49,50 +49,29 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build laszip ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      LASZIP_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout laszip-python ${{ env.LASZIP_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: tmontaigu/laszip-python
-          ref: ${{ env.LASZIP_VERSION }}
-          persist-credentials: false
-
-      # The vendored LASzip (Apache-2.0) sources live under src/vendor/ rather than
-      # at the project root, so scikit-build-core's default LICEN[CS]E* glob misses
-      # it; stage a copy at the root for the glob to pick up (gotcha 32/44).
-      - name: Stage the vendored LASzip licence
-        run: cp src/vendor/LASzip-*/COPYING.txt LICENSE.laszip-core
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # scikit-build-core fetches cmake/ninja from PyPI when missing on PATH,
-          # and pybind11's headers need pip to resolve.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # laszip/__init__.py is a pure-Python `from .laszip_core import *` shim;
-          # probe the compiled extension module directly (gotcha 56).
-          CIBW_TEST_COMMAND: >-
-            python -c "import laszip.laszip_core as m; assert m.__file__.endswith('.so'), m.__file__; import laszip; laszip.LasZipHeader(); laszip.LasZipDll()"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: laszip-${{ env.LASZIP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # The vendored LASzip (Apache-2.0) sources live under src/vendor/ rather than
+    # at the project root, so scikit-build-core's default LICEN[CS]E* glob misses
+    # it; stage a copy at the root for the glob to pick up (gotcha 32/44).
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "laszip"
+      version: "${{ matrix.version }}"
+      repository: "tmontaigu/laszip-python"
+      ref: "${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      pre-build: "cp src/vendor/LASzip-*/COPYING.txt LICENSE.laszip-core"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # scikit-build-core fetches cmake/ninja from PyPI when missing on PATH,
+      # and pybind11's headers need pip to resolve.
+      # laszip/__init__.py is a pure-Python `from .laszip_core import *` shim;
+      # probe the compiled extension module directly (gotcha 56).
+      cibw-test-command: >
+        python -c "import laszip.laszip_core as m; assert m.__file__.endswith('.so'), m.__file__; import laszip; laszip.LasZipHeader(); laszip.LasZipDll()"
 
   publish:
     name: Publish laszip ${{ matrix.version }}

@@ -49,60 +49,41 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build jsoncompat ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      JSONCOMPAT_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout jsoncompat v${{ env.JSONCOMPAT_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ostrowr/jsoncompat
-          ref: v${{ env.JSONCOMPAT_VERSION }}
-          persist-credentials: false
-
-      - name: Stage the licence beside jsoncompat's pyproject.toml
-        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
-        # is pybindings/ in this workspace -- the licence file lives at the
-        # repo root instead (semantic-text-splitter/moyopy hit the same gap).
-        run: cp LICENSE pybindings/
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: pybindings
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # jsoncompat ships no [tool.cibuildwheel], so the Rust toolchain its
-          # maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as md, jsoncompat as jsc, jsoncompat._native as native;
-            assert native.__file__.endswith('.so'), native.__file__;
-            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('jsoncompat'));
-            schema = '{\"type\": \"string\", \"minLength\": 1}';
-            assert jsc.check_compat(schema, schema, jsc.Role.BOTH) is True;
-            validator = jsc.validator_for(schema);
-            assert validator.is_valid_json('\"hello\"') is True;
-            assert validator.is_valid_json('42') is False;
-            generator = jsc.generator_for(schema);
-            assert validator.is_valid_json(generator.generate_value(depth=3)) is True"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: jsoncompat-${{ env.JSONCOMPAT_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+    # is pybindings/ in this workspace -- the licence file lives at the
+    # repo root instead (semantic-text-splitter/moyopy hit the same gap).
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "jsoncompat"
+      version: "${{ matrix.version }}"
+      repository: "ostrowr/jsoncompat"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      pre-build: "cp LICENSE pybindings/"
+      cibw-package-dir: "pybindings"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # jsoncompat ships no [tool.cibuildwheel], so the Rust toolchain its
+      # maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: PATH="$PATH:$HOME/.cargo/bin"
+      cibw-test-command: >
+        python -c "import importlib.metadata as md, jsoncompat as jsc, jsoncompat._native as native;
+        assert native.__file__.endswith('.so'), native.__file__;
+        assert any(str(p).endswith('licenses/LICENSE') for p in md.files('jsoncompat'));
+        schema = '{\"type\": \"string\", \"minLength\": 1}';
+        assert jsc.check_compat(schema, schema, jsc.Role.BOTH) is True;
+        validator = jsc.validator_for(schema);
+        assert validator.is_valid_json('\"hello\"') is True;
+        assert validator.is_valid_json('42') is False;
+        generator = jsc.generator_for(schema);
+        assert validator.is_valid_json(generator.generate_value(depth=3)) is True"
 
   publish:
     name: Publish jsoncompat ${{ matrix.version }}

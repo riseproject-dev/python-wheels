@@ -52,55 +52,35 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build openexr ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      OPENEXR_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout openexr v${{ env.OPENEXR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: AcademySoftwareFoundation/openexr
-          ref: v${{ env.OPENEXR_VERSION }}
-          persist-credentials: false
-
-      # Imath, libdeflate and OpenJPH are statically linked in (OPENEXR_FORCE_INTERNAL_*),
-      # but upstream's own wheel only ships LICENSE.md; libdeflate/OpenJPH are vendored
-      # under external/ while Imath is git-fetched at configure time (gotcha 53), so none
-      # of the three licences reach dist-info without staging them at the project root.
-      - name: Stage vendored licences
-        run: |
-          cp external/deflate/COPYING LICENSE.deflate
-          cp external/OpenJPH/LICENSE LICENSE.openjph
-          curl -fsSL --retry 5 "https://raw.githubusercontent.com/AcademySoftwareFoundation/Imath/${{ env.IMATH_TAG }}/LICENSE.md" -o LICENSE.imath
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # OpenEXR's compiled extension has no Py_mod_gil slot, so cp314t
-          # re-enables the GIL at import and the test suite's warnings-as-errors
-          # config turns that into a collection error (gotcha 127).
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy PYTHON_GIL=1
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('openexr') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE.deflate', 'LICENSE.imath', 'LICENSE.md', 'LICENSE.openjph'], f" &&
-            pytest -s {project}/src/wrappers/python/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: openexr-${{ env.OPENEXR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # Imath, libdeflate and OpenJPH are statically linked in (OPENEXR_FORCE_INTERNAL_*),
+    # but upstream's own wheel only ships LICENSE.md; libdeflate/OpenJPH are vendored
+    # under external/ while Imath is git-fetched at configure time (gotcha 53), so none
+    # of the three licences reach dist-info without staging them at the project root.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "openexr"
+      version: "${{ matrix.version }}"
+      repository: "AcademySoftwareFoundation/openexr"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 90
+      pre-build: |-
+        cp external/deflate/COPYING LICENSE.deflate
+        cp external/OpenJPH/LICENSE LICENSE.openjph
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/AcademySoftwareFoundation/Imath/v3.2.2/LICENSE.md" -o LICENSE.imath
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # OpenEXR's compiled extension has no Py_mod_gil slot, so cp314t
+      # re-enables the GIL at import and the test suite's warnings-as-errors
+      # config turns that into a collection error (gotcha 127).
+      cibw-test-environment: "PIP_ONLY_BINARY=numpy PYTHON_GIL=1"
+      cibw-test-command: >
+        python -c "import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('openexr') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE.deflate', 'LICENSE.imath', 'LICENSE.md', 'LICENSE.openjph'], f" &&
+        pytest -s {project}/src/wrappers/python/tests
 
   publish:
     name: Publish openexr ${{ matrix.version }}

@@ -49,60 +49,41 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build longbridge ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      LONGBRIDGE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout longbridge v${{ env.LONGBRIDGE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: longbridge/openapi
-          ref: v${{ env.LONGBRIDGE_VERSION }}
-          submodules: true
-          persist-credentials: false
-
-      - name: Stage the licences beside longbridge's pyproject.toml
-        run: cp LICENSE-APACHE LICENSE-MIT python/
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: python
-          output-dir: wheelhouse/
-          # musllinux is dropped: the riscv64 musl-hosted rustc segfaulted or hung on the
-          # cdylib's final compile in 6 of 9 legs; the glibc-hosted one is reliable.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          # The workspace's fat `lto = true` compile of the cdylib (~1 h in one rustc) aborted
-          # rustc with heap corruption on 1 of 5 manylinux legs; thin LTO went 4 of 4.
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            CARGO_PROFILE_RELEASE_LTO=thin
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as md, longbridge;
-            from longbridge.openapi import Config, Market;
-            files = [str(p) for p in md.files('longbridge')];
-            assert any(p.endswith('.so') for p in files), files;
-            assert any(p.endswith('licenses/LICENSE-MIT') for p in files), files;
-            assert any(p.endswith('licenses/LICENSE-APACHE') for p in files), files;
-            Config.from_apikey('app-key', 'app-secret', 'access-token');
-            print(Market.US)"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: longbridge-${{ env.LONGBRIDGE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "longbridge"
+      version: "${{ matrix.version }}"
+      repository: "longbridge/openapi"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 240
+      checkout-submodules: "true"
+      pre-build: "cp LICENSE-APACHE LICENSE-MIT python/"
+      cibw-package-dir: "python"
+      # musllinux is dropped: the riscv64 musl-hosted rustc segfaulted or hung on the
+      # cdylib's final compile in 6 of 9 legs; the glibc-hosted one is reliable.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      # The workspace's fat `lto = true` compile of the cdylib (~1 h in one rustc) aborted
+      # rustc with heap corruption on 1 of 5 manylinux legs; thin LTO went 4 of 4.
+      cibw-environment-linux: >
+        PATH="$PATH:$HOME/.cargo/bin"
+        CARGO_PROFILE_RELEASE_LTO=thin
+      cibw-test-command: >
+        python -c "import importlib.metadata as md, longbridge;
+        from longbridge.openapi import Config, Market;
+        files = [str(p) for p in md.files('longbridge')];
+        assert any(p.endswith('.so') for p in files), files;
+        assert any(p.endswith('licenses/LICENSE-MIT') for p in files), files;
+        assert any(p.endswith('licenses/LICENSE-APACHE') for p in files), files;
+        Config.from_apikey('app-key', 'app-secret', 'access-token');
+        print(Market.US)"
 
   publish:
     name: Publish longbridge ${{ matrix.version }}
