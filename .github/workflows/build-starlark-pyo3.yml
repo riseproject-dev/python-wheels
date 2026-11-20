@@ -49,50 +49,32 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build starlark-pyo3 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      STARLARK_PYO3_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout starlark-pyo3 v${{ env.STARLARK_PYO3_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: inducer/starlark-pyo3
-          ref: v${{ env.STARLARK_PYO3_VERSION }}
-          persist-credentials: false
-
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # starlark-pyo3 ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: test
-          # maturin auto-generates a starlark/__init__.py shim ("from .starlark
-          # import *") around the compiled starlark.starlark submodule, so
-          # that's the .so to check (gotcha 314).
-          CIBW_TEST_COMMAND: >-
-            python -c "import starlark.starlark as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest -v test
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: starlark-pyo3-${{ env.STARLARK_PYO3_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "starlark-pyo3"
+      version: "${{ matrix.version }}"
+      repository: "inducer/starlark-pyo3"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # starlark-pyo3 ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "test"
+      # maturin auto-generates a starlark/__init__.py shim ("from .starlark
+      # import *") around the compiled starlark.starlark submodule, so
+      # that's the .so to check (gotcha 314).
+      cibw-test-command: >
+        python -c "import starlark.starlark as m; assert m.__file__.endswith('.so'), m.__file__" &&
+        python -m pytest -v test
 
   publish:
     name: Publish starlark-pyo3 ${{ matrix.version }}

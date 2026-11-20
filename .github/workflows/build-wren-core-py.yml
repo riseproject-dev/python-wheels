@@ -54,54 +54,35 @@ jobs:
     # cp312 instead -- the wheel is still tagged cp311-abi3 regardless of
     # which interpreter compiles it (CLAUDE.md gotcha 96).
     name: Build wren-core-py ${{ matrix.version }} cp311-abi3-manylinux_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    env:
-      WREN_CORE_PY_VERSION: ${{ matrix.version }}
-
-    steps:
-      # wren-core-py is not itself a Cargo workspace member; it path-depends
-      # on ../wren-core/core and ../wren-core-base, both siblings in the
-      # Canner/WrenAI monorepo, so the checkout root has to be the repo
-      # root, not core/wren-core-py itself.
-      - name: Checkout WrenAI wren-core-py-v${{ env.WREN_CORE_PY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: Canner/WrenAI
-          ref: wren-core-py-v${{ env.WREN_CORE_PY_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheel
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: core/wren-core-py
-          output-dir: wheelhouse/
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          # No [tool.cibuildwheel] table upstream, so the Rust toolchain
-          # maturin needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH="$PATH:$HOME/.cargo/bin"
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=pyarrow,numpy
-          CIBW_TEST_REQUIRES: pytest pyarrow
-          CIBW_TEST_SOURCES: core/wren-core-py/tests
-          # Upstream runs pytest from core/wren-core-py; tests open tests/functions.csv relative to it.
-          CIBW_TEST_COMMAND: cd core/wren-core-py && python -m pytest tests -v
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: wren-core-py-${{ env.WREN_CORE_PY_VERSION }}-cp311-abi3-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # wren-core-py is not itself a Cargo workspace member; it path-depends
+    # on ../wren-core/core and ../wren-core-base, both siblings in the
+    # Canner/WrenAI monorepo, so the checkout root has to be the repo
+    # root, not core/wren-core-py itself.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "wren-core-py"
+      version: "${{ matrix.version }}"
+      repository: "Canner/WrenAI"
+      ref: "wren-core-py-v${{ matrix.version }}"
+      artifact-tag: "cp311-abi3-manylinux_riscv64"
+      timeout-minutes: 360
+      cibw-package-dir: "core/wren-core-py"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+      # No [tool.cibuildwheel] table upstream, so the Rust toolchain
+      # maturin needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-environment: "PIP_ONLY_BINARY=pyarrow,numpy"
+      cibw-test-requires: "pytest pyarrow"
+      cibw-test-sources: "core/wren-core-py/tests"
+      # Upstream runs pytest from core/wren-core-py; tests open tests/functions.csv relative to it.
+      cibw-test-command: "cd core/wren-core-py && python -m pytest tests -v"
 
   publish:
     name: Publish wren-core-py ${{ matrix.version }}

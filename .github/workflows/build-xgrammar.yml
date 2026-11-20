@@ -46,97 +46,78 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build xgrammar ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      XGRAMMAR_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout xgrammar v${{ env.XGRAMMAR_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: mlc-ai/xgrammar
-          ref: v${{ env.XGRAMMAR_VERSION }}
-          # 3rdparty/dlpack and 3rdparty/googletest are needed at build time;
-          # dlpack headers are referenced by CMake, googletest by the C++ tests.
-          # cpptrace is only used when XGRAMMAR_ENABLE_CPPTRACE=ON (off by default).
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
-          # override so this native riscv runner builds the riscv64 wheel.
-          CIBW_ARCHS: riscv64
-          # Override upstream's build-frontend = "build[uv]". cibuildwheel's audit
-          # step creates a venv on the *host* runner (not in the container) and,
-          # when the frontend is build[uv], insists on a host `uv` binary.
-          # The self-hosted riscv runner has no host uv, so use plain `build`
-          # (pip/virtualenv on the host) instead.
-          CIBW_BUILD_FRONTEND: build
-          # CIBW_ENVIRONMENT applies to both build and test phases.
-          # Point pip at our registry so build-time deps (apache-tvm-ffi riscv64
-          # wheel) and test-time deps resolve correctly.
-          # Do NOT set ONLY_BINARY here: scikit-build-core itself is a build dep
-          # that installs from sdist if needed.
-          CIBW_ENVIRONMENT: >-
-            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Skip tests for cp314t: numpy, tokenizers and safetensors (runtime
-          # deps pulled in via transformers) have no free-threaded riscv64
-          # wheels on any index yet, so the test-install step fails. The wheel
-          # itself builds and links correctly; re-enable once those deps land.
-          CIBW_TEST_SKIP: cp314t-*
-          # Test phase only: force wheels-only so a missing riscv64 wheel for a
-          # heavy test dep (torch, tokenizers) fails fast instead of silently
-          # kicking off a multi-hour source build on the runner.
-          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
-          # Mirror upstream's test-command from pyproject.toml
-          # (pytest {project}/tests -m "not hf_token_required"), but omit the
-          # hf_token_required marker filter: conftest.py already auto-skips those
-          # tests when no HF_TOKEN is present, so it's redundant here and we get
-          # a cleaner "SKIP" record instead of "not collected". Deselect the
-          # MELODY-tagged cases: they need cohere_melody, dropped below. On
-          # 0.2.5/0.2.5.post1 only, also deselect
-          # test_json_schema_style_deepseek_xml_format,
-          # test_json_schema_style_minimax_xml_format,
-          # test_json_schema_style_qwen_xml_format,
-          # test_qwen_parameter_xml_format and test_any_order_qwen_xml: their
-          # expected_grammar fixtures don't match what those tags' own
-          # converters emit (a pair of whitespace tokens around a
-          # TagDispatch xml_string field is missing or misplaced),
-          # independent of platform; the fixtures were corrected in v0.2.6.
-          # This is the full set of test functions affected by this fixture
-          # bug: confirmed exhaustively by diffing tests/python/*.py between
-          # the v0.2.5.post1 and v0.2.6 tags of mlc-ai/xgrammar and checking
-          # every hunk that touches qwen_xml/TagDispatch/xml_string fixtures
-          # (see tests/python/test_structural_tag_converter.py and
-          # tests/python/test_json_schema_converter.py diffs between those
-          # tags) -- no other test function has this bug.
-          CIBW_TEST_COMMAND: pytest {project}/tests -vvs -k "not MELODY${{ (matrix.version == '0.2.5' || matrix.version == '0.2.5.post1') && ' and not test_json_schema_style_deepseek_xml_format and not test_json_schema_style_minimax_xml_format and not test_json_schema_style_qwen_xml_format and not test_qwen_parameter_xml_format and not test_any_order_qwen_xml' || '' }}"
-          # Override test-extras = ["test"]: that pulls in cohere_melody, a
-          # Rust/maturin package with no riscv64 wheel anywhere and an sdist
-          # that itself fails to build (needs a working cargo toolchain in the
-          # build venv). An empty CIBW_TEST_EXTRAS does cancel test-extras
-          # (unlike CIBW_BEFORE_TEST, gotcha 336), so list the rest of the
-          # test extra by hand instead; sentencepiece unconditionally, since
-          # pyproject's python_version < '3.10' branch never applies to this
-          # matrix.
-          CIBW_TEST_EXTRAS: ''
-          CIBW_TEST_REQUIRES: "huggingface-hub[cli] protobuf pytest sentencepiece tiktoken"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: xgrammar-${{ env.XGRAMMAR_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    # 3rdparty/dlpack and 3rdparty/googletest are needed at build time;
+    # dlpack headers are referenced by CMake, googletest by the C++ tests.
+    # cpptrace is only used when XGRAMMAR_ENABLE_CPPTRACE=ON (off by default).
+    # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
+    # override so this native riscv runner builds the riscv64 wheel.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "xgrammar"
+      version: "${{ matrix.version }}"
+      repository: "mlc-ai/xgrammar"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      checkout-submodules: "recursive"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # Override upstream's build-frontend = "build[uv]". cibuildwheel's audit
+      # step creates a venv on the *host* runner (not in the container) and,
+      # when the frontend is build[uv], insists on a host `uv` binary.
+      # The self-hosted riscv runner has no host uv, so use plain `build`
+      # (pip/virtualenv on the host) instead.
+      cibw-build-frontend: "build"
+      # CIBW_ENVIRONMENT applies to both build and test phases.
+      # Point pip at our registry so build-time deps (apache-tvm-ffi riscv64
+      # wheel) and test-time deps resolve correctly.
+      # Do NOT set ONLY_BINARY here: scikit-build-core itself is a build dep
+      # that installs from sdist if needed.
+      # Skip tests for cp314t: numpy, tokenizers and safetensors (runtime
+      # deps pulled in via transformers) have no free-threaded riscv64
+      # wheels on any index yet, so the test-install step fails. The wheel
+      # itself builds and links correctly; re-enable once those deps land.
+      cibw-test-skip: "cp314t-*"
+      # Test phase only: force wheels-only so a missing riscv64 wheel for a
+      # heavy test dep (torch, tokenizers) fails fast instead of silently
+      # kicking off a multi-hour source build on the runner.
+      cibw-test-environment: "PIP_ONLY_BINARY=:all:"
+      # Mirror upstream's test-command from pyproject.toml
+      # (pytest {project}/tests -m "not hf_token_required"), but omit the
+      # hf_token_required marker filter: conftest.py already auto-skips those
+      # tests when no HF_TOKEN is present, so it's redundant here and we get
+      # a cleaner "SKIP" record instead of "not collected". Deselect the
+      # MELODY-tagged cases: they need cohere_melody, dropped below. On
+      # 0.2.5/0.2.5.post1 only, also deselect
+      # test_json_schema_style_deepseek_xml_format,
+      # test_json_schema_style_minimax_xml_format,
+      # test_json_schema_style_qwen_xml_format,
+      # test_qwen_parameter_xml_format and test_any_order_qwen_xml: their
+      # expected_grammar fixtures don't match what those tags' own
+      # converters emit (a pair of whitespace tokens around a
+      # TagDispatch xml_string field is missing or misplaced),
+      # independent of platform; the fixtures were corrected in v0.2.6.
+      # This is the full set of test functions affected by this fixture
+      # bug: confirmed exhaustively by diffing tests/python/*.py between
+      # the v0.2.5.post1 and v0.2.6 tags of mlc-ai/xgrammar and checking
+      # every hunk that touches qwen_xml/TagDispatch/xml_string fixtures
+      # (see tests/python/test_structural_tag_converter.py and
+      # tests/python/test_json_schema_converter.py diffs between those
+      # tags) -- no other test function has this bug.
+      cibw-test-command: "pytest {project}/tests -vvs -k \"not MELODY${{ (matrix.version == '0.2.5' || matrix.version == '0.2.5.post1') && ' and not test_json_schema_style_deepseek_xml_format and not test_json_schema_style_minimax_xml_format and not test_json_schema_style_qwen_xml_format and not test_qwen_parameter_xml_format and not test_any_order_qwen_xml' || '' }}\""
+      # Override test-extras = ["test"]: that pulls in cohere_melody, a
+      # Rust/maturin package with no riscv64 wheel anywhere and an sdist
+      # that itself fails to build (needs a working cargo toolchain in the
+      # build venv). An empty CIBW_TEST_EXTRAS does cancel test-extras
+      # (unlike CIBW_BEFORE_TEST, gotcha 336), so list the rest of the
+      # test extra by hand instead; sentencepiece unconditionally, since
+      # pyproject's python_version < '3.10' branch never applies to this
+      # matrix.
+      cibw-test-extras: ''
+      cibw-test-requires: "huggingface-hub[cli] protobuf pytest sentencepiece tiktoken"
 
   publish:
     name: Publish xgrammar ${{ matrix.version }}

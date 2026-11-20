@@ -48,46 +48,28 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build dust-riven ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      DUST_RIVEN_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout dust-riven ${{ env.DUST_RIVEN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: Minh1billion/dust-riven
-          ref: v${{ env.DUST_RIVEN_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # dust-riven's pyproject.toml ships no [tool.cibuildwheel], so the
-          # Rust toolchain its maturin backend needs is installed in-container.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio
-          CIBW_TEST_COMMAND: >-
-            pytest {package}/tests
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: dust-riven-${{ env.DUST_RIVEN_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "dust-riven"
+      version: "${{ matrix.version }}"
+      repository: "Minh1billion/dust-riven"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # dust-riven's pyproject.toml ships no [tool.cibuildwheel], so the
+      # Rust toolchain its maturin backend needs is installed in-container.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest pytest-asyncio"
+      cibw-test-command: >
+        pytest {package}/tests
 
   publish:
     name: Publish dust-riven ${{ matrix.version }}

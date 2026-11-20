@@ -49,52 +49,34 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build fast-walk ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      FAST_WALK_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout fast-walk v${{ env.FAST_WALK_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: reflex-dev/fast-walk
-          ref: v${{ env.FAST_WALK_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # fast-walk ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container here.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests
-          # CPython 3.13 caps AST construction at a fixed C recursion limit of
-          # 10000 (on every arch), so ast.parse() of these 20000-deep chains
-          # raises RecursionError before fast-walk runs; 3.14+ checks real stack.
-          CIBW_TEST_COMMAND: >-
-            python -c "import fast_walk.fast_walk as ext; assert ext.__file__.endswith('.so'), ext.__file__" &&
-            python -m pytest -v tests
-            ${{ matrix.python == 'cp313' && '--deselect tests/test_fields.py::test_fix_missing_locations_on_a_deep_chain --deselect tests/test_frontier.py::test_a_deep_chain_does_not_recurse' || '' }}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fast-walk-${{ env.FAST_WALK_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "fast-walk"
+      version: "${{ matrix.version }}"
+      repository: "reflex-dev/fast-walk"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # fast-walk ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container here.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests"
+      # CPython 3.13 caps AST construction at a fixed C recursion limit of
+      # 10000 (on every arch), so ast.parse() of these 20000-deep chains
+      # raises RecursionError before fast-walk runs; 3.14+ checks real stack.
+      cibw-test-command: >
+        python -c "import fast_walk.fast_walk as ext; assert ext.__file__.endswith('.so'), ext.__file__" &&
+        python -m pytest -v tests
+        ${{ matrix.python == 'cp313' && '--deselect tests/test_fields.py::test_fix_missing_locations_on_a_deep_chain --deselect tests/test_frontier.py::test_a_deep_chain_does_not_recurse' || '' }}
 
   publish:
     name: Publish fast-walk ${{ matrix.version }}

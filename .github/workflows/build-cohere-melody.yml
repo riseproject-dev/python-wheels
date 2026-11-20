@@ -49,53 +49,35 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build cohere-melody ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      COHERE_MELODY_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout cohere-melody v${{ env.COHERE_MELODY_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: cohere-ai/melody
-          ref: v${{ env.COHERE_MELODY_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          # musllinux is out of reach: rustup publishes rust-std but no
-          # rustc/cargo host toolchain for riscv64gc-unknown-linux-musl.
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cohere-melody ships no [tool.cibuildwheel], so the Rust toolchain
-          # its maturin backend needs is installed in-container.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --profile minimal
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_SOURCES: tests pyproject.toml
-          # Pure-Rust maturin project (no python-source in pyproject.toml): the
-          # top-level cohere_melody is a generated __init__.py, not the .so
-          # (gotcha 559) -- probe the real submodule via sys.modules instead.
-          CIBW_TEST_COMMAND: >-
-            python -c "import cohere_melody, sys; assert sys.modules['cohere_melody.cohere_melody'].__file__.endswith('.so'), sys.modules['cohere_melody.cohere_melody'].__file__" &&
-            python -m pytest -v --ignore=tests/templating/jinja/python
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: cohere-melody-${{ env.COHERE_MELODY_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "cohere-melody"
+      version: "${{ matrix.version }}"
+      repository: "cohere-ai/melody"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # musllinux is out of reach: rustup publishes rust-std but no
+      # rustc/cargo host toolchain for riscv64gc-unknown-linux-musl.
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # cohere-melody ships no [tool.cibuildwheel], so the Rust toolchain
+      # its maturin backend needs is installed in-container.
+      cibw-before-all-linux: >
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+        sh -s -- -y --profile minimal
+      cibw-environment-linux: "PATH=\"$PATH:$HOME/.cargo/bin\""
+      cibw-test-requires: "pytest"
+      cibw-test-sources: "tests pyproject.toml"
+      # Pure-Rust maturin project (no python-source in pyproject.toml): the
+      # top-level cohere_melody is a generated __init__.py, not the .so
+      # (gotcha 559) -- probe the real submodule via sys.modules instead.
+      cibw-test-command: >
+        python -c "import cohere_melody, sys; assert sys.modules['cohere_melody.cohere_melody'].__file__.endswith('.so'), sys.modules['cohere_melody.cohere_melody'].__file__" &&
+        python -m pytest -v --ignore=tests/templating/jinja/python
 
   publish:
     name: Publish cohere-melody ${{ matrix.version }}

@@ -60,98 +60,78 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build piper-phonemize ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      PIPER_PHONEMIZE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout piper-phonemize v${{ env.PIPER_PHONEMIZE_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: rhasspy/piper-phonemize
-          ref: v${{ env.PIPER_PHONEMIZE_VERSION }}
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          ESPEAK_NG_REF: ${{ env.ESPEAK_NG_REF }}
-          ONNXRUNTIME_VERSION: ${{ env.ONNXRUNTIME_VERSION }}
-          # CIBW_BEFORE_ALL_LINUX runs inside the manylinux container, a separate
-          # process environment that only sees what cibuildwheel explicitly
-          # forwards (gotcha 707) - without this, both vars above are unset inside
-          # it and every reference below silently expands to the empty string.
-          CIBW_ENVIRONMENT_PASS_LINUX: ESPEAK_NG_REF ONNXRUNTIME_VERSION
-          # auditwheel's repair step (a separate invocation from before-all,
-          # in the same container) resolves NEEDED libraries like the system
-          # loader would; this fork's espeak-ng CMakeLists sets no RPATH, so
-          # without this libespeak-ng.so can't be found even though it was
-          # findable at link time via -L.
-          CIBW_ENVIRONMENT_LINUX: LD_LIBRARY_PATH=/project/espeak-ng/build/lib:/project/lib/Linux-riscv64/onnxruntime/lib
-          # Stages the same on-disk layout (lib/Linux-<machine>/onnxruntime,
-          # espeak-ng/build, piper_phonemize/{espeak-ng-data,libtashkeel_model.ort})
-          # setup.py's hard-coded paths expect, matching upstream's own Makefile
-          # `python`/`python-wheel` targets. Fetches the onnxruntime .so via a
-          # fixed cp312 interpreter, not the matrix's own cp310/cp311: our
-          # riscv64 onnxruntime wheel starts at cp312 (the .so itself has no
-          # Python-ABI dependency, so any interpreter that can pip-install it
-          # works). The renamed .so keeps its original embedded SONAME
-          # (libonnxruntime.so.1) regardless of the filename on disk, so
-          # auditwheel can't find a match without re-soname'ing it too
-          # (gotcha 17's sherpa-onnx-core precedent for this same .so).
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y cmake unzip git &&
-            mkdir -p /tmp/espeak-ng-src && cd /tmp/espeak-ng-src &&
-            git init -q && git remote add origin https://github.com/rhasspy/espeak-ng.git &&
-            git fetch -q --depth 1 origin "${ESPEAK_NG_REF}" && git checkout -q FETCH_HEAD &&
-            cd - &&
-            cmake -S /tmp/espeak-ng-src -B /tmp/espeak-ng-build
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib
-            -DBUILD_ESPEAK_NG_TESTS=OFF
-            -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF -DUSE_LIBPCAUDIO=OFF
-            -DUSE_KLATT=OFF -DUSE_SPEECHPLAYER=OFF
-            -DCMAKE_INSTALL_PREFIX="$(pwd)/espeak-ng/build" &&
-            cmake --build /tmp/espeak-ng-build --parallel &&
-            cmake --install /tmp/espeak-ng-build &&
-            /opt/python/cp312-cp312/bin/python -m pip download --no-deps --only-binary=:all:
-            --index-url https://pypi.riseproject.dev/simple/
-            -d /tmp/ort_pkg "onnxruntime==${ONNXRUNTIME_VERSION}" &&
-            unzip -q /tmp/ort_pkg/*.whl -d /tmp/ort_pkg/extracted &&
-            mkdir -p "lib/Linux-$(uname -m)/onnxruntime/lib" "lib/Linux-$(uname -m)/onnxruntime/include" &&
-            cp /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime.so."${ONNXRUNTIME_VERSION}"
-            "lib/Linux-$(uname -m)/onnxruntime/lib/libonnxruntime.so" &&
-            patchelf --set-soname libonnxruntime.so "lib/Linux-$(uname -m)/onnxruntime/lib/libonnxruntime.so" &&
-            cp /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime_providers_shared.so
-            "lib/Linux-$(uname -m)/onnxruntime/lib/" &&
-            curl -fsSL --retry 5
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-            | tar xz -C "lib/Linux-$(uname -m)/onnxruntime" --wildcards --strip-components=1
-            "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/include/*.h" &&
-            cp -R espeak-ng/build/share/espeak-ng-data piper_phonemize/espeak-ng-data &&
-            cp etc/libtashkeel_model.ort piper_phonemize/libtashkeel_model.ort &&
-            cp /tmp/espeak-ng-src/COPYING COPYING.espeak-ng &&
-            curl -fsSL --retry 5 "https://raw.githubusercontent.com/microsoft/onnxruntime/v${ONNXRUNTIME_VERSION}/LICENSE" -o LICENSE.onnxruntime
-          # Upstream's released wheel ships no licence text for either bundled
-          # library (verified against the real PyPI 1.1.0 wheel); setuptools'
-          # default file-list glob (COPYING*/LICEN[CS]E*) picks the two files
-          # staged above into dist-info/licenses/ without any patch.
-          CIBW_TEST_COMMAND: python {project}/src/python_test.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: piper-phonemize-${{ env.PIPER_PHONEMIZE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "piper-phonemize"
+      version: "${{ matrix.version }}"
+      repository: "rhasspy/piper-phonemize"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-manylinux_riscv64"
+      timeout-minutes: 120
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      # CIBW_BEFORE_ALL_LINUX runs inside the manylinux container, a separate
+      # process environment that only sees what cibuildwheel explicitly
+      # forwards (gotcha 707) - without this, both vars above are unset inside
+      # it and every reference below silently expands to the empty string.
+      # auditwheel's repair step (a separate invocation from before-all,
+      # in the same container) resolves NEEDED libraries like the system
+      # loader would; this fork's espeak-ng CMakeLists sets no RPATH, so
+      # without this libespeak-ng.so can't be found even though it was
+      # findable at link time via -L.
+      cibw-environment-linux: "ESPEAK_NG_REF=8593723f10cfd9befd50de447f14bf0a9d2a14a4 ONNXRUNTIME_VERSION=1.31.0 LD_LIBRARY_PATH=/project/espeak-ng/build/lib:/project/lib/Linux-riscv64/onnxruntime/lib"
+      # Stages the same on-disk layout (lib/Linux-<machine>/onnxruntime,
+      # espeak-ng/build, piper_phonemize/{espeak-ng-data,libtashkeel_model.ort})
+      # setup.py's hard-coded paths expect, matching upstream's own Makefile
+      # `python`/`python-wheel` targets. Fetches the onnxruntime .so via a
+      # fixed cp312 interpreter, not the matrix's own cp310/cp311: our
+      # riscv64 onnxruntime wheel starts at cp312 (the .so itself has no
+      # Python-ABI dependency, so any interpreter that can pip-install it
+      # works). The renamed .so keeps its original embedded SONAME
+      # (libonnxruntime.so.1) regardless of the filename on disk, so
+      # auditwheel can't find a match without re-soname'ing it too
+      # (gotcha 17's sherpa-onnx-core precedent for this same .so).
+      cibw-before-all-linux: >
+        dnf install -y cmake unzip git &&
+        mkdir -p /tmp/espeak-ng-src && cd /tmp/espeak-ng-src &&
+        git init -q && git remote add origin https://github.com/rhasspy/espeak-ng.git &&
+        git fetch -q --depth 1 origin "${ESPEAK_NG_REF}" && git checkout -q FETCH_HEAD &&
+        cd - &&
+        cmake -S /tmp/espeak-ng-src -B /tmp/espeak-ng-build
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib
+        -DBUILD_ESPEAK_NG_TESTS=OFF
+        -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF -DUSE_LIBPCAUDIO=OFF
+        -DUSE_KLATT=OFF -DUSE_SPEECHPLAYER=OFF
+        -DCMAKE_INSTALL_PREFIX="$(pwd)/espeak-ng/build" &&
+        cmake --build /tmp/espeak-ng-build --parallel &&
+        cmake --install /tmp/espeak-ng-build &&
+        /opt/python/cp312-cp312/bin/python -m pip download --no-deps --only-binary=:all:
+        --index-url https://pypi.riseproject.dev/simple/
+        -d /tmp/ort_pkg "onnxruntime==${ONNXRUNTIME_VERSION}" &&
+        unzip -q /tmp/ort_pkg/*.whl -d /tmp/ort_pkg/extracted &&
+        mkdir -p "lib/Linux-$(uname -m)/onnxruntime/lib" "lib/Linux-$(uname -m)/onnxruntime/include" &&
+        cp /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime.so."${ONNXRUNTIME_VERSION}"
+        "lib/Linux-$(uname -m)/onnxruntime/lib/libonnxruntime.so" &&
+        patchelf --set-soname libonnxruntime.so "lib/Linux-$(uname -m)/onnxruntime/lib/libonnxruntime.so" &&
+        cp /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime_providers_shared.so
+        "lib/Linux-$(uname -m)/onnxruntime/lib/" &&
+        curl -fsSL --retry 5
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+        | tar xz -C "lib/Linux-$(uname -m)/onnxruntime" --wildcards --strip-components=1
+        "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/include/*.h" &&
+        cp -R espeak-ng/build/share/espeak-ng-data piper_phonemize/espeak-ng-data &&
+        cp etc/libtashkeel_model.ort piper_phonemize/libtashkeel_model.ort &&
+        cp /tmp/espeak-ng-src/COPYING COPYING.espeak-ng &&
+        curl -fsSL --retry 5 "https://raw.githubusercontent.com/microsoft/onnxruntime/v${ONNXRUNTIME_VERSION}/LICENSE" -o LICENSE.onnxruntime
+      # Upstream's released wheel ships no licence text for either bundled
+      # library (verified against the real PyPI 1.1.0 wheel); setuptools'
+      # default file-list glob (COPYING*/LICEN[CS]E*) picks the two files
+      # staged above into dist-info/licenses/ without any patch.
+      cibw-test-command: "python {project}/src/python_test.py"
 
   gpl_sources:
     needs: [setup]

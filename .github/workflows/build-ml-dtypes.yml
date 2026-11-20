@@ -48,46 +48,29 @@ jobs:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
     name: Build ml-dtypes ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      ML_DTYPES_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout ml_dtypes ${{ env.ML_DTYPES_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: jax-ml/ml_dtypes
-          ref: v${{ env.ML_DTYPES_VERSION }}
-          # third_party/eigen is a submodule and the extension compiles against it.
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-        env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
-          CIBW_TEST_REQUIRES: absl-py pytest pytest-xdist
-          # riscv64's FP-invalid status flag diverges on casts between ml_dtypes'
-          # non-IEEE custom float types (same class of divergence the project's own
-          # CMakeLists.txt documents for Mac ARM); ml_dtypes' filterwarnings=error
-          # promotes it to a hard failure even though the underlying assertions pass.
-          CIBW_TEST_COMMAND: pytest -n auto -W "ignore:invalid value encountered in cast:RuntimeWarning" {project}
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ml-dtypes-${{ env.ML_DTYPES_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # third_party/eigen is a submodule and the extension compiles against it.
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: "ml-dtypes"
+      version: "${{ matrix.version }}"
+      repository: "jax-ml/ml_dtypes"
+      ref: "v${{ matrix.version }}"
+      artifact-tag: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      timeout-minutes: 120
+      checkout-submodules: "recursive"
+      cibw-build: "${{ matrix.python }}-${{ matrix.platform }}_riscv64"
+      cibw-environment-linux: "PIP_ONLY_BINARY=numpy"
+      cibw-test-requires: "absl-py pytest pytest-xdist"
+      # riscv64's FP-invalid status flag diverges on casts between ml_dtypes'
+      # non-IEEE custom float types (same class of divergence the project's own
+      # CMakeLists.txt documents for Mac ARM); ml_dtypes' filterwarnings=error
+      # promotes it to a hard failure even though the underlying assertions pass.
+      cibw-test-command: "pytest -n auto -W \"ignore:invalid value encountered in cast:RuntimeWarning\" {project}"
 
   eigen_sources:
     needs: [setup]
