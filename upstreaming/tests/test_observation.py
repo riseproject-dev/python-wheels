@@ -5,6 +5,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -236,6 +237,52 @@ class TestDevelopmentReviewFeedback(unittest.TestCase):
         def get(self, path):
             date = "2030-01-01T00:00:00Z" if path.endswith(SHA_B) else "2026-01-01T00:00:00Z"
             return {"commit": {"committer": {"date": date}}}
+
+    def test_explanation_only_observation_does_not_bump_or_request_repair(self):
+        from upstreaming import observe_ci
+        rec = contribution(phase="development", activity="fix_needed", revision=8, paused=True)
+        inquiry = {"reviews": [], "comments": [], "conversation_comments": [],
+                   "review_ids": [], "comment_ids": [], "conversation_comment_ids": [],
+                   "inquiry_comments": [],
+                   "inquiry_conversation_comments": [{"id": 32, "body": "Explain why it failed. Do not change anything."}],
+                   "inquiry_comment_ids": [], "inquiry_conversation_comment_ids": [32]}
+        with mock.patch("upstreaming.observe_ci.collect.branch_head", return_value={"head": SHA_A}), \
+             mock.patch("upstreaming.observe_ci.collect.development_review_feedback", return_value=inquiry):
+            observed = observe_ci.observe(object(), contributions={"c": rec}, operations={}, contracts={},
+                                          policy=policy(), now=NOW)
+        final = [item for kind, item in observed.staged if kind == "contributions"][-1]
+        event = [item for kind, item in observed.staged if kind == "events"][-1]
+        evidence = [item for kind, item in observed.staged if kind == "evidence"][-1]
+        self.assertEqual((final["revision"], final["activity"], final["paused"]),
+                         (8, "fix_needed", True))
+        self.assertEqual(final.get("pending_feedback_evidence_ids"), rec.get("pending_feedback_evidence_ids"))
+        self.assertEqual(event["kind"], "development_review_inquiry")
+        self.assertFalse(event["revision_bumped"])
+        self.assertEqual(evidence["kind"], "human_inquiry")
+        self.assertNotIn("review_feedback", observed.report[0])
+
+    def test_explanation_only_comments_are_separated_from_repairs(self):
+        self.assertEqual(collect.review_comment_intent(
+            "Explain me why it failed. Do not change anything."), "inquiry")
+        self.assertEqual(collect.review_comment_intent("Why did this CI job fail?"), "inquiry")
+        self.assertEqual(collect.review_comment_intent("Why did this fail? Fix it."), "repair")
+        self.assertEqual(collect.review_comment_intent("Disable this temporarily."), "repair")
+
+        class InquiryApi(self.Api):
+            def paginate(inner, path, **kw):
+                if "/issues/" in path:
+                    return [{"id": 32, "body": "Explain why it failed. Do not change anything.",
+                             "created_at": NOW, "user": {"id": OWNER["id"], "login": OWNER["login"]}}]
+                if path.endswith("/reviews?per_page=100"):
+                    return []
+                return []
+
+        rec = contribution(phase="development", activity="fix_needed")
+        rec["fork"] = dict(rec["fork"], head_sha=SHA_A, pr_number=1)
+        result = collect.development_review_feedback(InquiryApi(), rec, [OWNER["id"]])
+        self.assertEqual(result["inquiry_conversation_comment_ids"], [32])
+        self.assertEqual(result["conversation_comment_ids"], [])
+        self.assertEqual(result["inquiry_conversation_comments"][0]["intent"], "inquiry")
 
     def test_only_new_authorized_current_head_review_feedback_is_returned(self):
         rec = contribution(phase="development", activity="waiting_ci")

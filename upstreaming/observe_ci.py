@@ -91,34 +91,66 @@ def observe(api: collect.Api, *, contributions: dict[str, dict], operations: dic
             feedback = collect.development_review_feedback(
                 api, cur, policy["command_authority"]["actor_ids"])
             if feedback:
+                inquiry_ids = (feedback["inquiry_comment_ids"]
+                               + feedback["inquiry_conversation_comment_ids"])
+                if inquiry_ids:
+                    inquiry_items = (feedback["inquiry_comments"]
+                                     + feedback["inquiry_conversation_comments"])
+                    inquiry_id = safe_id(
+                        f"inquiry-{cur['fork']['repository_id']}-{cur['fork']['pr_number']}-{max(inquiry_ids)}")
+                    inquiry_data = {"comments": feedback["inquiry_comments"],
+                                    "conversation_comments": feedback["inquiry_conversation_comments"]}
+                    inquiry_ev = {"schema_version": 1, "evidence_id": inquiry_id,
+                                  "contribution_id": cid, "kind": "human_inquiry",
+                                  "policy_version": policy["policy_version"], "collected_at": now,
+                                  "summary": "\n\n".join(item["body"] for item in inquiry_items)[:8000],
+                                  "limitations": ["Explanation-only; no repair or mutation requested."],
+                                  "data": inquiry_data, "digests": {"head": head["head"]}}
+                    schemas.validate("evidence", inquiry_ev)
+                    before_inquiry = cur
+                    cur = dict(cur,
+                               processed_review_comment_ids=(
+                                   (cur.get("processed_review_comment_ids") or [])
+                                   + feedback["inquiry_comment_ids"])[-512:],
+                               processed_pr_conversation_comment_ids=(
+                                   (cur.get("processed_pr_conversation_comment_ids") or [])
+                                   + feedback["inquiry_conversation_comment_ids"])[-512:],
+                               updated_at=now)
+                    schemas.validate("contribution", cur)
+                    obs.staged.extend([("evidence", inquiry_ev), ("contributions", cur),
+                                       ("events", lifecycle._event(
+                                           before_inquiry, cur, "development_review_inquiry",
+                                           "observation", inquiry_id, now, False))])
+                    entry["review_inquiry"] = inquiry_id
                 ids = feedback["review_ids"] + feedback["comment_ids"] + feedback["conversation_comment_ids"]
-                eid = safe_id(f"review-{cur['fork']['repository_id']}-{cur['fork']['pr_number']}-{max(ids)}")
-                summaries = [item["body"] for item in
-                             feedback["reviews"] + feedback["comments"] + feedback["conversation_comments"]]
-                ev = {"schema_version": 1, "evidence_id": eid, "contribution_id": cid,
-                      "kind": "human_relay", "policy_version": policy["policy_version"],
-                      "collected_at": now, "summary": "\n\n".join(summaries)[:8000],
-                      "limitations": [], "data": feedback, "digests": {"head": head["head"]}}
-                schemas.validate("evidence", ev)
-                before = cur
-                cur = dict(cur, revision=cur["revision"] + 1, phase="development", activity="fix_needed",
-                           active_work=None, active_operation_id=None, clean_head_sha=None,
-                           handoff_request=None, handoff_approval=None, pending_human_action=None,
-                           last_ci_evidence_id=eid,
-                           processed_review_ids=((cur.get("processed_review_ids") or []) + feedback["review_ids"])[-256:],
-                           processed_review_comment_ids=((cur.get("processed_review_comment_ids") or [])
-                                                         + feedback["comment_ids"])[-512:],
-                           processed_pr_conversation_comment_ids=(
-                               (cur.get("processed_pr_conversation_comment_ids") or [])
-                               + feedback["conversation_comment_ids"])[-512:],
-                           pending_feedback_evidence_ids=list(dict.fromkeys(
-                               (cur.get("pending_feedback_evidence_ids") or []) + [eid]))[-64:],
-                           updated_at=now)
-                schemas.validate("contribution", cur)
-                obs.staged.extend([("evidence", ev), ("contributions", cur),
-                                   ("events", lifecycle._event(before, cur, "development_review_feedback",
-                                                               "observation", eid, now, True))])
-                entry["review_feedback"] = eid
+                if ids:
+                    eid = safe_id(f"review-{cur['fork']['repository_id']}-{cur['fork']['pr_number']}-{max(ids)}")
+                    summaries = [item["body"] for item in
+                                 feedback["reviews"] + feedback["comments"] + feedback["conversation_comments"]]
+                    ev = {"schema_version": 1, "evidence_id": eid, "contribution_id": cid,
+                          "kind": "human_relay", "policy_version": policy["policy_version"],
+                          "collected_at": now, "summary": "\n\n".join(summaries)[:8000],
+                          "limitations": [], "data": feedback, "digests": {"head": head["head"]}}
+                    schemas.validate("evidence", ev)
+                    before = cur
+                    cur = dict(cur, revision=cur["revision"] + 1, phase="development", activity="fix_needed",
+                               active_work=None, active_operation_id=None, clean_head_sha=None,
+                               handoff_request=None, handoff_approval=None, pending_human_action=None,
+                               last_ci_evidence_id=eid,
+                               processed_review_ids=((cur.get("processed_review_ids") or []) + feedback["review_ids"])[-256:],
+                               processed_review_comment_ids=((cur.get("processed_review_comment_ids") or [])
+                                                             + feedback["comment_ids"])[-512:],
+                               processed_pr_conversation_comment_ids=(
+                                   (cur.get("processed_pr_conversation_comment_ids") or [])
+                                   + feedback["conversation_comment_ids"])[-512:],
+                               pending_feedback_evidence_ids=list(dict.fromkeys(
+                                   (cur.get("pending_feedback_evidence_ids") or []) + [eid]))[-64:],
+                               updated_at=now)
+                    schemas.validate("contribution", cur)
+                    obs.staged.extend([("evidence", ev), ("contributions", cur),
+                                       ("events", lifecycle._event(before, cur, "development_review_feedback",
+                                                                   "observation", eid, now, True))])
+                    entry["review_feedback"] = eid
                 obs.report.append(entry)
                 continue
         # A requested repair must reach the controller before another CI poll

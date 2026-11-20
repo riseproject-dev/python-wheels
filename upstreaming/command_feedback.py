@@ -39,7 +39,18 @@ def render(receipt: dict, original: dict) -> str:
     quoted = "\n".join("> " + line for line in body.splitlines())
     reason = (receipt.get("reason") or receipt.get("result") or "command rejected").strip()
     text = f"@{login}, this command was rejected:\n\n{quoted}\n\n**Reason:** {reason}"
-    template = TEMPLATES.get(_verb(body, receipt))
+    verb = _verb(body, receipt)
+    if reason == "already paused":
+        revision = receipt.get("revision")
+        suffix = f" revision={revision}" if revision is not None else " revision=N"
+        text += ("\n\n**No action is needed:** the contribution remains paused. "
+                 "To continue it, use:\n```text\n"
+                 f'/upstreaming resume{suffix} reason="..."\n```')
+        return text + f"\n\n<!-- upstreaming-command-feedback:{receipt['comment_id']} -->"
+    if reason == "not paused" and verb == "resume":
+        text += "\n\n**No action is needed:** the contribution is already active."
+        return text + f"\n\n<!-- upstreaming-command-feedback:{receipt['comment_id']} -->"
+    template = TEMPLATES.get(verb)
     if template:
         revision = receipt.get("revision")
         if revision is None:
