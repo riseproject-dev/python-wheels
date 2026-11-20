@@ -76,6 +76,7 @@ class TestShortCommands(unittest.TestCase):
     def test_work_changing_commands_still_need_revision(self):
         self.assertEqual(commands.parse("/upstreaming resume revision=3 reason=r").revision, 3)
         self.assertEqual(commands.parse("/upstreaming restart revision=8 reason=r").revision, 8)
+        self.assertEqual(commands.parse("/upstreaming refresh revision=7 reason=r").revision, 7)
         with self.assertRaises(commands.CommandError):
             commands.parse("/upstreaming resume reason=r")
         with self.assertRaises(commands.CommandError):

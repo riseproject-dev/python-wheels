@@ -372,7 +372,8 @@ def tick(*, contributions: dict[str, dict], operations: dict[str, dict], consume
         if kind in ("development_repair", "upstream_revision"):
             reason_ids = list(dict.fromkeys(
                 (c.get("pending_feedback_evidence_ids") or [])
-                + ([c["last_ci_evidence_id"]] if c.get("last_ci_evidence_id") else [])))
+                + ([c["last_ci_evidence_id"]] if c.get("last_ci_evidence_id") else [])
+                + ([c["dossier_evidence_id"]] if c.get("dossier_evidence_id") else [])))
         if not reason_ids and c.get("dossier_evidence_id"):
             reason_ids = [c["dossier_evidence_id"]]
         work = {

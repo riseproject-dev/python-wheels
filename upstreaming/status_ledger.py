@@ -40,6 +40,8 @@ def _command_lines(record: dict) -> list[str]:
                   f'/upstreaming abandon revision={revision} reason="..."']
     if record.get("paused") or record.get("blocked_reason"):
         lines.append(f'/upstreaming resume revision={revision} reason="..."')
+    if phase in ("development", "handoff") and (record.get("fork") or {}).get("pr_number"):
+        lines.append(f'/upstreaming refresh revision={revision} reason="..."')
     if phase == "abandoned":
         lines.append(f'/upstreaming restart revision={revision} reason="..."')
     if phase == "parked":

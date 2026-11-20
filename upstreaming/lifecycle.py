@@ -163,7 +163,7 @@ def _restart_generation(record: dict, now: str) -> dict:
     """Reset mutable lifecycle state while retaining identity and replay fences."""
     rec = copy.deepcopy(record)
     rec.update({
-        "generation": int(record.get("generation", 0)) + 1,
+        "generation": int(record.get("generation", 0)) + 1, "refresh": None,
         "phase": "queued", "activity": "idle", "paused": False,
         "blocked_reason": None, "parked_reason": None, "terminal_reason": None,
         "previous_phase": None,
@@ -272,6 +272,33 @@ def apply_command(record: dict, cmd: Command, *, command_id: str, actor: dict, n
         if record.get("active_operation_id") or record.get("pending_publication"):
             return _reject(record, "cannot restart while a writer operation is active")
         rec = _restart_generation(record, now)
+        bumped = True
+    elif v == "refresh":
+        if phase not in ("development", "handoff"):
+            return _reject(record, f"refresh needs an existing development PR, not phase {phase}")
+        fork = record.get("fork") or {}
+        if not fork.get("pr_number") or not fork.get("head_sha"):
+            return _reject(record, "refresh needs a verified development PR and head")
+        if record.get("active_work"):
+            return _reject(record, "cannot refresh while Work is active")
+        if record.get("active_operation_id") or record.get("pending_publication"):
+            return _reject(record, "cannot refresh while a writer operation is active")
+        rec["refresh"] = {"command_id": command_id, "reason": a["reason"],
+                          "from_phase": phase, "head_sha": fork["head_sha"],
+                          "pr_number": fork["pr_number"]}
+        rec["phase"] = "queued"
+        rec["activity"] = "idle"
+        rec["dossier_evidence_id"] = None
+        rec["scope_coverage_complete"] = False
+        rec["scope_paths"] = None
+        rec["proposal_artifact"] = None
+        rec["last_ci_evidence_id"] = None
+        rec["clean_head_sha"] = None
+        rec["handoff_request"] = None
+        rec["handoff_approval"] = None
+        rec["pending_human_action"] = None
+        rec["publication_operation_id"] = None
+        _bump(rec)
         bumped = True
     elif v == "request-handoff":
         if phase != "development":
@@ -472,6 +499,7 @@ def new_contribution(*, contribution_id: str, project_id: str, issue: dict, upst
         "project_id": project_id,
         "revision": 0,
         "generation": 0,
+        "refresh": None,
         "phase": "queued",
         "activity": "idle",
         "paused": False,

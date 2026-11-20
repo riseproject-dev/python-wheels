@@ -412,6 +412,40 @@ class TestTick(unittest.TestCase):
                             for item in out.report["publications"]))
         self.assertEqual(out.report["requested_effects"], [])
 
+    def test_refresh_dossier_returns_to_existing_pr_and_requires_worker_pass(self):
+        from upstreaming import commands, lifecycle, reconcile
+        from upstreaming.tests.test_dossier_gate import dossier
+        rec = contribution(revision=7, dossier_evidence_id="old-dossier",
+                           scope_paths=[".github/workflows/wheels.yml"],
+                           scope_coverage_complete=True)
+        refreshed = lifecycle.apply_command(
+            rec, commands.parse('/upstreaming refresh revision=7 reason="audit dependencies"'),
+            command_id="comment-9", actor=OWNER, now=NOW).record
+        refreshed["phase"] = "investigation"
+        refreshed["activity"] = "agent_running"
+        refreshed["active_work"] = {"dedupe_key": "refresh", "task": "investigation",
+                                    "revision": 8, "requested_at": NOW, "deadline_at": NOW}
+        pub = {"status": "investigation",
+               "task": {"contribution_id": rec["contribution_id"], "revision": 8},
+               "worker_run_id": "9", "publication_artifact_id": 5,
+               "dossier": dossier(), "proposal": {"diagnosis": "Fresh complete dossier."},
+               "artifact": {"digest": "sha256:" + "2" * 64}}
+        snap = reconcile.Snapshot(contributions={"c": refreshed}, operations={}, consumed={},
+                                  projects={}, evidence={})
+        out = reconcile.tick(None, snap, policy=policy(read_only=False), now=T,
+                             publications=[pub], pressure=capacity.Pressure(ok=True), observe=False)
+        evidence = [r for k, r in out.staged if k == "evidence"][0]
+        final = [r for k, r in out.staged if k == "contributions"][-1]
+        self.assertEqual((final["phase"], final["activity"], final["revision"]),
+                         ("development", "agent_running", 9))
+        self.assertEqual(final["fork"], rec["fork"])
+        self.assertEqual(final["scope_paths"], [".github/workflows/*", "README.rst"])
+        self.assertIsNone(final["refresh"])
+        self.assertEqual(final["dossier_evidence_id"], evidence["evidence_id"])
+        self.assertEqual(out.report["controller"]["selected"][0]["task"], "development_repair")
+        self.assertIn(evidence["evidence_id"], out.report["requested_effects"][0]["reason_ids"])
+        self.assertEqual(out.report["provision_requests"], [])
+
     def test_investigation_can_park_without_human_gate(self):
         from upstreaming import reconcile
         from upstreaming.tests.test_dossier_gate import dossier

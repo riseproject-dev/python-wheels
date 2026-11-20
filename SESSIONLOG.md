@@ -32,3 +32,4 @@
 - Replaced console-byte rewriting with GitHub's native stop-commands protocol: trusted pre/post agent steps bracket exact output with a random step-output token and always restore command processing.
 - Required investigator and worker dependency audits to use the RISE simple index plus `PIP_PREFER_BINARY=true` when public PyPI lacks compatible riscv64 build/test wheels, and updated both mirrored porting-skill paths with resolver-scope guidance.
 - Added a stale-proof `/upstreaming restart` command for abandoned contributions that keeps the same tracking issue and append-only ledger while starting a fresh queued lifecycle generation after writer quiescence.
+- Added `/upstreaming refresh` to re-investigate an existing development PR with current prompts, replace its verified dossier scope, and require a fresh worker pass carrying the full new dossier plus pending review and CI evidence.

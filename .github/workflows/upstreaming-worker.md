@@ -298,7 +298,11 @@ pipeline. The trusted pre-agent step wrote the immutable task to
 branch in `./fork`. The task's
 `plan` field says what to do; `reason_ids` and `context` say why. For repair and
 revision tasks, read every entry in `context.reason_evidence` before researching
-or editing. Treat every concrete review comment, PR conversation comment and
+or editing. A `dossier` evidence entry includes the latest verified dossier in
+`data`; treat its path coverage, dependency findings, architecture precedent and
+risks as the authoritative current investigation, while still validating them
+against current repository history and CI. Treat every concrete review comment,
+PR conversation comment and
 rejected-change description in every reason evidence record as a required
 repair constraint, then verify each one against repository history. A repair is
 incomplete if even one requested change is omitted.

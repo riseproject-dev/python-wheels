@@ -256,6 +256,7 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
                   "digests": {"artifact": (outcome.get("artifact") or {}).get("digest") or ""}}
             staged.append(("evidence", ev))
         new["dossier_evidence_id"] = eid
+        refresh = new.get("refresh")
         decision = (dossier.get("proposal") or {}).get("decision") if isinstance(dossier, dict) else None
         if not eid:
             new["activity"] = "waiting_human"
@@ -269,23 +270,26 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
             staged.append(("events", lifecycle._event(rec, new, "dossier_contract_stale", "observation",
                                                        str(worker_run_id or eid), now, True)))
         elif decision == "park":
-            new["previous_phase"] = new["phase"]
+            new["previous_phase"] = (refresh or {}).get("from_phase") or new["phase"]
             new["phase"] = "parked"
             new["activity"] = "idle"
             new["parked_reason"] = dossier["proposal"]["rationale"][:2000]
             new["pending_human_action"] = None
+            new["refresh"] = None
             new["revision"] += 1
             staged.append(("events", lifecycle._event(rec, new, "dossier_parked", "observation",
                                                        str(worker_run_id or eid), now, True)))
         else:
-            new["phase"] = "provisioning"
-            new["activity"] = "idle"
+            new["activity"] = "fix_needed" if refresh else "idle"
+            new["phase"] = "development" if refresh else "provisioning"
             new["admission_class"] = dossier["proposal"]["admission_class"]
             new["scope_paths"] = list(dossier["proposal"]["allowed_paths"])
             new["scope_coverage_complete"] = True
             new["pending_human_action"] = None
+            new["refresh"] = None
             new["revision"] += 1
-            staged.append(("events", lifecycle._event(rec, new, "dossier_develop", "observation",
+            kind = "dossier_refreshed" if refresh else "dossier_develop"
+            staged.append(("events", lifecycle._event(rec, new, kind, "observation",
                                                        str(worker_run_id or eid), now, True)))
     new["updated_at"] = now
     staged.append(("contributions", new))
