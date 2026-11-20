@@ -176,6 +176,23 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertIn("created", triggers["issue_comment"]["types"])
         self.assertIn("github.event_name == 'workflow_run'", controller["jobs"]["filter"]["if"])
 
+    def test_command_acknowledgement_is_fast_idempotent_and_not_serialized(self):
+        controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
+        self.assertNotIn("concurrency", controller)
+        ack = controller["jobs"]["acknowledge-command"]
+        self.assertNotIn("needs", ack)
+        self.assertNotIn("concurrency", ack)
+        self.assertEqual(ack["if"],
+                         "github.event_name == 'issue_comment' && github.event.issue.pull_request == null")
+        script = ack["steps"][-1]["run"]
+        self.assertIn("awk 'NF { print; exit }'", script)
+        self.assertIn("reactions?per_page=100", script)
+        self.assertIn('riseproject-dev[bot]', script)
+        self.assertIn("-f content='+1'", script)
+        reconcile = controller["jobs"]["reconcile"]
+        self.assertEqual(reconcile["concurrency"]["group"], "python-wheels-upstreaming-controller")
+        self.assertFalse(reconcile["concurrency"]["cancel-in-progress"])
+
     def test_worker_forbids_unrelated_fork_ci_debug_changes(self):
         worker = source("upstreaming-worker")
         self.assertNotIn("github", worker["tools"])
