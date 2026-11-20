@@ -167,6 +167,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(final["publication_operation_id"], ops[-1]["operation_id"])
         self.assertTrue(final["last_ci_evidence_id"].startswith("ci-2-7-1"))
         self.assertIsNone(final["active_work"])
+        self.assertEqual(final["activity"], "waiting_human")
         self.assertIn("evidence", kinds)
         self.assertIn("operations", kinds)
         # Passed CI on the new head: nothing more for an agent to do right now.
