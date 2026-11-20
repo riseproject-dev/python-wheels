@@ -282,6 +282,7 @@ def apply_publication(rec: dict, outcome: dict, *, now: str, policy: dict | None
             new["activity"] = "idle"
             new["admission_class"] = dossier["proposal"]["admission_class"]
             new["scope_paths"] = list(dossier["proposal"]["allowed_paths"])
+            new["scope_coverage_complete"] = True
             new["pending_human_action"] = None
             new["revision"] += 1
             staged.append(("events", lifecycle._event(rec, new, "dossier_develop", "observation",

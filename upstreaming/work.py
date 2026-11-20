@@ -88,6 +88,8 @@ def payload(request: dict, record: dict, *, control_repo_id: str, allowed_paths:
         "allowed_paths": allowed_paths,
         "review_scope_extension": task in ("development_repair", "upstream_revision") and any(
             item.get("kind") == "human_relay" for item in context.get("reason_evidence") or []),
+        "legacy_scope_extension": task in ("development_repair", "upstream_revision")
+        and record.get("scope_coverage_complete") is not True,
         "distributions": record.get("distributions") or [],
         "admission_class": record.get("admission_class"),
         "reason_ids": request.get("reason_ids") or [],

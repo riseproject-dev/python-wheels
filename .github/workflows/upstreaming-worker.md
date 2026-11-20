@@ -319,6 +319,10 @@ change without asking the reviewer to use command syntax. The trusted publisher
 will admit only the exact changed paths in this repair and persist verified
 additions to contribution scope. This does not permit globs or unrelated files.
 Inline review comment paths are present in the human-relay evidence data.
+For contributions whose dossier predates mandatory path coverage,
+`legacy_scope_extension` is true during repair. CI evidence may then justify an
+additional exact file under the same rules. This compatibility path is absent
+for new, complete dossiers.
 
 ## Mandatory change-history research
 

@@ -404,6 +404,7 @@ class TestTick(unittest.TestCase):
         self.assertEqual((final["phase"], final["activity"], final["revision"]), ("provisioning", "waiting_capacity", 1))
         self.assertEqual(final["admission_class"], "configuration_integration")
         self.assertEqual(final["scope_paths"], [".github/workflows/*", "README.rst"])
+        self.assertTrue(final["scope_coverage_complete"])
         self.assertIsNone(final["pending_human_action"])
         self.assertIsNone(final["proposal_artifact"])
         self.assertEqual(len(out.report["provision_requests"]), 1)

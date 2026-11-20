@@ -235,7 +235,7 @@ def publish(*, record: dict, task: dict, proposal: dict, mbox: bytes, token: str
         outside_scope = sorted(path for path in claimed if not any(
             fnmatch.fnmatchcase(path, allowed) for allowed in scope.allowed_globs))
         if outside_scope:
-            if not task.get("review_scope_extension"):
+            if not (task.get("review_scope_extension") or task.get("legacy_scope_extension")):
                 return Outcome("rejected", f"proposal changes files outside admitted scope: {outside_scope}",
                                candidate=cand, failure_class="validation")
             if any(any(ch in path for ch in "*?[]") for path in outside_scope):

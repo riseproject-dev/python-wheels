@@ -201,6 +201,11 @@ class TestImmutableTrackingIssue(unittest.TestCase):
         ordinary = work.node(request, rec, control_repo_id="7", allowed_paths=["build.yml"],
                              context={"reason_evidence": [{"evidence_id": "ci-1", "kind": "ci"}]})
         self.assertFalse(ordinary["payload"]["review_scope_extension"])
+        self.assertTrue(ordinary["payload"]["legacy_scope_extension"])
+        rec["scope_coverage_complete"] = True
+        complete = work.node(request, rec, control_repo_id="7", allowed_paths=["build.yml"],
+                             context={"reason_evidence": [{"evidence_id": "ci-1", "kind": "ci"}]})
+        self.assertFalse(complete["payload"]["legacy_scope_extension"])
 
     def test_full_description_url_and_links_frozen_into_work(self):
         body = "### Additional context\n\nhttps://github.com/example/proj/pull/31488\n" + "user context\n" * 500
