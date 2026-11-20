@@ -306,7 +306,9 @@ None of these perform remote writes.
   are allowed. The token is repository-scoped, so this check is what keeps
   the writer inside `upstreaming-state/`.
 - **Fork updates** are reconstructed in a fresh Git with no
-  user/system config, hooks or credential helpers. They are checked
+  user/system config, hooks or credential helpers. The trusted publisher rewrites
+  every proposed commit so both author and committer are the `riseproject-dev`
+  App bot (`riseproject-dev[bot]`); model-side identity is never authoritative. They are checked
   against the trusted base for the approved paths, symlinks, submodules,
   new executables, size limits, case collisions, history shape, and
   forbidden workflow content (`pull_request_target`, OIDC, new secrets,

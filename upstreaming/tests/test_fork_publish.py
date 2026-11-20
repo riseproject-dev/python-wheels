@@ -79,6 +79,9 @@ class TestForkPublish(_ForkFixture, unittest.TestCase):
         self.assertEqual(self.fork_head(), out.candidate)
         self.assertEqual([o["status"] for o in self.ops], ["planned", "applying", "confirmed"])
         self.assertEqual(out.operation["proposed"]["parents"], [self.base])
+        identity = git(self.fork_bare, "show", "-s", "--format=%an;%ae;%cn;%ce", out.candidate)
+        expected = f"{fork_publish.APP_COMMIT_NAME};{fork_publish.APP_COMMIT_EMAIL}"
+        self.assertEqual(identity, f"{expected};{expected}")
 
     def test_read_only_validates_but_does_not_push(self):
         out = self.run_publish(pol=policy(read_only=True))
