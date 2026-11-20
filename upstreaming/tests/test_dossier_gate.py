@@ -12,7 +12,7 @@ import sys
 
 from upstreaming import capacity, collect, controller, dossier_gate, schemas, work
 from upstreaming.common import sha256_text
-from upstreaming.tests.helpers import NOW, contribution, policy
+from upstreaming.tests.helpers import NOW, SHA_A, contribution, policy
 from datetime import datetime
 
 ISSUE_URL = "https://github.com/riseproject-dev/python-wheels/issues/12"
@@ -206,6 +206,18 @@ class TestImmutableTrackingIssue(unittest.TestCase):
         complete = work.node(request, rec, control_repo_id="7", allowed_paths=["build.yml"],
                              context={"reason_evidence": [{"evidence_id": "ci-1", "kind": "ci"}]})
         self.assertFalse(complete["payload"]["legacy_scope_extension"])
+
+    def test_refresh_investigation_freezes_reason_and_existing_pr(self):
+        rec = contribution(phase="investigation", activity="agent_running")
+        rec["refresh"] = {"command_id": "comment-9", "reason": "audit dependencies",
+                          "from_phase": "development", "head_sha": SHA_A, "pr_number": 1}
+        rec["active_work"] = {"task": "investigation", "reason_ids": [],
+                              "requested_at": NOW, "revision": rec["revision"],
+                              "dedupe_key": "refresh", "deadline_at": NOW}
+        node = work.node(work.request_from_active(rec), rec, control_repo_id="7", allowed_paths=[])
+        self.assertEqual(node["payload"]["context"]["refresh"]["reason"], "audit dependencies")
+        self.assertEqual(node["payload"]["context"]["existing_fork"]["pr_number"], 1)
+        self.assertEqual(node["payload"]["expected_head"], SHA_A)
 
     def test_full_description_url_and_links_frozen_into_work(self):
         body = "### Additional context\n\nhttps://github.com/example/proj/pull/31488\n" + "user context\n" * 500

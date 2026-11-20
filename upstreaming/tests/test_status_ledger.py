@@ -49,6 +49,13 @@ class TestStatusLedger(unittest.TestCase):
         self.assertIn("/upstreaming force-develop revision=4", body)
         self.assertIn("<!-- upstreaming-ledger:", body)
 
+    def test_development_pr_ledger_offers_dossier_refresh(self):
+        record = contribution(phase="development", activity="fix_needed", revision=7)
+        event = lifecycle._event(record, record, "activity", "observation", None, NOW, False)
+        event["sequence"] = 8
+        body = status_ledger.render(event, record, "https://github.com/run")
+        self.assertIn('/upstreaming refresh revision=7 reason="..."', body)
+
     def test_abandoned_ledger_offers_same_issue_restart(self):
         record = contribution(phase="abandoned", activity="idle", revision=8,
                               terminal_reason="restart requested")

@@ -19,6 +19,7 @@ TEMPLATES = {
     "block": '/upstreaming block revision=N reason="..."',
     "abandon": '/upstreaming abandon revision=N reason="..."',
     "restart": '/upstreaming restart revision=N reason="..."',
+    "refresh": '/upstreaming refresh revision=N reason="..."',
     "resume": '/upstreaming resume revision=N reason="..."',
 }
 

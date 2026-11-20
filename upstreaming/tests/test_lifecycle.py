@@ -114,6 +114,42 @@ class TestPauseParkResume(unittest.TestCase):
         self.assertFalse(apply(rec, f"/upstreaming resume contribution={CID} revision=0 reason=r").accepted)
 
 
+class TestDossierRefresh(unittest.TestCase):
+    def test_refresh_preserves_existing_pr_and_queues_investigation(self):
+        rec = contribution(revision=7, dossier_evidence_id="dossier-old",
+                           scope_coverage_complete=True,
+                           scope_paths=[".github/workflows/wheels.yml"],
+                           proposal_artifact={"outcome": "published"},
+                           last_ci_evidence_id="ci-old", clean_head_sha=SHA_A,
+                           processed_review_comment_ids=[44],
+                           pending_feedback_evidence_ids=["review-old"])
+        out = apply(rec, f'/upstreaming refresh contribution={CID} revision=7 reason="new dependency policy"')
+        self.assertTrue(out.accepted)
+        refreshed = out.record
+        self.assertEqual((refreshed["phase"], refreshed["activity"], refreshed["revision"]),
+                         ("queued", "idle", 8))
+        self.assertEqual(refreshed["fork"], rec["fork"])
+        self.assertEqual(refreshed["processed_review_comment_ids"], [44])
+        self.assertEqual(refreshed["pending_feedback_evidence_ids"], ["review-old"])
+        self.assertIsNone(refreshed["dossier_evidence_id"])
+        self.assertIsNone(refreshed["scope_paths"])
+        self.assertIsNone(refreshed["last_ci_evidence_id"])
+        self.assertEqual(refreshed["refresh"]["head_sha"], SHA_A)
+        self.assertEqual(refreshed["refresh"]["pr_number"], 1)
+        self.assertEqual(out.event["kind"], "command:refresh")
+
+    def test_refresh_requires_existing_pr_and_quiescence(self):
+        cases = [contribution(phase="queued"),
+                 contribution(fork=dict(contribution()["fork"], pr_number=None)),
+                 contribution(active_work={"x": 1}),
+                 contribution(active_operation_id="op-1"),
+                 contribution(pending_publication={"x": 1})]
+        for rec in cases:
+            with self.subTest(record=rec):
+                self.assertFalse(apply(rec,
+                    f"/upstreaming refresh contribution={CID} revision=0 reason=r").accepted)
+
+
 class TestRestartGeneration(unittest.TestCase):
     def test_abandoned_contribution_restarts_on_same_identity(self):
         rec = contribution(

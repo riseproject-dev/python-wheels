@@ -49,6 +49,9 @@ GRAMMAR: dict[str, dict[str, str]] = {
     # Start a new lifecycle generation on the same tracking issue. This is
     # deliberately allowed only after abandon and requires an exact revision.
     "restart": {"contribution": _ID, "revision": _INT, "reason": _REASON},
+    # Re-run investigation on an existing development PR, then require a new
+    # worker pass with the refreshed dossier and current prompts.
+    "refresh": {"contribution": _ID, "revision": _INT, "reason": _REASON},
     "resolve-operation": {
         "operation": _ID,
         "disposition": r"confirmed|not-launched|failed",

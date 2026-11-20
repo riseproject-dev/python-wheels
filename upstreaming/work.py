@@ -66,6 +66,9 @@ def payload(request: dict, record: dict, *, control_repo_id: str, allowed_paths:
     issue = (record.get("active_work") or {}).get("tracking_issue")
     if issue is not None:
         context["tracking_issue"] = issue
+    if task == "investigation" and record.get("refresh"):
+        context["refresh"] = dict(record["refresh"])
+        context["existing_fork"] = dict(record.get("fork") or {})
     fork = record.get("fork") or {}
     up = record["upstream"]
     p = {

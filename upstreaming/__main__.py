@@ -202,7 +202,7 @@ def cmd_plan(args) -> int:
             if evidence:
                 item = {key: evidence.get(key) for key in
                         ("evidence_id", "kind", "summary", "limitations")}
-                if evidence.get("kind") == "human_relay":
+                if evidence.get("kind") in ("human_relay", "dossier"):
                     item["data"] = evidence.get("data")
                 reason_evidence.append(item)
         nodes.append(work.node(req, rec, control_repo_id=args.control_repo_id,

@@ -264,6 +264,7 @@ work that moved meanwhile:
 
 ```text
 /upstreaming resume revision=1 reason="quota back"
+/upstreaming refresh revision=7 reason="Re-investigate the existing PR with current policy."
 /upstreaming restart revision=8 reason="Restart from a fresh investigation."
 /upstreaming force-develop revision=2 class=configuration_integration paths=".github/workflows/*" reason="Concrete override scope."
 /upstreaming approve-handoff revision=3 head=<clean head sha>
@@ -303,6 +304,14 @@ None of these perform remote writes.
   current-revision `force-develop` instead records a bounded override scope and
   proceeds directly to automatic provisioning. Duplicates, timers and
   prerequisite changes never resume a parked contribution.
+- **Refresh an existing development PR** with an exact-revision `refresh`
+  command. It preserves the fork, head, PR and review cursors, invalidates old
+  dossier-derived scope and readiness, and queues a complete new investigation
+  using the latest prompt. A verified `develop` dossier replaces the scope,
+  returns to `development/fix_needed`, and requires a fresh worker pass whose
+  immutable context includes the new dossier plus pending review/CI evidence.
+  A verified `park` decision parks normally. Refresh rejects while Work or a
+  writer/publication operation is active.
 - **Restart after abandon** requires the exact current revision and fails while
   Work, a writer operation or publication is active. It preserves the same
   tracking issue, contribution identity, append-only event ledger and old-run

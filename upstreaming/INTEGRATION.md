@@ -32,6 +32,12 @@ release-path rehearsal still need live evidence.
   overridden with an authorized stale-proof `force-develop` command.
 - Human approval starts at upstream handoff. No automatic upstream PR creation or
   production package publication is authorized.
+- An authorized exact-revision `refresh` command re-investigates an existing
+  development PR without destructive cleanup. It preserves the verified fork,
+  exact head, PR and review cursors; replaces dossier-derived scope with a fresh
+  verified dossier from the latest investigator prompt; then requires a new
+  worker pass using the latest worker prompt, refreshed dossier data and pending
+  review/CI evidence.
 - An authorized exact-revision `restart` command may reactivate only an abandoned
   contribution on the same tracking issue. It starts a new lifecycle generation
   and queued investigation after clearing mutable dossier, scope, fork/PR, CI,
