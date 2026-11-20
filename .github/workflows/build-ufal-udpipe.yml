@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# ufal.udpipe has no upstream GitHub Actions wheel-building workflow to mirror
-# (its real release infra, releases/release-udpipe.sh, shells out to a private
-# institutional cross-compile farm). The one public recipe is
-# releases/pypi/gen.sh, which this workflow replays step for step: amalgamate
-# the C++ sources, run SWIG, stamp the version and build the sdist (see
-# CLAUDE.md gotcha 668).
+# ufal.udpipe has no upstream GitHub Actions wheel-building workflow to mirror.
+# Its PyPI sdist, produced by releases/pypi/gen.sh, contains the amalgamated C++
+# source and generated SWIG wrapper needed for the wheel build.
 name: Build ufal.udpipe wheels (riscv64)
 
 on:
@@ -49,122 +46,24 @@ jobs:
       package: ufal-udpipe
       version: ${{ inputs.version }}
 
-  python_sdist:
+  build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    # The amalgamated C++ source and the SWIG wrapper are architecture-
-    # independent; build them once on x86 instead of burning a scarce riscv
-    # runner (CLAUDE.md gotcha 4). UDPipe's own build-system bootstrap
-    # (src/Makefile.builtem) also hard-errors on any uname -m other than
-    # x86_64/i386/i686, so this step could not run on the riscv64 runner.
-    name: Build ufal.udpipe ${{ matrix.version }} sdist
-    runs-on: ubuntu-latest
-    env:
-      UDPIPE_PACKAGE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Derive the UDPipe tag
-        # ufal.udpipe's PyPI version is UDPipe's own X.Y.Z plus a trailing
-        # per-release binding-revision digit with no tag of its own (1.2.0
-        # shipped as .1/.2/.3, all from tag v1.2.0; see CLAUDE.md gotcha 668).
-        run: echo "UDPIPE_TAG=v$(echo "$UDPIPE_PACKAGE_VERSION" | sed -E 's/\.[0-9]+$//')" >> "$GITHUB_ENV"
-
-      - name: Checkout UDPipe ${{ env.UDPIPE_TAG }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ufal/udpipe
-          ref: ${{ env.UDPIPE_TAG }}
-          persist-credentials: false
-
-      - name: Install swig
-        # apt's swig on ubuntu-latest (4.2.0) predates CPython 3.14's
-        # PyHeapTypeObject layout change (the `ht_token` field, and the
-        # trailing cache struct's `init` field) and emits a `-builtin`-mode
-        # heap-type initializer two fields short for 3.14 - every bound
-        # class's closing `};` then mismatches onto a later `void*` member
-        # ("cannot convert '<brace-enclosed initializer list>' to 'void*'"),
-        # identically on cp314 and cp314t (same public struct layout; not a
-        # free-threading problem - see CLAUDE.md gotcha 698). Pin a PyPI
-        # `swig` wheel new enough to know about 3.14 instead, the same way
-        # build-cgal.yml and build-lalsuite.yml already pin theirs (for the
-        # opposite kind of drift).
-        run: |
-          pipx install "swig==4.4.1"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Generate sdist
-        # Mirrors releases/pypi/gen.sh, except the README is a short static
-        # blurb instead of running README.sh (which renders the manual
-        # through the t2t_docsys toolchain just for the long_description
-        # text - unrelated to whether the package builds or imports).
-        run: |
-          set -euo pipefail
-          dir=ufal.udpipe
-          rm -rf "$dir"
-          mkdir -p "$dir/tests/data"
-          cp releases/pypi/Changes LICENSE releases/pypi/MANIFEST.in "$dir"
-          cp -a bindings/python/examples "$dir"
-          cp -a releases/pypi/tests/*.py "$dir/tests"
-          cp releases/test_data/test.model "$dir/tests/data"
-          echo 'ufal.udpipe: Python bindings to the UDPipe library <https://ufal.mff.cuni.cz/udpipe>.' > "$dir/README"
-          make -C src_lib_only udpipe.cpp
-          make -C bindings/python clean
-          make -C bindings/python udpipe_python.cpp
-          cp -a bindings/python/ufal "$dir"
-          cp src_lib_only/udpipe.cpp src_lib_only/udpipe.h "$dir/ufal/udpipe"
-          cp bindings/python/udpipe_python.cpp "$dir/ufal/udpipe"
-          sed "s/^\\( *version *= *'\\)[^']*'/\\1${UDPIPE_PACKAGE_VERSION}'/" releases/pypi/setup.py > "$dir/setup.py"
-          sed -i "s/^# *__version__ *=.*$/__version__ = \"${UDPIPE_PACKAGE_VERSION}\"/" "$dir/ufal/udpipe/__init__.py"
-          pipx run build --sdist "$dir"
-
-      - name: Upload sdist artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ufal.udpipe-${{ env.UDPIPE_PACKAGE_VERSION }}-sdist
-          path: ufal.udpipe/dist/*.tar.gz
-          if-no-files-found: error
-
-  build_wheels:
-    needs: [setup, python_sdist]
-    if: needs.setup.outputs.versions != '[]'
     name: Build ufal.udpipe ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-    runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
-    env:
-      UDPIPE_PACKAGE_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Download sdist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: ufal.udpipe-${{ env.UDPIPE_PACKAGE_VERSION }}-sdist
-          path: dist/
-
-      - id: sdist_path
-        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
-        with:
-          package-dir: ${{ steps.sdist_path.outputs.path }}
-        env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_COMMAND: python {project}/tests/test_import.py && python {project}/tests/test_udpipe.py
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ufal.udpipe-${{ env.UDPIPE_PACKAGE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
-          path: ./wheelhouse/*.whl
-          if-no-files-found: error
+    uses: $/.github/workflows/_build-cibuildwheel.yml
+    with:
+      package: ufal.udpipe
+      version: ${{ matrix.version }}
+      # The PyPI sdist contains the generated SWIG wrapper and amalgamated C++ source.
+      source: pypi-sdist
+      artifact-tag: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-build: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+      cibw-test-command: python {project}/tests/test_import.py && python {project}/tests/test_udpipe.py
 
   publish:
     name: Publish ufal.udpipe ${{ matrix.version }}
