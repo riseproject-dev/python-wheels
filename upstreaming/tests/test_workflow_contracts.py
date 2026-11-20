@@ -105,6 +105,17 @@ class TestWorkflowContracts(unittest.TestCase):
                                                    "permission-contents", "permission-actions"})
             self.assertIn("upstreaming-controller.yml", str(job))
 
+    def test_controller_posts_append_only_app_authored_issue_ledger(self):
+        controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
+        steps = controller["jobs"]["reconcile"]["steps"]
+        token = next(step for step in steps if step.get("id") == "ledger-token")
+        self.assertEqual(token["with"]["owner"], "riseproject-dev")
+        self.assertEqual(token["with"]["repositories"], "python-wheels")
+        self.assertEqual(token["with"]["permission-issues"], "write")
+        ledger = next(step for step in steps if step.get("name") == "Append concise lifecycle entries to tracking issues")
+        self.assertEqual(ledger["env"]["GH_TOKEN"], "${{ steps.ledger-token.outputs.token }}")
+        self.assertIn("upstreaming.status_ledger", ledger["run"])
+
     def test_controller_reconciles_current_main_not_stale_event_sha(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         for job_name in ("observe", "reconcile"):
