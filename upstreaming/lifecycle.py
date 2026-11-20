@@ -451,6 +451,7 @@ def new_contribution(*, contribution_id: str, project_id: str, issue: dict, upst
         "processed_publications": [],
         "processed_review_ids": [],
         "processed_review_comment_ids": [],
+        "processed_pr_conversation_comment_ids": [],
         "active_work": None,
         "dossier_evidence_id": None,
         "debug_commits": [],

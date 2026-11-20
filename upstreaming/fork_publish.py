@@ -45,8 +45,8 @@ from .common import DEV_REF, FORK_ORG
 
 MAX_MBOX_BYTES = 4 * 1024 * 1024
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-APP_COMMIT_NAME = "riseproject-dev[bot]"
-APP_COMMIT_EMAIL = "330740410+riseproject-dev[bot]@users.noreply.github.com"
+APP_COMMIT_NAME = "riseproject-upstreaming[bot]"
+APP_COMMIT_EMAIL = "359135081+riseproject-upstreaming[bot]@users.noreply.github.com"
 
 
 class PublishRejected(RuntimeError):

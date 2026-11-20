@@ -206,11 +206,12 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    against the frozen base and verifies readback. The pull-request event starts
    fork CI on `ubuntu-24.04-riscv`; the controller records CI evidence for the
    exact head and asks for repairs while it fails. Controller observation also
-   polls the recorded development PR for new review bodies and inline comments
-   from authorized reviewers. Feedback bound to the current head is persisted as
-   `human_relay` evidence, processed once, and automatically starts a revisioned
-   repair with the exact reviewer, URL, path, line and text in task context. Passing means every required riscv64 job executed
-   natively and a riscv64 wheel artifact was uploaded.
+   polls the recorded development PR for formal reviews, inline review comments
+   and PR conversation comments from authorized reviewers. Feedback bound to the
+   current head is persisted as `human_relay` evidence, processed once, and
+   automatically starts a revisioned repair with the exact reviewer, URL, path,
+   line and text in task context. Passing means every required riscv64 job and
+   wheel artifact satisfy the project-specific frozen topology contract.
 5. **Upstream handoff.** When the exact development head passes its frozen CI
    contract and has no debug commits, observation automatically records it as the
    clean head and enters `handoff`. Human involvement begins there: a human
@@ -227,6 +228,9 @@ durable lifecycle event. Each entry shows revision, phase/activity, action,
 outcome and controller workflow link, followed by a folded **Possible next
 commands** section with the current revision/head prefilled. Entries are never
 edited, so user commands and pipeline history remain interleaved chronologically.
+A rejected command receives a separate App-authored reply that quotes the exact
+command, pings its author, explains the rejection and shows a corrected form when
+one is known.
 
 Post a command as its own comment on the request issue. The issue says which
 contribution it applies to, so `contribution=` is optional (if given, it must
@@ -307,8 +311,9 @@ None of these perform remote writes.
   the writer inside `upstreaming-state/`.
 - **Fork updates** are reconstructed in a fresh Git with no
   user/system config, hooks or credential helpers. The trusted publisher rewrites
-  every proposed commit so both author and committer are the `riseproject-dev`
-  App bot (`riseproject-dev[bot]`); model-side identity is never authoritative. They are checked
+  every proposed commit so both author and committer are the destination
+  `riseproject-upstreaming` App bot (`riseproject-upstreaming[bot]`); model-side
+  identity is never authoritative. They are checked
   against the trusted base for the approved paths, symlinks, submodules,
   new executables, size limits, case collisions, history shape, and
   forbidden workflow content (`pull_request_target`, OIDC, new secrets,

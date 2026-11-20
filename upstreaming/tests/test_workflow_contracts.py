@@ -126,6 +126,39 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertEqual(ledger["env"]["GH_TOKEN"], "${{ steps.ledger-token.outputs.token }}")
         self.assertIn("upstreaming.status_ledger", ledger["run"])
 
+    def test_destination_token_failures_become_durable_retryable_outcomes(self):
+        worker = source("upstreaming-worker")
+        steps = worker["jobs"]["publish"]["steps"]
+        token = next(step for step in steps if step.get("id") == "fork-token")
+        self.assertTrue(token["continue-on-error"])
+        record = next(step for step in steps if step.get("name") == "Record destination-token failures for controller retry")
+        self.assertIn("steps.fork-token.outcome != 'success'", record["if"])
+        self.assertIn('status:"infra_error"', record["run"])
+        retry = yaml.safe_load((WF / "upstreaming-publish-retry.yml").read_text())
+        retry_steps = retry["jobs"]["publish"]["steps"]
+        retry_token = next(step for step in retry_steps if step.get("id") == "fork-token")
+        self.assertTrue(retry_token["continue-on-error"])
+        self.assertTrue(any('status:"infra_error"' in step.get("run", "") for step in retry_steps))
+
+    def test_destination_tokens_use_only_destination_app_credentials(self):
+        paths = [WF / "upstreaming-provision.yml", WF / "upstreaming-dev-pr.yml",
+                 WF / "upstreaming-publish-retry.yml", WF / "upstreaming-worker.md"]
+        for path in paths:
+            text = path.read_text()
+            blocks = re.findall(r"client-id: .*?\n\s+private-key: .*?\n\s+owner: riseproject-upstreaming", text)
+            self.assertTrue(blocks, path.name)
+            for block in blocks:
+                self.assertIn("RISEPROJECT_UPSTREAMING_APP_CLIENT_ID", block)
+                self.assertIn("RISEPROJECT_UPSTREAMING_APP_PRIVATE_KEY", block)
+                self.assertNotIn("vars.RISEPROJECT_APP_CLIENT_ID", block)
+
+    def test_controller_explains_rejected_commands_with_issue_app_token(self):
+        controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
+        steps = controller["jobs"]["reconcile"]["steps"]
+        feedback = next(step for step in steps if step.get("name") == "Explain rejected commands on their tracking issues")
+        self.assertEqual(feedback["env"]["GH_TOKEN"], "${{ steps.ledger-token.outputs.token }}")
+        self.assertIn("upstreaming.command_feedback", feedback["run"])
+
     def test_controller_reconciles_current_main_not_stale_event_sha(self):
         controller = yaml.safe_load((WF / "upstreaming-controller.yml").read_text())
         for job_name in ("observe", "reconcile"):

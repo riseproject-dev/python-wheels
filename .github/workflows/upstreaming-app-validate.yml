@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+name: Upstreaming App boundary validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  control-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: token
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+          owner: riseproject-dev
+          repositories: python-wheels
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+      - name: Verify control token is repository-scoped
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api user --jq .login)" = 'riseproject-dev[bot]'
+          test "$(gh api installation/repositories --jq '.total_count')" = 1
+          test "$(gh api installation/repositories --jq '.repositories[0].full_name')" = riseproject-dev/python-wheels
+
+  destination-creation-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: token
+        env:
+          INPUT_PERMISSION-REPOSITORY-CREATION: write
+        with:
+          client-id: ${{ vars.RISEPROJECT_UPSTREAMING_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_UPSTREAMING_APP_PRIVATE_KEY }}
+          owner: riseproject-upstreaming
+          permission-contents: read
+      - name: Verify destination identity and installation boundary
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api user --jq .login)" = 'riseproject-upstreaming[bot]'
+          gh api installation/repositories --paginate --jq '.repositories[].full_name' > repositories.txt
+          test -s repositories.txt
+          ! grep -v '^riseproject-upstreaming/' repositories.txt
+
+  destination-fork-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: token
+        with:
+          client-id: ${{ vars.RISEPROJECT_UPSTREAMING_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_UPSTREAMING_APP_PRIVATE_KEY }}
+          owner: riseproject-upstreaming
+          repositories: python-isal
+          permission-actions: write
+          permission-administration: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Verify one-fork token identity and scope
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api user --jq .login)" = 'riseproject-upstreaming[bot]'
+          test "$(gh api installation/repositories --jq '.total_count')" = 1
+          test "$(gh api installation/repositories --jq '.repositories[0].full_name')" = riseproject-upstreaming/python-isal
+          test "$(gh api repos/riseproject-upstreaming/python-isal --jq .id)" -gt 0

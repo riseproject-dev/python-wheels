@@ -52,15 +52,23 @@ the fork identity; success is evidence of an unexpectedly broad upstream trust
 policy and must be reported. This does not relax controls on GitHub repository
 mutation permissions.
 
-The writer App must be installed on `riseproject-upstreaming` and have the
-repository-creation permission plus Administration, Contents, Workflows, Actions
-and Pull requests write permissions needed by the trusted setup and publisher
-jobs. Administration is requested only on the token narrowed to the one verified
-fork; it configures and verifies Actions defaults before branch creation.
+Two private Apps enforce the organization boundary:
 
-The App private key is an organization secret used elsewhere in this repository,
-so an environment would not provide exclusive secret isolation. The exact-token,
-operation and expected-head gates are the relevant writer boundaries.
+- `riseproject-dev` is installed only on `riseproject-dev/python-wheels`. Its
+  maximum repository permissions are Actions, Contents and Issues write. Tokens
+  use `RISEPROJECT_APP_CLIENT_ID` and `RISEPROJECT_APP_PRIVATE_KEY` and request
+  only the subset needed for one control operation.
+- `riseproject-upstreaming` is installed only on the disposable destination
+  organization. It has repository-creation plus Administration, Contents,
+  Workflows, Actions and Pull requests write permissions. Tokens use
+  `RISEPROJECT_UPSTREAMING_APP_CLIENT_ID` and
+  `RISEPROJECT_UPSTREAMING_APP_PRIVATE_KEY`.
+
+Destination Administration is requested only on a token narrowed to one verified
+fork; it configures and verifies Actions defaults before branch creation. The
+creation token is separate and cannot be reused by the model. Neither App private
+key is exposed to an agent job. Exact-token, operation and expected-head gates
+remain the writer boundaries.
 
 ## Human gate at upstream handoff
 

@@ -214,9 +214,19 @@ class TestDevelopmentReviewFeedback(unittest.TestCase):
                          "user": {"id": OWNER["id"], "login": OWNER["login"]}},
                         {"id": 11, "state": "CHANGES_REQUESTED", "body": "untrusted",
                          "commit_id": SHA_A, "user": {"id": 999, "login": "other"}}]
+            if "/issues/" in path:
+                return [{"id": 30, "body": "The Test workflow is missing", "created_at": NOW,
+                         "html_url": "https://github.com/o/r/pull/1#issuecomment-30",
+                         "user": {"id": OWNER["id"], "login": OWNER["login"]}},
+                        {"id": 31, "body": "old feedback", "created_at": "2020-01-01T00:00:00Z",
+                         "user": {"id": OWNER["id"], "login": OWNER["login"]}}]
             return [{"id": 20, "body": "Use manylinux_2_39_riscv64", "html_url": "https://github.com/o/r/pull/1#c",
                      "commit_id": SHA_A, "pull_request_review_id": 10, "path": "build.yml", "line": 33,
                      "user": {"id": OWNER["id"], "login": OWNER["login"]}}]
+
+        def get(self, path):
+            date = "2030-01-01T00:00:00Z" if path.endswith(SHA_B) else "2026-01-01T00:00:00Z"
+            return {"commit": {"committer": {"date": date}}}
 
     def test_only_new_authorized_current_head_review_feedback_is_returned(self):
         rec = contribution(phase="development", activity="waiting_ci")
@@ -224,11 +234,15 @@ class TestDevelopmentReviewFeedback(unittest.TestCase):
         feedback = collect.development_review_feedback(self.Api(), rec, [OWNER["id"]])
         self.assertEqual(feedback["review_ids"], [10])
         self.assertEqual(feedback["comment_ids"], [20])
+        self.assertEqual(feedback["conversation_comment_ids"], [30])
         self.assertEqual(feedback["comments"][0]["path"], "build.yml")
+        self.assertEqual(feedback["conversation_comments"][0]["commit_id"], SHA_A)
         rec["processed_review_ids"] = [10]; rec["processed_review_comment_ids"] = [20]
+        rec["processed_pr_conversation_comment_ids"] = [30]
         self.assertIsNone(collect.development_review_feedback(self.Api(), rec, [OWNER["id"]]))
         rec["fork"]["head_sha"] = SHA_B
         rec["processed_review_ids"] = []; rec["processed_review_comment_ids"] = []
+        rec["processed_pr_conversation_comment_ids"] = []
         self.assertIsNone(collect.development_review_feedback(self.Api(), rec, [OWNER["id"]]))
 
 
