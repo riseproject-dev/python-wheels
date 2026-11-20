@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from upstreaming import (capacity, ci_evidence, commands, controller, recovery,
+from upstreaming import (capacity, ci_evidence, collect, commands, controller, recovery,
                                     release, triggers)
 from upstreaming.tests.helpers import (NOW, OWNER, SHA_A, SHA_B, comment, contribution,
                                                   policy)
@@ -198,6 +198,33 @@ class TestRelease(unittest.TestCase):
         rel = {"0.9": [pyfile("a")], "1.0rc1": [pyfile("b")], "1.0": [pyfile("c", yanked=True)],
                "1.1": [pyfile("d")]}
         self.assertEqual(release.select_release(rel, minimum="0.9"), ["0.9", "1.1"])
+
+
+class TestDevelopmentReviewFeedback(unittest.TestCase):
+    class Api:
+        def paginate(self, path, **kw):
+            if path.endswith("/reviews?per_page=100"):
+                return [{"id": 10, "state": "CHANGES_REQUESTED", "body": "Please follow the existing QEMU architecture list.",
+                         "html_url": "https://github.com/o/r/pull/1#review", "commit_id": SHA_A,
+                         "user": {"id": OWNER["id"], "login": OWNER["login"]}},
+                        {"id": 11, "state": "CHANGES_REQUESTED", "body": "untrusted",
+                         "commit_id": SHA_A, "user": {"id": 999, "login": "other"}}]
+            return [{"id": 20, "body": "Use manylinux_2_39_riscv64", "html_url": "https://github.com/o/r/pull/1#c",
+                     "commit_id": SHA_A, "pull_request_review_id": 10, "path": "build.yml", "line": 33,
+                     "user": {"id": OWNER["id"], "login": OWNER["login"]}}]
+
+    def test_only_new_authorized_current_head_review_feedback_is_returned(self):
+        rec = contribution(phase="development", activity="waiting_ci")
+        rec["fork"] = dict(rec["fork"], head_sha=SHA_A, pr_number=1)
+        feedback = collect.development_review_feedback(self.Api(), rec, [OWNER["id"]])
+        self.assertEqual(feedback["review_ids"], [10])
+        self.assertEqual(feedback["comment_ids"], [20])
+        self.assertEqual(feedback["comments"][0]["path"], "build.yml")
+        rec["processed_review_ids"] = [10]; rec["processed_review_comment_ids"] = [20]
+        self.assertIsNone(collect.development_review_feedback(self.Api(), rec, [OWNER["id"]]))
+        rec["fork"]["head_sha"] = SHA_B
+        rec["processed_review_ids"] = []; rec["processed_review_comment_ids"] = []
+        self.assertIsNone(collect.development_review_feedback(self.Api(), rec, [OWNER["id"]]))
 
 
 class TestTriggers(unittest.TestCase):

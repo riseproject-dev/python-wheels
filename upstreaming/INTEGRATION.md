@@ -161,9 +161,13 @@ publisher syntax is therefore not patched or treated as a reason to disable buil
 CI; publication should fail for the fork identity. Repository-mutating GitHub
 permissions and `pull_request_target` remain unsafe because they can mutate the
 fork itself. An unsafe workflow already in `disabled_fork` or another non-active
-state needs no redundant disable API call. Repair Work now carries bounded summaries for its durable reason
-evidence, so exact operator review or CI feedback reaches the worker rather than
-being represented only by an opaque ID.
+state needs no redundant disable API call. Repair Work now carries bounded summaries for its durable reason evidence, so
+exact operator review or CI feedback reaches the worker rather than being
+represented only by an opaque ID. Controller observation polls the recorded
+same-fork PR for current-head reviews and inline comments from configured
+authority actor IDs. New feedback is persisted once as `human_relay` evidence,
+records processed review/comment IDs, bumps the revision and automatically
+requests `development_repair`.
 
 Previously merged implementation:
 

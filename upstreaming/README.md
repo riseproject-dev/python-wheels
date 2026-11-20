@@ -205,8 +205,11 @@ pilot details are kept in lifecycle state and diagnostic artifacts, not here.
    `dev_pr_create` operation; the trusted workflow opens or discovers `riscv64`
    against the frozen base and verifies readback. The pull-request event starts
    fork CI on `ubuntu-24.04-riscv`; the controller records CI evidence for the
-   exact head and asks for repairs
-   while it fails. Passing means every required riscv64 job executed
+   exact head and asks for repairs while it fails. Controller observation also
+   polls the recorded development PR for new review bodies and inline comments
+   from authorized reviewers. Feedback bound to the current head is persisted as
+   `human_relay` evidence, processed once, and automatically starts a revisioned
+   repair with the exact reviewer, URL, path, line and text in task context. Passing means every required riscv64 job executed
    natively and a riscv64 wheel artifact was uploaded.
 5. **Upstream handoff.** When the exact development head passes its frozen CI
    contract and has no debug commits, observation automatically records it as the
