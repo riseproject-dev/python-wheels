@@ -185,7 +185,7 @@ jobs:
               --proposal ../in/proposal.json --out ../in/preflight.json
           jq -r '"fork_name=" + .fork_name, "publish=" + (.publish|tostring)' ../in/preflight.json >> "$GITHUB_OUTPUT"
           if [ "$(jq -r .publish ../in/preflight.json)" != true ]; then
-            jq '{status:"rejected", failure_class:(.failure_class // "validation"), reason, stage:"preflight"}' \
+            jq '{status:(.status // "rejected"), failure_class, reason, stage:"preflight"}' \
               ../in/preflight.json > ../in/outcome.json
           fi
       - name: Mint a token for exactly this fork
