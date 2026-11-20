@@ -16,7 +16,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from upstreaming import artifact, capacity, controller, fork_publish, publisher, queue_result, reconcile, schemas, work
+from upstreaming import (__main__ as cli, artifact, capacity, controller, fork_publish,
+                         publisher, queue_result, reconcile, schemas, work)
 from upstreaming.tests.helpers import commit_files, contribution, git, init_repo, policy
 
 WF = ".github/workflows/upstreaming-worker.lock.yml"
@@ -264,6 +265,60 @@ class TestPublicationRetry(unittest.TestCase):
         updated, _ = reconcile.apply_publication(
             self.rec, {"status": "published", "operation": op}, now=self.now.isoformat())
         self.assertEqual(updated["scope_paths"], ["build.yml", "test.yml"])
+
+
+class TestDispatcherPayloadBudget(unittest.TestCase):
+    def test_large_dossier_is_projected_without_losing_worker_contract(self):
+        paths = [".github/workflows/wheels.yml", ".github/workflows/test.yml"]
+        evidence = {"evidence_id": "dossier-c-r10", "kind": "dossier",
+                    "summary": "summary " * 1000, "limitations": ["limit " * 500],
+                    "data": {"proposal": {"decision": "develop",
+                                            "admission_class": "configuration_integration",
+                                            "allowed_paths": paths,
+                                            "architecture_precedent": "native " * 2000,
+                                            "risks": "risk " * 2000,
+                                            "path_coverage": [
+                                                {"area": "build", "paths": [paths[0]],
+                                                 "assessment": "build details " * 1000},
+                                                {"area": "test", "paths": [paths[1]],
+                                                 "assessment": "test details " * 1000}]},
+                             "dependency_graph": {"assessment": "dependency " * 3000},
+                             "research": {"upstream_issues": {"findings": "x" * 100000}}}}
+        item = cli._reason_item(evidence)
+        encoded = json.dumps(item, separators=(",", ":"), ensure_ascii=False).encode()
+        self.assertLess(len(encoded), 8000)
+        self.assertEqual(item["evidence_id"], "dossier-c-r10")
+        self.assertEqual(item["data"]["proposal"]["allowed_paths"], paths)
+        self.assertEqual([row["area"] for row in item["data"]["proposal"]["path_coverage"]],
+                         ["build", "test"])
+        self.assertIn("dependency", item["data"]["dependency_graph"]["assessment"])
+        self.assertNotIn("research", item["data"])
+
+    def test_complete_dossier_reference_is_immutable_and_digest_bound(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "upstreaming-state/evidence/dossier-c-r10.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"kind":"dossier","evidence_id":"dossier-c-r10","data":{"full":"research"}}\n')
+            reference = cli._dossier_reference(root, "dossier-c-r10", "a" * 40)
+        self.assertEqual(reference["path"], "upstreaming-state/evidence/dossier-c-r10.json")
+        self.assertEqual(reference["ref"], "a" * 40)
+        self.assertEqual(reference["repository"], "riseproject-dev/python-wheels")
+        self.assertIn("/" + "a" * 40 + "/upstreaming-state/evidence/", reference["url"])
+        self.assertEqual(len(reference["sha256"]), 64)
+
+    def test_feedback_projection_preserves_response_ids_and_exact_paths(self):
+        evidence = {"evidence_id": "review-1", "kind": "human_relay", "summary": "s" * 9000,
+                    "limitations": [], "data": {"reviews": [], "review_ids": [],
+                    "comments": [{"id": 42, "body": "change " * 3000, "path": "test.yml",
+                                  "line": 7, "url": "https://example.test/comment"}],
+                    "comment_ids": [42], "conversation_comments": [],
+                    "conversation_comment_ids": []}}
+        item = cli._reason_item(evidence)
+        self.assertEqual(item["data"]["comment_ids"], [42])
+        self.assertEqual(item["data"]["comments"][0]["path"], "test.yml")
+        self.assertEqual(item["data"]["comments"][0]["line"], 7)
+        self.assertLessEqual(len(item["data"]["comments"][0]["body"]), 1200)
 
 
 class TestDispatchRecovery(unittest.TestCase):

@@ -37,3 +37,6 @@
 - Corrected paused-feedback ledger wording so actionable feedback remains visibly pending without claiming repair Work was requested while pause prevents allocation.
 - Changed fast command receipt reactions from `+1` to `eyes` and added an idempotent post-state-commit `+1` only for commands accepted and durably executed by serialized reconciliation.
 - Made pause the primary visible status in lifecycle ledgers and the public status page while retaining the underlying activity as pending context; paused ledgers no longer suggest another pause command.
+- Diagnosed dispatcher failures as queue payload-limit violations from embedding complete dossier research in Work, then added a bounded projection preserving IDs, exact paths, response contracts, path coverage, dependency findings and risks plus a pre-staging byte-budget guard.
+- Kept the complete dossier as committed evidence and added an immutable exact-ref path/raw URL/SHA-256 reference; trusted worker setup now fetches and verifies it into `/tmp/gh-aw/agent/dossier.json` for mandatory worker reading while the queue carries only a bounded projection.
+- Restored worker-facing wording that names the complete authoritative record as “the latest verified dossier,” while describing bounded `data` only as its queue-safe index.

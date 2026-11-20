@@ -18,17 +18,19 @@ All subcommands are local or read-only. None performs a remote write:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import capacity, collect, commands, controller, state, triggers
-from .common import STATE_ROOT, load_policy
+from .common import CONTROL_REPO, STATE_ROOT, load_policy
 
 
 def _root() -> Path:
-    import subprocess
     return Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
                                text=True, check=True).stdout.strip())
 
@@ -172,6 +174,71 @@ def _pressure(policy: dict) -> capacity.Pressure:
         return capacity.Pressure(ok=False, reason=f"usage unavailable: {e}")
 
 
+def _short(value, limit: int):
+    if not isinstance(value, str):
+        return value
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _feedback_data(data: dict) -> dict:
+    result = {}
+    for key in ("reviews", "comments", "conversation_comments"):
+        items = []
+        for original in (data.get(key) or []):
+            item = {name: original.get(name) for name in
+                    ("id", "url", "reviewer", "commit_id", "review_id", "path", "line", "created_at")
+                    if original.get(name) is not None}
+            item["body"] = _short(original.get("body") or "", 1200)
+            items.append(item)
+        result[key] = items
+    for key in ("review_ids", "comment_ids", "conversation_comment_ids"):
+        result[key] = list(data.get(key) or [])
+    return result
+
+
+def _dossier_data(data: dict) -> dict:
+    proposal = data.get("proposal") or {}
+    compact = {key: proposal.get(key) for key in
+               ("decision", "admission_class", "allowed_paths", "architecture_precedent",
+                "build_backend", "target_matrix", "fork_guards", "risks")
+               if proposal.get(key) is not None}
+    for key in ("architecture_precedent", "build_backend", "target_matrix", "fork_guards", "risks"):
+        if key in compact:
+            compact[key] = _short(compact[key], 800)
+    compact["path_coverage"] = [
+        {"area": item.get("area"), "paths": item.get("paths") or [],
+         "assessment": _short(item.get("assessment") or "", 600)}
+        for item in (proposal.get("path_coverage") or [])
+    ]
+    dependency = data.get("dependency_graph") or {}
+    return {"proposal": compact,
+            "dependency_graph": {"assessment": _short(dependency.get("assessment") or "", 1600)}}
+
+
+def _dossier_reference(root: Path, evidence_id: str, control_ref: str) -> dict:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", evidence_id) or "/" in evidence_id:
+        raise ValueError("invalid dossier evidence ID")
+    if not re.fullmatch(r"[0-9a-f]{40}", control_ref):
+        raise ValueError("invalid immutable control ref")
+    relative = Path(STATE_ROOT) / "evidence" / f"{evidence_id}.json"
+    path = root / relative
+    raw = path.read_bytes()
+    return {"repository": CONTROL_REPO, "ref": control_ref, "path": relative.as_posix(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "url": f"https://raw.githubusercontent.com/{CONTROL_REPO}/{control_ref}/{relative.as_posix()}"}
+
+
+def _reason_item(evidence: dict) -> dict:
+    item = {key: evidence.get(key) for key in ("evidence_id", "kind")}
+    item["summary"] = _short(evidence.get("summary") or "", 1600)
+    item["limitations"] = [_short(value, 500) for value in (evidence.get("limitations") or [])[:4]]
+    if evidence.get("kind") == "human_relay":
+        item["data"] = _feedback_data(evidence.get("data") or {})
+    elif evidence.get("kind") == "dossier":
+        item["data"] = _dossier_data(evidence.get("data") or {})
+    return item
+
+
 def cmd_plan(args) -> int:
     """Dispatcher preparation: turn the tasks the controller already requested
     (``active_work`` in committed state) into a gh-aw staged plan. Selection
@@ -181,7 +248,10 @@ def cmd_plan(args) -> int:
     means nothing to dispatch."""
     from . import work
     policy = load_policy()
-    _store, snap = _load(Path(args.root or _root()), policy)
+    root = Path(args.root or _root())
+    control_ref = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
+                                 text=True, check=True).stdout.strip()
+    _store, snap = _load(root, policy)
     contracts = {e["evidence_id"]: e for e in snap.evidence.values() if e.get("kind") == "target_contract"}
     nodes, selected = [], []
     for rec in sorted(snap.contributions.values(), key=lambda c: (c["active_work"] or {}).get("requested_at", "")
@@ -200,16 +270,19 @@ def cmd_plan(args) -> int:
         for evidence_id in req.get("reason_ids") or []:
             evidence = snap.evidence.get(evidence_id)
             if evidence:
-                item = {key: evidence.get(key) for key in
-                        ("evidence_id", "kind", "summary", "limitations")}
-                if evidence.get("kind") in ("human_relay", "dossier"):
-                    item["data"] = evidence.get("data")
+                item = _reason_item(evidence)
+                if evidence.get("kind") == "dossier":
+                    item["reference"] = _dossier_reference(root, evidence["evidence_id"], control_ref)
                 reason_evidence.append(item)
         nodes.append(work.node(req, rec, control_repo_id=args.control_repo_id,
                                allowed_paths=rec.get("scope_paths") or ctr.get("allowed_paths")
                                or [".github/workflows/*"],
                                context={"requested_at": rec["active_work"]["requested_at"],
                                         "reason_evidence": reason_evidence}))
+        payload_bytes = len(json.dumps(nodes[-1]["payload"], separators=(",", ":"),
+                                       ensure_ascii=False).encode())
+        if payload_bytes > 15_500:
+            raise ValueError(f"requested task payload exceeds safe queue budget: {payload_bytes} bytes")
         selected.append({"contribution": rec["contribution_id"], "task": req["task"],
                          "worker_profile": nodes[-1]["worker_profile"]})
     print(json.dumps({"selected": selected}, indent=2))
